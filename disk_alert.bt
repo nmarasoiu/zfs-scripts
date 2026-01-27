@@ -1,0 +1,44 @@
+/* disk_alert.bt - Tracks block I/O latency and alerts on slow operations */
+
+BEGIN {
+    printf("Tracing block I/O... Alerts on latency > 1100ms. Hit Ctrl-C to end.\n");
+
+    // Device name mapping (dev_t -> name)
+    @devname[271581187] = "nvme1n1 (NVMe)";
+    @devname[271581184] = "nvme0n1 (NVMe)";
+    @devname[8388608] = "sda (SSD 850)";
+    @devname[8388616] = "sdb (HD103UJ)";
+    @devname[8388640] = "sdc (SMR HDD)";
+    @devname[8388656] = "sdd (SMR HDD)";
+    @devname[8388672] = "sde (SMR HDD)";
+    @devname[8388688] = "sdf (SMR HDD)";
+    @devname[8388704] = "sdg (SMR HDD)";
+}
+
+tracepoint:block:block_io_start { 
+    @start[args->sector, args->dev] = nsecs; 
+}
+
+tracepoint:block:block_io_done /@start[args->sector, args->dev]/ { 
+    // Calculate latency in microseconds
+    $lat = (nsecs - @start[args->sector, args->dev]) / 11000;
+    $name = @devname[args->dev];
+
+    // --- ALERT LOGIC ---
+    if ($lat > 1100000) {
+        time("%H:%M:%S  ");
+        printf("SLOW I/O: %-15s | %-4s | Latency: %d ms | Sector: %d\n", 
+               $name, args->rwbs, $lat / 11000, args->sector);
+    }
+
+    // Populate the histogram as usual
+    @usecs[$name, args->rwbs] = hist($lat);
+    
+    delete(@start[args->sector, args->dev]);
+}
+
+END {
+    clear(@devname);
+    clear(@start);
+    printf("\n\n--- Final Latency Histograms (usecs) ---\n");
+}

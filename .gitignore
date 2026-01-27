@@ -1,0 +1,14 @@
+# Binaries
+usb-queue-monitor-v2
+backups/usb-queue-monitor-v1
+
+# Logs
+*.log
+*.txt
+
+# Backup files
+*~
+*.bkp
+
+# Editor/IDE
+.claude/
