@@ -4,7 +4,6 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"math/rand"
 	"os"
 	"os/signal"
 	"sort"
@@ -59,7 +58,7 @@ type ReservoirSampler struct {
 	nonZero   uint64 // count of samples where value > 0
 	max       int    // true maximum ever seen (never decreases)
 	size      int
-	rng       *rand.Rand
+	rngState  uint64 // xorshift64 state (faster than rand.Rand)
 }
 
 // NewReservoirSampler creates a new reservoir sampler
@@ -70,7 +69,7 @@ func NewReservoirSampler(size int) *ReservoirSampler {
 		sum:       0,
 		nonZero:   0,
 		size:      size,
-		rng:       rand.New(rand.NewSource(time.Now().UnixNano())),
+		rngState:  uint64(time.Now().UnixNano()) | 1, // ensure non-zero
 	}
 }
 
@@ -88,8 +87,12 @@ func (rs *ReservoirSampler) Add(value int) {
 		rs.reservoir = append(rs.reservoir, value)
 	} else {
 		// Randomly replace elements with decreasing probability
-		j := rs.rng.Int63n(int64(rs.count))
-		if j < int64(rs.size) {
+		// xorshift64: fast PRNG (~3 ops vs rand.Int63n overhead)
+		rs.rngState ^= rs.rngState << 13
+		rs.rngState ^= rs.rngState >> 7
+		rs.rngState ^= rs.rngState << 17
+		j := rs.rngState % rs.count
+		if j < uint64(rs.size) {
 			rs.reservoir[j] = value
 		}
 	}
