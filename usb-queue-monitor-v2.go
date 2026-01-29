@@ -6,7 +6,6 @@ import (
 	"log"
 	"os"
 	"os/signal"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,7 +16,6 @@ import (
 
 const (
 	displayInterval = 50 * time.Millisecond // ~20 FPS display refresh
-	reservoirSize   = 10_000_000            // 10M samples × 1 byte = 10MB per device
 	maxQueuePerDev  = 30
 	usbDeviceCount  = 5
 	maxQueueUSBAggr = maxQueuePerDev * usbDeviceCount // 150 total
@@ -29,99 +27,114 @@ var devices = []string{"sda", "nvme0n1", "nvme1n1", "", "sdb", "", "sdc", "sdd",
 // Configurable percentiles to display (P0 replaced by Util column)
 var percentiles = []float64{10, 20, 30, 40, 50, 60, 70, 80, 90, 95, 99, 99.5, 99.9, 99.95, 99.99, 99.995, 99.999, 100}
 
-// ReservoirSampler maintains a fixed-size representative sample using reservoir sampling
-type ReservoirSampler struct {
-	reservoir []uint8 // queue depths fit in uint8 (max 255, USB max is 30)
-	populated int     // number of valid samples in reservoir (0 to size)
-	count     uint64
-	sum       uint64 // running sum for true average
-	nonZero   uint64 // count of samples where value > 0
-	max       uint8  // true maximum ever seen (never decreases), capped at 255
-	size      int
-	rngState  uint64 // xorshift64 state (faster than rand.Rand)
+// Histogram maintains exact counts for queue depth values 0-255
+// Memory: 256 × 8 bytes = 2KB per device (vs 10MB reservoir)
+type Histogram struct {
+	buckets [256]uint64 // count of samples at each queue depth
+	total   uint64      // total samples seen
+	sum     uint64      // running sum for average
+	nonZero uint64      // count of samples where value > 0
+	max     int64       // true maximum ever seen (unbounded, for display)
 }
 
-// NewReservoirSampler creates a new reservoir sampler with preallocated array
-func NewReservoirSampler(size int) *ReservoirSampler {
-	return &ReservoirSampler{
-		reservoir: make([]uint8, size), // preallocate full array (zeroed by Go)
-		populated: 0,                   // tracks valid entries
-		count:     0,
-		sum:       0,
-		nonZero:   0,
-		size:      size,
-		rngState:  uint64(time.Now().UnixNano()) | 1, // ensure non-zero
-	}
+// NewHistogram creates a new histogram (zero-initialized by Go)
+func NewHistogram() *Histogram {
+	return &Histogram{}
 }
 
-// Add adds a value to the reservoir
-func (rs *ReservoirSampler) Add(value int) {
-	rs.count++
-	rs.sum += uint64(value)
+// Add records a queue depth sample
+func (h *Histogram) Add(value int) {
+	h.total++
+	h.sum += uint64(value)
 	if value > 0 {
-		rs.nonZero++
+		h.nonZero++
 	}
-	// Cap at 255 for uint8 storage
-	v := uint8(value)
+	if int64(value) > h.max {
+		h.max = int64(value)
+	}
+	// Clamp for histogram bucket (values >255 are ultra-rare on NVMe)
 	if value > 255 {
-		v = 255
+		value = 255
 	}
-	if v > rs.max {
-		rs.max = v
-	}
-	if rs.populated < rs.size {
-		// Fill phase: direct index assignment (no append overhead)
-		rs.reservoir[rs.populated] = v
-		rs.populated++
-	} else {
-		// Randomly replace elements with decreasing probability
-		// xorshift64: fast PRNG (~3 ops vs rand.Int63n overhead)
-		rs.rngState ^= rs.rngState << 13
-		rs.rngState ^= rs.rngState >> 7
-		rs.rngState ^= rs.rngState << 17
-		j := rs.rngState % rs.count
-		if j < uint64(rs.size) {
-			rs.reservoir[j] = v
-		}
-	}
+	h.buckets[value]++
 }
 
-// GetSamples returns a copy of the populated portion of the reservoir
-func (rs *ReservoirSampler) GetSamples() []uint8 {
-	samples := make([]uint8, rs.populated)
-	copy(samples, rs.reservoir[:rs.populated])
-	return samples
+// GetTotal returns the total number of samples seen
+func (h *Histogram) GetTotal() uint64 {
+	return h.total
 }
 
-// GetPopulated returns the number of valid samples in the reservoir
-func (rs *ReservoirSampler) GetPopulated() int {
-	return rs.populated
-}
-
-// GetCount returns the total number of samples seen
-func (rs *ReservoirSampler) GetCount() uint64 {
-	return rs.count
-}
-
-// GetAverage returns the true running average of all samples ever seen
-func (rs *ReservoirSampler) GetAverage() float64 {
-	if rs.count == 0 {
+// GetAverage returns the true running average
+func (h *Histogram) GetAverage() float64 {
+	if h.total == 0 {
 		return 0.0
 	}
-	return float64(rs.sum) / float64(rs.count)
+	return float64(h.sum) / float64(h.total)
 }
 
 // GetUtilization returns the percentage of samples where value > 0
-func (rs *ReservoirSampler) GetUtilization() float64 {
-	if rs.count == 0 {
+func (h *Histogram) GetUtilization() float64 {
+	if h.total == 0 {
 		return 0.0
 	}
-	return float64(rs.nonZero) / float64(rs.count) * 100.0
+	return float64(h.nonZero) / float64(h.total) * 100.0
 }
 
-// GetMax returns the true maximum ever seen (never decreases)
-func (rs *ReservoirSampler) GetMax() uint8 {
-	return rs.max
+// GetMax returns the true maximum ever seen
+func (h *Histogram) GetMax() int64 {
+	return h.max
+}
+
+// Percentile calculates the percentile value (0-100) with linear interpolation
+func (h *Histogram) Percentile(p float64) float64 {
+	if h.total == 0 {
+		return 0.0
+	}
+
+	// Target position in the sorted sequence (0-indexed, fractional)
+	pos := float64(h.total-1) * p / 100.0
+	targetLower := uint64(pos)
+	targetUpper := targetLower + 1
+	weight := pos - float64(targetLower)
+
+	// Walk buckets to find values at targetLower and targetUpper positions
+	var cumulative uint64
+	var lowerValue, upperValue int
+	foundLower := false
+
+	for i := 0; i < 256; i++ {
+		prevCumulative := cumulative
+		cumulative += h.buckets[i]
+
+		if !foundLower && cumulative > targetLower {
+			lowerValue = i
+			foundLower = true
+		}
+		if cumulative > targetUpper {
+			upperValue = i
+			// Interpolate between lower and upper values
+			return float64(lowerValue)*(1-weight) + float64(upperValue)*weight
+		}
+		// Handle case where targetLower and targetUpper are in same bucket
+		if foundLower && cumulative > targetUpper {
+			return float64(lowerValue)
+		}
+		_ = prevCumulative // silence unused warning
+	}
+
+	return float64(lowerValue)
+}
+
+// Snapshot returns a copy of the histogram for lock-free display
+func (h *Histogram) Snapshot() *Histogram {
+	snap := &Histogram{
+		total:   h.total,
+		sum:     h.sum,
+		nonZero: h.nonZero,
+		max:     h.max,
+	}
+	copy(snap.buckets[:], h.buckets[:])
+	return snap
 }
 
 // getDeviceSize reads the device size and returns it as a human-readable string (e.g., "4TB")
@@ -229,39 +242,11 @@ func getInflight(device string) (int, error) {
 	return read + write, nil
 }
 
-// calcPercentileFloat calculates the percentile with linear interpolation
-func calcPercentileFloat(sorted []uint8, pct float64) float64 {
-	if len(sorted) == 0 {
-		return 0.0
-	}
-
-	// Linear interpolation for more accurate percentiles
-	pos := float64(len(sorted)-1) * pct / 100.0
-	lower := int(pos)
-	upper := lower + 1
-
-	if upper >= len(sorted) {
-		return float64(sorted[len(sorted)-1])
-	}
-
-	// Interpolate between lower and upper values
-	weight := pos - float64(lower)
-	return float64(sorted[lower])*(1-weight) + float64(sorted[upper])*weight
-}
-
-// calcPercentiles calculates all configured percentiles
-func calcPercentiles(data []uint8) []float64 {
+// calcPercentiles calculates all configured percentiles from a histogram
+func calcPercentiles(h *Histogram) []float64 {
 	results := make([]float64, len(percentiles))
-	if len(data) == 0 {
-		return results
-	}
-
-	sorted := make([]uint8, len(data))
-	copy(sorted, data)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
-
 	for i, pct := range percentiles {
-		results[i] = calcPercentileFloat(sorted, pct)
+		results[i] = h.Percentile(pct)
 	}
 	return results
 }
@@ -308,7 +293,6 @@ type Display struct {
 	batchMode       bool
 	p50Index        int
 	deviceSizes     map[string]string
-	usbAggregate    *ReservoirSampler
 	lastSampleCount uint64
 	lastTime        time.Time
 	samplesPerSec   float64
@@ -332,7 +316,7 @@ func formatPercentileHeader(pct float64) string {
 
 var usbDevices = []string{"sdc", "sdd", "sde", "sdf", "sdg"}
 
-func (d *Display) render(samplers map[string]*ReservoirSampler, currents map[string]int, usbAggrCurrent int, totalSamples uint64) {
+func (d *Display) render(histograms map[string]*Histogram, usbAggregate *Histogram, currents map[string]int, usbAggrCurrent int, totalSamples uint64) {
 	// Calculate samples/sec
 	now := time.Now()
 	if !d.lastTime.IsZero() {
@@ -377,13 +361,13 @@ func (d *Display) render(samplers map[string]*ReservoirSampler, currents map[str
 			continue
 		}
 
-		sampler := samplers[dev]
+		hist := histograms[dev]
 		current := currents[dev]
-		pcts := calcPercentiles(sampler.GetSamples())
-		// Use true max for P100 (last percentile) instead of reservoir max
-		pcts[len(pcts)-1] = float64(sampler.GetMax())
-		avg := sampler.GetAverage()
-		util := sampler.GetUtilization()
+		pcts := calcPercentiles(hist)
+		// Use true max for P100 (last percentile)
+		pcts[len(pcts)-1] = float64(hist.GetMax())
+		avg := hist.GetAverage()
+		util := hist.GetUtilization()
 
 		// Find P99 for bar display
 		p99Int := 0
@@ -406,11 +390,11 @@ func (d *Display) render(samplers map[string]*ReservoirSampler, currents map[str
 
 		// After last USB device, show aggregate USB stats
 		if dev == "sdg" {
-			aggrPcts := calcPercentiles(d.usbAggregate.GetSamples())
-			// Use true max for P100 (last percentile) instead of reservoir max
-			aggrPcts[len(aggrPcts)-1] = float64(d.usbAggregate.GetMax())
-			aggrAvg := d.usbAggregate.GetAverage()
-			aggrUtil := d.usbAggregate.GetUtilization()
+			aggrPcts := calcPercentiles(usbAggregate)
+			// Use true max for P100 (last percentile)
+			aggrPcts[len(aggrPcts)-1] = float64(usbAggregate.GetMax())
+			aggrAvg := usbAggregate.GetAverage()
+			aggrUtil := usbAggregate.GetUtilization()
 
 			fmt.Fprintf(&buf, "%-8s %4d/%-3d %7.1f%%", "USB", usbAggrCurrent, maxQueueUSBAggr, aggrUtil)
 			for i, val := range aggrPcts {
@@ -442,8 +426,7 @@ func (d *Display) render(samplers map[string]*ReservoirSampler, currents map[str
 		buf.WriteString("Legend: █= current  ░= p99 (long-term)  -= unused\n")
 	}
 
-	reservoirCount := samplers[devices[0]].GetPopulated()
-	fmt.Fprintf(&buf, "Samples: %s total (%d in reservoir) @ %.0f/sec\n", formatCount(totalSamples), reservoirCount, d.samplesPerSec)
+	fmt.Fprintf(&buf, "Samples: %s total @ %.0f/sec\n", formatCount(totalSamples), d.samplesPerSec)
 
 	if d.batchMode {
 		buf.WriteString("\n")
@@ -457,10 +440,8 @@ func (d *Display) render(samplers map[string]*ReservoirSampler, currents map[str
 // SamplerState holds the shared state between sampler and display goroutines
 type SamplerState struct {
 	mu           sync.RWMutex
-	samplers     map[string]*ReservoirSampler
-	usbAggregate *ReservoirSampler
-	currents     map[string]int32 // atomic access via dedicated atomics below
-	usbAggrCurr  int32
+	histograms   map[string]*Histogram
+	usbAggregate *Histogram
 }
 
 // Atomics for current values (lock-free access for display)
@@ -479,13 +460,13 @@ func main() {
 		log.Println("Block I/O Queue Monitor starting in batch mode")
 	}
 
-	// Initialize samplers for each device
-	samplers := make(map[string]*ReservoirSampler)
+	// Initialize histograms for each device (2KB each vs 10MB reservoir)
+	histograms := make(map[string]*Histogram)
 	for _, dev := range devices {
 		if dev == "" {
 			continue
 		}
-		samplers[dev] = NewReservoirSampler(reservoirSize)
+		histograms[dev] = NewHistogram()
 	}
 
 	p50Index := findP50Index()
@@ -502,8 +483,8 @@ func main() {
 		deviceSizes[dev] = getDeviceSize(dev)
 	}
 
-	// Create aggregate sampler for combined USB queue depth
-	usbAggregate := NewReservoirSampler(reservoirSize)
+	// Create aggregate histogram for combined USB queue depth
+	usbAggregate := NewHistogram()
 
 	// Initialize atomic current values
 	currents := &CurrentValues{
@@ -530,17 +511,16 @@ func main() {
 		readers[dev] = reader
 	}
 
-	// Shared state protected by RWMutex for sampler data
+	// Shared state protected by RWMutex for histogram data
 	state := &SamplerState{
-		samplers:     samplers,
+		histograms:   histograms,
 		usbAggregate: usbAggregate,
 	}
 
 	display := &Display{
-		batchMode:    *batchMode,
-		p50Index:     p50Index,
-		deviceSizes:  deviceSizes,
-		usbAggregate: usbAggregate,
+		batchMode:   *batchMode,
+		p50Index:    p50Index,
+		deviceSizes: deviceSizes,
 	}
 
 	// Setup signal handling for clean shutdown
@@ -553,7 +533,7 @@ func main() {
 	// Initial message
 	if !*batchMode {
 		fmt.Println("Block I/O Queue Monitor - Ctrl+C to stop")
-		fmt.Println("Starting sampler (dedicated CPU) and display (60 FPS)...")
+		fmt.Println("Starting sampler (dedicated CPU) and display (20 FPS)...")
 	} else {
 		log.Println("Starting sampler (dedicated CPU) and display...")
 	}
@@ -595,10 +575,10 @@ func main() {
 				}
 				currents.usbAggrCurr.Store(usbSum)
 
-				// Phase 2: Batch update all samplers under single lock
+				// Phase 2: Batch update all histograms under single lock
 				state.mu.Lock()
 				for dev, current := range batch {
-					state.samplers[dev].Add(current)
+					state.histograms[dev].Add(current)
 				}
 				state.usbAggregate.Add(int(usbSum))
 				state.mu.Unlock()
@@ -608,7 +588,7 @@ func main() {
 		}
 	}()
 
-	// DISPLAY GOROUTINE - runs at ~60 FPS (16ms)
+	// DISPLAY GOROUTINE - runs at ~20 FPS (50ms)
 	displayTicker := time.NewTicker(displayInterval)
 	go func() {
 		defer displayTicker.Stop()
@@ -627,40 +607,17 @@ func main() {
 				}
 				usbAggrCurrent := int(currents.usbAggrCurr.Load())
 
-				// Snapshot scalars under lock (fast: ~40 bytes per device)
-				samplersCopy := make(map[string]*ReservoirSampler)
+				// Snapshot histograms under lock (fast: 2KB copy per device)
+				histogramsCopy := make(map[string]*Histogram)
 				state.mu.RLock()
-				for dev, s := range state.samplers {
-					// Copy only scalars under lock
-					samplersCopy[dev] = &ReservoirSampler{
-						populated: s.populated,
-						count:     s.count,
-						sum:       s.sum,
-						nonZero:   s.nonZero,
-						max:       s.max,
-						size:      s.size,
-					}
+				for dev, h := range state.histograms {
+					histogramsCopy[dev] = h.Snapshot()
 				}
-				// Copy USB aggregate scalars
-				display.usbAggregate = &ReservoirSampler{
-					populated: state.usbAggregate.populated,
-					count:     state.usbAggregate.count,
-					sum:       state.usbAggregate.sum,
-					nonZero:   state.usbAggregate.nonZero,
-					max:       state.usbAggregate.max,
-					size:      state.usbAggregate.size,
-				}
+				usbAggrCopy := state.usbAggregate.Snapshot()
 				state.mu.RUnlock()
 
-				// Copy reservoirs outside lock (slightly stale but fine for display)
-				// Avoids ~90K int copies under lock
-				for dev, s := range state.samplers {
-					samplersCopy[dev].reservoir = s.GetSamples()
-				}
-				display.usbAggregate.reservoir = state.usbAggregate.GetSamples()
-
 				// Render (outside of lock)
-				display.render(samplersCopy, currentMap, usbAggrCurrent, sampleCount.Load())
+				display.render(histogramsCopy, usbAggrCopy, currentMap, usbAggrCurrent, sampleCount.Load())
 			}
 		}
 	}()
