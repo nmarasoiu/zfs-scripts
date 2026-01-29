@@ -154,11 +154,16 @@ print_header() {
 }
 
 # Convert birth hrtime (ns since boot) to wall-clock timestamp
-# Uses cached CURRENT_HRTIME_NS and CURRENT_EPOCH (set in main loop)
+# Uses BOOT_EPOCH computed once at startup for stable timestamps
 birth_to_wallclock() {
     local birth_hrtime=$1
-    local seconds_ago=$(( (CURRENT_HRTIME_NS - birth_hrtime) / 1000000000 ))
-    local birth_epoch=$((CURRENT_EPOCH - seconds_ago))
+    # If we don't have a valid birth time, return empty
+    if [[ -z "$birth_hrtime" || "$birth_hrtime" == "0" ]]; then
+        echo ""
+        return
+    fi
+    local birth_seconds=$((birth_hrtime / 1000000000))
+    local birth_epoch=$((BOOT_EPOCH + birth_seconds))
     date -d "@$birth_epoch" '+%Y-%m-%d %H:%M:%S'
 }
 
@@ -200,17 +205,23 @@ format_txg() {
 
     # Convert birth hrtime to wall-clock timestamp
     local birth_dt=$(birth_to_wallclock "$birth")
-    local birth_date=${birth_dt% *}
-    local birth_time=${birth_dt#* }
+    local birth_date=""
+    local birth_time=""
+    if [[ -n "$birth_dt" ]]; then
+        birth_date=${birth_dt% *}
+        birth_time=${birth_dt#* }
+    fi
 
     # Calculate completion time for finished TXGs
     # completion_hrtime = birth + otime + qtime + wtime + stime
     local duration_str="-"
-    if [[ "$state" == "C" ]]; then
+    if [[ "$state" == "C" && -n "$birth_time" ]]; then
         local completion_hrtime=$((birth + otime + qtime + wtime + stime))
         local completion_dt=$(birth_to_wallclock "$completion_hrtime")
         local end_time=${completion_dt#* }
-        duration_str="${birth_time} -> ${end_time}"
+        if [[ -n "$end_time" ]]; then
+            duration_str="${birth_time} -> ${end_time}"
+        fi
     fi
 
     # Highlight active TXGs
@@ -309,6 +320,11 @@ trap cleanup EXIT
 # Convert pools string to array
 read -ra POOL_ARRAY <<< "$POOLS"
 
+# Compute boot epoch ONCE for stable timestamp conversions
+# boot_epoch = current_epoch - uptime_seconds
+read uptime_sec _ < /proc/uptime
+BOOT_EPOCH=$(echo "$(date +%s) - $uptime_sec" | bc | cut -d. -f1)
+
 # Setup terminal
 tput civis  # Hide cursor
 stty -echo  # Disable echo
@@ -320,11 +336,6 @@ print_keys
 
 while true; do
     tput cup 2 0  # Move cursor to line 3
-
-    # Cache current time references for birth->wallclock conversion
-    read uptime_sec _ < /proc/uptime
-    CURRENT_HRTIME_NS=$(echo "$uptime_sec * 1000000000" | bc | cut -d. -f1)
-    CURRENT_EPOCH=$(date +%s)
 
     for pool in "${POOL_ARRAY[@]}"; do
         txg_file="/proc/spl/kstat/zfs/${pool}/txgs"
