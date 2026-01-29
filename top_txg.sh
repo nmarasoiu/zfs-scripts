@@ -67,6 +67,7 @@ TXG_COUNT="${3:-20}"  # TXGs per pool
 SORT_COL="none"     # Default: no sorting, just tail (most recent TXGs)
 SORT_REV=0          # 0=ascending, 1=descending
 SORT_FIELD=1        # awk field number for sorting
+LAST_KEY=""         # Last key pressed (for visual feedback)
 
 # Colors
 RED='\033[0;31m'
@@ -257,26 +258,65 @@ print_keys() {
     echo -e "${DIM}Keys: [d/D]irty [r/R]ead [w/W]ritten [o/O]pen q[u/U]eue w[a/A]it [s/S]ync [m/M]b/s  [n]one  [q]uit  [h]elp  (lower=asc, UPPER=desc)${NC}"
 }
 
+# Show immediate feedback when key is pressed
+show_key_feedback() {
+    local key="$1"
+    local desc=""
+    local dir=""
+
+    case "$key" in
+        n|N) desc="none (recent)" ;;
+        d)   desc="DIRTY"; dir="▲" ;;
+        D)   desc="DIRTY"; dir="▼" ;;
+        r)   desc="READ"; dir="▲" ;;
+        R)   desc="READ"; dir="▼" ;;
+        w)   desc="WRITTEN"; dir="▲" ;;
+        W)   desc="WRITTEN"; dir="▼" ;;
+        o)   desc="OPEN"; dir="▲" ;;
+        O)   desc="OPEN"; dir="▼" ;;
+        u)   desc="QUEUE"; dir="▲" ;;
+        U)   desc="QUEUE"; dir="▼" ;;
+        a)   desc="WAIT"; dir="▲" ;;
+        A)   desc="WAIT"; dir="▼" ;;
+        s)   desc="SYNC"; dir="▲" ;;
+        S)   desc="SYNC"; dir="▼" ;;
+        m)   desc="MB/s"; dir="▲" ;;
+        M)   desc="MB/s"; dir="▼" ;;
+        q|Q) desc="quit" ;;
+        h|H) desc="help" ;;
+        *)   return ;;  # Unknown key, no feedback
+    esac
+
+    # Show feedback at top-right area (row 1, save/restore cursor)
+    # Using reverse video for visibility
+    printf '\033[s'                          # Save cursor position
+    printf '\033[1;60H'                      # Move to row 1, column 60
+    printf '\033[7m'                         # Reverse video (highlighted)
+    printf ' %s → %s %s ' "$key" "$desc" "$dir"
+    printf '\033[0m'                         # Reset attributes
+    printf '\033[u'                          # Restore cursor position
+}
+
 handle_key() {
     local key="$1"
     case "$key" in
-        n|N) SORT_COL="none" ;;  # Reset to default (recent TXGs)
-        d) SORT_COL="dirty";   SORT_REV=0 ;;
-        D) SORT_COL="dirty";   SORT_REV=1 ;;
-        r) SORT_COL="read";    SORT_REV=0 ;;
-        R) SORT_COL="read";    SORT_REV=1 ;;
-        w) SORT_COL="written"; SORT_REV=0 ;;
-        W) SORT_COL="written"; SORT_REV=1 ;;
-        o) SORT_COL="open";    SORT_REV=0 ;;
-        O) SORT_COL="open";    SORT_REV=1 ;;
-        u) SORT_COL="queue";   SORT_REV=0 ;;
-        U) SORT_COL="queue";   SORT_REV=1 ;;
-        a) SORT_COL="wait";    SORT_REV=0 ;;
-        A) SORT_COL="wait";    SORT_REV=1 ;;
-        s) SORT_COL="sync";    SORT_REV=0 ;;
-        S) SORT_COL="sync";    SORT_REV=1 ;;
-        m) SORT_COL="mbps";    SORT_REV=0 ;;
-        M) SORT_COL="mbps";    SORT_REV=1 ;;
+        n|N) SORT_COL="none"; LAST_KEY="$key" ;;  # Reset to default (recent TXGs)
+        d) SORT_COL="dirty";   SORT_REV=0; LAST_KEY="$key" ;;
+        D) SORT_COL="dirty";   SORT_REV=1; LAST_KEY="$key" ;;
+        r) SORT_COL="read";    SORT_REV=0; LAST_KEY="$key" ;;
+        R) SORT_COL="read";    SORT_REV=1; LAST_KEY="$key" ;;
+        w) SORT_COL="written"; SORT_REV=0; LAST_KEY="$key" ;;
+        W) SORT_COL="written"; SORT_REV=1; LAST_KEY="$key" ;;
+        o) SORT_COL="open";    SORT_REV=0; LAST_KEY="$key" ;;
+        O) SORT_COL="open";    SORT_REV=1; LAST_KEY="$key" ;;
+        u) SORT_COL="queue";   SORT_REV=0; LAST_KEY="$key" ;;
+        U) SORT_COL="queue";   SORT_REV=1; LAST_KEY="$key" ;;
+        a) SORT_COL="wait";    SORT_REV=0; LAST_KEY="$key" ;;
+        A) SORT_COL="wait";    SORT_REV=1; LAST_KEY="$key" ;;
+        s) SORT_COL="sync";    SORT_REV=0; LAST_KEY="$key" ;;
+        S) SORT_COL="sync";    SORT_REV=1; LAST_KEY="$key" ;;
+        m) SORT_COL="mbps";    SORT_REV=0; LAST_KEY="$key" ;;
+        M) SORT_COL="mbps";    SORT_REV=1; LAST_KEY="$key" ;;
         q|Q) cleanup; exit 0 ;;
         h|H)
             clear
@@ -369,6 +409,7 @@ while true; do
 
     # Non-blocking read for key input
     if read -rsn1 -t "$INTERVAL" key; then
+        show_key_feedback "$key"  # Immediate visual feedback
         handle_key "$key"
     fi
 done
