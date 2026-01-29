@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	displayInterval = 16 * time.Millisecond // ~60 FPS display refresh
+	displayInterval = 50 * time.Millisecond // ~20 FPS display refresh
 	reservoirSize   = 10000
 	maxQueuePerDev  = 30
 	usbDeviceCount  = 5
