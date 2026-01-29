@@ -17,7 +17,6 @@ Options:
   -h, --help  Show this help message
 
 Interactive Keys (lowercase=ascending, UPPERCASE=descending):
-  t/T   Sort by TXG number
   d/D   Sort by Dirty bytes
   r/R   Sort by Read bytes
   w/W   Sort by Written bytes
@@ -26,6 +25,7 @@ Interactive Keys (lowercase=ascending, UPPERCASE=descending):
   a/A   Sort by Wait time
   s/S   Sort by Sync time
   m/M   Sort by MB/s
+  n     Reset to default (recent TXGs, no sorting)
   q     Quit
 
 Columns:
@@ -64,8 +64,8 @@ INTERVAL="${2:-2}"
 TXG_COUNT="${3:-20}"  # TXGs per pool
 
 # Sorting state
-SORT_COL="txg"      # Default sort column
-SORT_REV=1          # 0=ascending, 1=descending (default desc to show newest/active TXGs)
+SORT_COL="none"     # Default: no sorting, just tail (most recent TXGs)
+SORT_REV=0          # 0=ascending, 1=descending
 SORT_FIELD=1        # awk field number for sorting
 
 # Colors
@@ -82,7 +82,7 @@ UNDERLINE='\033[4m'
 # Map sort column to awk field and display name
 get_sort_info() {
     case "$SORT_COL" in
-        txg)     SORT_FIELD=1;  SORT_NAME="TXG" ;;
+        none)    SORT_FIELD=0;  SORT_NAME="recent" ;;
         dirty)   SORT_FIELD=4;  SORT_NAME="DIRTY" ;;
         read)    SORT_FIELD=5;  SORT_NAME="READ" ;;
         written) SORT_FIELD=6;  SORT_NAME="WRITTEN" ;;
@@ -134,13 +134,19 @@ state_label() {
 print_header() {
     local pool="$1"
     get_sort_info
-    local sort_dir="▲"
-    [[ $SORT_REV -eq 1 ]] && sort_dir="▼"
 
     # Column widths - must match data format exactly
     # DATE=11, TIME=9, TXG=10, STATE=9, DIRTY=10, READ=10, WRITTEN=10, OPS=13, OPEN=8, QUEUE=8, WAIT=8, SYNC=8, MB/s=8
     local sep="━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo -e "${BOLD}${CYAN}${pool}${NC}  ${DIM}[sorted by ${SORT_NAME} ${sort_dir}]${NC}"
+    local sort_indicator
+    if [[ "$SORT_COL" == "none" ]]; then
+        sort_indicator="[${SORT_NAME}]"
+    else
+        local sort_dir="▲"
+        [[ $SORT_REV -eq 1 ]] && sort_dir="▼"
+        sort_indicator="[sorted by ${SORT_NAME} ${sort_dir}]"
+    fi
+    echo -e "${BOLD}${CYAN}${pool}${NC}  ${DIM}${sort_indicator}${NC}"
     echo -e "${BOLD}${sep}${NC}"
     printf "${BOLD}%-11s %-9s %-10s %-9s %-10s %-10s %-10s %-13s %-8s %-8s %-8s %-8s %-8s %s${NC}\n" \
         "DATE" "TIME" "TXG" "STATE" "DIRTY" "READ" "WRITTEN" "R/W OPS" "OPEN" "QUEUE" "WAIT" "SYNC" "MB/s" "DURATION"
@@ -237,14 +243,13 @@ show_summary() {
 }
 
 print_keys() {
-    echo -e "${DIM}Keys: [t/T]xg [d/D]irty [r/R]ead [w/W]ritten [o/O]pen q[u/U]eue w[a/A]it [s/S]ync [m/M]b/s  [q]uit  [h]elp  (lowercase=asc, UPPER=desc)${NC}"
+    echo -e "${DIM}Keys: [d/D]irty [r/R]ead [w/W]ritten [o/O]pen q[u/U]eue w[a/A]it [s/S]ync [m/M]b/s  [n]one  [q]uit  [h]elp  (lower=asc, UPPER=desc)${NC}"
 }
 
 handle_key() {
     local key="$1"
     case "$key" in
-        t) SORT_COL="txg";     SORT_REV=0 ;;
-        T) SORT_COL="txg";     SORT_REV=1 ;;
+        n|N) SORT_COL="none" ;;  # Reset to default (recent TXGs)
         d) SORT_COL="dirty";   SORT_REV=0 ;;
         D) SORT_COL="dirty";   SORT_REV=1 ;;
         r) SORT_COL="read";    SORT_REV=0 ;;
@@ -272,6 +277,12 @@ handle_key() {
 sort_txg_data() {
     local txg_file="$1"
     get_sort_info
+
+    # Default mode: just show most recent TXGs (tail)
+    if [[ "$SORT_COL" == "none" ]]; then
+        tail -$((TXG_COUNT + 1)) "$txg_file" | grep -v '^txg'
+        return
+    fi
 
     local sort_opts="-n"
     [[ $SORT_REV -eq 1 ]] && sort_opts="-rn"
