@@ -71,7 +71,7 @@ func NewReservoirSampler(size int) *ReservoirSampler {
 	}
 }
 
-// Add adds a value to the reservoir
+// Add adds a value to the reservoir (used during warmup phase)
 func (rs *ReservoirSampler) Add(value int) {
 	rs.count++
 	rs.sum += uint64(value)
@@ -94,6 +94,25 @@ func (rs *ReservoirSampler) Add(value int) {
 			rs.reservoir[j] = value
 		}
 	}
+}
+
+// ApplyBatch applies pre-computed batch statistics in minimal time under lock
+// reservoirUpdates contains only the slots that need updating (last-writer-wins)
+func (rs *ReservoirSampler) ApplyBatch(count, sum, nonZero uint64, max int, reservoirUpdates map[int]int) {
+	rs.count += count
+	rs.sum += sum
+	rs.nonZero += nonZero
+	if max > rs.max {
+		rs.max = max
+	}
+	for slot, value := range reservoirUpdates {
+		rs.reservoir[slot] = value
+	}
+}
+
+// IsFull returns true if reservoir has reached capacity
+func (rs *ReservoirSampler) IsFull() bool {
+	return len(rs.reservoir) >= rs.size
 }
 
 // GetSamples returns a copy of the reservoir
@@ -570,22 +589,45 @@ func main() {
 	// SAMPLER GOROUTINE - runs flat out, no sleep, hogs one CPU core
 	var sampleCount atomic.Uint64
 	go func() {
-		// Pre-allocate batch storage as fixed-size arrays (no map overhead)
-		var localBatches [numDeviceSlots][]int
+		// Batch accumulator for pre-computing stats outside lock
+		type batchAccum struct {
+			values    []int       // raw values (warmup only)
+			count     uint64      // batch sample count
+			sum       uint64      // batch sum
+			nonZero   uint64      // batch non-zero count
+			max       int         // batch max
+			updates   map[int]int // reservoir slot -> value (post-warmup)
+			rngState  uint64      // local RNG for reservoir sampling
+			baseCount uint64      // sampler.count at batch start
+		}
+
+		// Per-device accumulators
+		var accums [numDeviceSlots]*batchAccum
 		for i := 0; i < numDeviceSlots; i++ {
 			if deviceNames[i] != "" {
-				localBatches[i] = make([]int, 0, sampleBatchSize)
+				accums[i] = &batchAccum{
+					values:   make([]int, 0, sampleBatchSize),
+					updates:  make(map[int]int, 128),
+					rngState: uint64(time.Now().UnixNano()) + uint64(i)*12345 | 1,
+				}
 			}
 		}
-		localUsbSums := make([]int, 0, sampleBatchSize)
+		// USB aggregate accumulator
+		usbAccum := &batchAccum{
+			values:   make([]int, 0, sampleBatchSize),
+			updates:  make(map[int]int, 128),
+			rngState: uint64(time.Now().UnixNano()) + 99999 | 1,
+		}
+
 		batchCount := 0
+		warmupDone := false
 
 		for {
 			select {
 			case <-done:
 				return
 			default:
-				// Phase 1: Read all sysfs values via persistent handles (no locks, just I/O)
+				// Phase 1: Read sysfs + accumulate batch stats locally (no lock)
 				usbSum := 0
 				for i := 0; i < numDeviceSlots; i++ {
 					if deviceNames[i] == "" {
@@ -593,49 +635,130 @@ func main() {
 					}
 					reader := readers[i]
 					if reader == nil {
-						continue // device not available
+						continue
 					}
 					current, err := reader.Read()
 					if err != nil {
 						current = 0
 					}
 
-					// Accumulate in local batch (no lock needed, direct index)
-					localBatches[i] = append(localBatches[i], current)
-
-					// Update atomic current value (lock-free for display)
+					acc := accums[i]
+					if !warmupDone {
+						// Warmup: store raw values
+						acc.values = append(acc.values, current)
+					} else {
+						// Post-warmup: compute stats locally
+						acc.count++
+						acc.sum += uint64(current)
+						if current > 0 {
+							acc.nonZero++
+						}
+						if current > acc.max {
+							acc.max = current
+						}
+						// Pre-compute reservoir update
+						totalCount := acc.baseCount + acc.count
+						acc.rngState ^= acc.rngState << 13
+						acc.rngState ^= acc.rngState >> 7
+						acc.rngState ^= acc.rngState << 17
+						slot := acc.rngState % totalCount
+						if slot < uint64(reservoirSize) {
+							acc.updates[int(slot)] = current
+						}
+					}
 					currents.values[i].Store(int32(current))
 				}
 
-				// Calculate USB aggregate using index array (no map lookup)
+				// USB aggregate
 				for _, idx := range usbDeviceIndices {
-					if vals := localBatches[idx]; len(vals) > 0 {
-						usbSum += vals[len(vals)-1]
+					usbSum += int(currents.values[idx].Load())
+				}
+				if !warmupDone {
+					usbAccum.values = append(usbAccum.values, usbSum)
+				} else {
+					usbAccum.count++
+					usbAccum.sum += uint64(usbSum)
+					if usbSum > 0 {
+						usbAccum.nonZero++
+					}
+					if usbSum > usbAccum.max {
+						usbAccum.max = usbSum
+					}
+					totalCount := usbAccum.baseCount + usbAccum.count
+					usbAccum.rngState ^= usbAccum.rngState << 13
+					usbAccum.rngState ^= usbAccum.rngState >> 7
+					usbAccum.rngState ^= usbAccum.rngState << 17
+					slot := usbAccum.rngState % totalCount
+					if slot < uint64(reservoirSize) {
+						usbAccum.updates[int(slot)] = usbSum
 					}
 				}
-				localUsbSums = append(localUsbSums, usbSum)
 				currents.usbAggrCurr.Store(int32(usbSum))
 
 				sampleCount.Add(1)
 				batchCount++
 
-				// Phase 2: Flush batch when full (1000x fewer lock acquisitions)
+				// Phase 2: Flush batch when full
 				if batchCount >= sampleBatchSize {
 					state.mu.Lock()
-					for i := 0; i < numDeviceSlots; i++ {
-						if state.samplers[i] == nil {
-							continue
+
+					if !warmupDone {
+						// Warmup: call Add() to fill reservoirs
+						for i := 0; i < numDeviceSlots; i++ {
+							if state.samplers[i] == nil || accums[i] == nil {
+								continue
+							}
+							for _, v := range accums[i].values {
+								state.samplers[i].Add(v)
+							}
+							accums[i].values = accums[i].values[:0]
 						}
-						for _, v := range localBatches[i] {
-							state.samplers[i].Add(v)
+						for _, v := range usbAccum.values {
+							state.usbAggregate.Add(v)
 						}
-						// Reset slice, reuse backing array
-						localBatches[i] = localBatches[i][:0]
+						usbAccum.values = usbAccum.values[:0]
+
+						// Check if warmup complete
+						allFull := true
+						for i := 0; i < numDeviceSlots; i++ {
+							if state.samplers[i] != nil && !state.samplers[i].IsFull() {
+								allFull = false
+								break
+							}
+						}
+						if allFull && state.usbAggregate.IsFull() {
+							warmupDone = true
+							// Capture base counts for probability calculation
+							for i := 0; i < numDeviceSlots; i++ {
+								if accums[i] != nil && state.samplers[i] != nil {
+									accums[i].baseCount = state.samplers[i].count
+								}
+							}
+							usbAccum.baseCount = state.usbAggregate.count
+						}
+					} else {
+						// Post-warmup: apply pre-computed deltas (minimal lock time)
+						for i := 0; i < numDeviceSlots; i++ {
+							if state.samplers[i] == nil || accums[i] == nil {
+								continue
+							}
+							acc := accums[i]
+							state.samplers[i].ApplyBatch(acc.count, acc.sum, acc.nonZero, acc.max, acc.updates)
+							// Reset accumulator, capture new base count
+							acc.baseCount = state.samplers[i].count
+							acc.count, acc.sum, acc.nonZero, acc.max = 0, 0, 0, 0
+							for k := range acc.updates {
+								delete(acc.updates, k)
+							}
+						}
+						state.usbAggregate.ApplyBatch(usbAccum.count, usbAccum.sum, usbAccum.nonZero, usbAccum.max, usbAccum.updates)
+						usbAccum.baseCount = state.usbAggregate.count
+						usbAccum.count, usbAccum.sum, usbAccum.nonZero, usbAccum.max = 0, 0, 0, 0
+						for k := range usbAccum.updates {
+							delete(usbAccum.updates, k)
+						}
 					}
-					for _, sum := range localUsbSums {
-						state.usbAggregate.Add(sum)
-					}
-					localUsbSums = localUsbSums[:0]
+
 					state.mu.Unlock()
 					batchCount = 0
 				}
