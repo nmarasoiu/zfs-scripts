@@ -30,7 +30,7 @@ Interactive Keys:
   q   Quit
 
 Columns:
-  DATE/TIME   Current timestamp when line was displayed
+  DATE/TIME   When the TXG was born (converted from hrtime)
   TXG         Transaction group number
   STATE       OPEN=accepting writes, QUIESCE=draining, SYNCING=writing to disk, done=committed
   DIRTY       Bytes pending write in this TXG
@@ -42,6 +42,7 @@ Columns:
   WAIT        Time waiting to sync
   SYNC        Time spent syncing to disk
   MB/s        Write throughput (written/sync_time)
+  DURATION    Time span of TXG (birth -> end), or - if still active
 
 Examples:
   top_txg.sh                          # Monitor default pools
@@ -140,13 +141,23 @@ print_header() {
 
     echo -e "${BOLD}${CYAN}${pool}${NC}  ${DIM}[sorted by ${SORT_NAME} ${sort_dir}]${NC}"
     echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${BOLD}DATE        TIME      TXG        STATE     DIRTY     READ      WRITTEN   R/W OPS    OPEN     QUEUE    WAIT     SYNC     MB/s     TIME${NC}"
+    echo -e "${BOLD}DATE        TIME      TXG        STATE     DIRTY     READ      WRITTEN   R/W OPS      OPEN     QUEUE    WAIT     SYNC     MB/s     DURATION${NC}"
     echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+}
+
+# Convert birth hrtime (ns since boot) to wall-clock timestamp
+# Uses cached CURRENT_HRTIME_NS and CURRENT_EPOCH (set in main loop)
+birth_to_wallclock() {
+    local birth_hrtime=$1
+    local seconds_ago=$(( (CURRENT_HRTIME_NS - birth_hrtime) / 1000000000 ))
+    local birth_epoch=$((CURRENT_EPOCH - seconds_ago))
+    date -d "@$birth_epoch" '+%Y-%m-%d %H:%M:%S'
 }
 
 format_txg() {
     local line="$1"
     local txg=$(echo "$line" | awk '{print $1}')
+    local birth=$(echo "$line" | awk '{print $2}')
     local state=$(echo "$line" | awk '{print $3}')
     local ndirty=$(echo "$line" | awk '{print $4}')
     local nread=$(echo "$line" | awk '{print $5}')
@@ -177,19 +188,30 @@ format_txg() {
         mbps_h="${mbps}"
     fi
 
-    # Get current timestamp
-    local cur_date=$(date +%Y-%m-%d)
-    local cur_time=$(date +%H:%M:%S)
+    # Convert birth hrtime to wall-clock timestamp
+    local birth_dt=$(birth_to_wallclock "$birth")
+    local birth_date=${birth_dt% *}
+    local birth_time=${birth_dt#* }
+
+    # Calculate completion time for finished TXGs
+    # completion_hrtime = birth + otime + qtime + wtime + stime
+    local duration_str="-"
+    if [[ "$state" == "C" ]]; then
+        local completion_hrtime=$((birth + otime + qtime + wtime + stime))
+        local completion_dt=$(birth_to_wallclock "$completion_hrtime")
+        local end_time=${completion_dt#* }
+        duration_str="${birth_time} -> ${end_time}"
+    fi
 
     # Highlight active TXGs
     if [[ "$state" == "O" || "$state" == "S" || "$state" == "Q" ]]; then
-        printf "${CYAN}%-11s %-9s %-10s${NC} %s %-9s %-9s %-9s %4d/%-5d %-8s %-8s %-8s %-8s %-8s %s\n" \
-            "$cur_date" "$cur_time" "$txg" "$state_str" "$dirty_h" "$read_h" "$written_h" "$reads" "$writes" \
-            "$otime_h" "$qtime_h" "$wtime_h" "$stime_h" "$mbps_h" "$cur_time"
+        printf "${CYAN}%-11s %-9s %-10s${NC} %s %-9s %-9s %-9s %5d/%-6d %-8s %-8s %-8s %-8s %-8s %s\n" \
+            "$birth_date" "$birth_time" "$txg" "$state_str" "$dirty_h" "$read_h" "$written_h" "$reads" "$writes" \
+            "$otime_h" "$qtime_h" "$wtime_h" "$stime_h" "$mbps_h" "$duration_str"
     else
-        printf "${DIM}%-11s %-9s %-10s${NC} %s %-9s %-9s %-9s %4d/%-5d %-8s %-8s %-8s %-8s %-8s %s\n" \
-            "$cur_date" "$cur_time" "$txg" "$state_str" "$dirty_h" "$read_h" "$written_h" "$reads" "$writes" \
-            "$otime_h" "$qtime_h" "$wtime_h" "$stime_h" "$mbps_h" "$cur_time"
+        printf "${DIM}%-11s %-9s %-10s${NC} %s %-9s %-9s %-9s %5d/%-6d %-8s %-8s %-8s %-8s %-8s %s\n" \
+            "$birth_date" "$birth_time" "$txg" "$state_str" "$dirty_h" "$read_h" "$written_h" "$reads" "$writes" \
+            "$otime_h" "$qtime_h" "$wtime_h" "$stime_h" "$mbps_h" "$duration_str"
     fi
 }
 
@@ -273,6 +295,11 @@ print_keys
 
 while true; do
     tput cup 2 0  # Move cursor to line 3
+
+    # Cache current time references for birth->wallclock conversion
+    read uptime_sec _ < /proc/uptime
+    CURRENT_HRTIME_NS=$(echo "$uptime_sec * 1000000000" | bc | cut -d. -f1)
+    CURRENT_EPOCH=$(date +%s)
 
     for pool in "${POOL_ARRAY[@]}"; do
         txg_file="/proc/spl/kstat/zfs/${pool}/txgs"
