@@ -313,9 +313,13 @@ sort_txg_data() {
 cleanup() {
     tput cnorm  # Show cursor
     stty echo   # Restore echo
+    rm -f "$TMP_FILE" 2>/dev/null
 }
 
 trap cleanup EXIT
+
+# Create temp file for atomic display
+TMP_FILE=$(mktemp /tmp/top_txg.XXXXXX)
 
 # Convert pools string to array
 read -ra POOL_ARRAY <<< "$POOLS"
@@ -330,34 +334,35 @@ tput civis  # Hide cursor
 stty -echo  # Disable echo
 
 # Main loop
-clear
-echo -e "${BOLD}ZFS TXG Monitor${NC} ${DIM}(refresh: ${INTERVAL}s, ${TXG_COUNT} TXGs/pool)${NC}"
-print_keys
-
 while true; do
-    tput cup 2 0  # Move cursor to line 3
+    # Build output in temp file first (atomic display, reduces flicker)
+    {
+        echo -e "${BOLD}ZFS TXG Monitor${NC} ${DIM}(refresh: ${INTERVAL}s, ${TXG_COUNT} TXGs/pool)${NC}"
+        print_keys
 
-    for pool in "${POOL_ARRAY[@]}"; do
-        txg_file="/proc/spl/kstat/zfs/${pool}/txgs"
+        for pool in "${POOL_ARRAY[@]}"; do
+            txg_file="/proc/spl/kstat/zfs/${pool}/txgs"
 
-        if [[ ! -f "$txg_file" ]]; then
-            echo -e "${RED}Pool '$pool' not found${NC}"
-            continue
-        fi
+            if [[ ! -f "$txg_file" ]]; then
+                echo -e "${RED}Pool '$pool' not found${NC}"
+                continue
+            fi
 
-        print_header "$pool"
+            print_header "$pool"
 
-        # Show sorted TXGs
-        sort_txg_data "$txg_file" | while read line; do
-            format_txg "$line"
+            # Show sorted TXGs
+            sort_txg_data "$txg_file" | while read line; do
+                format_txg "$line"
+            done
+
+            show_summary "$pool"
+            echo ""
         done
+    } > "$TMP_FILE"
 
-        show_summary "$pool"
-        echo ""
-    done
-
-    # Clear any leftover lines
-    tput ed
+    # Display atomically: clear screen, show buffer
+    clear
+    cat "$TMP_FILE"
 
     # Non-blocking read for key input
     if read -rsn1 -t "$INTERVAL" key; then
