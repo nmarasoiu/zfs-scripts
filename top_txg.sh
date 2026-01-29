@@ -1,11 +1,72 @@
 #!/bin/bash
-# txg_live.sh - Human-readable ZFS TXG monitor
+# top_txg.sh - Human-readable ZFS TXG monitor with interactive sorting
 # Shows ongoing transaction groups with human-friendly units
+
+show_help() {
+    cat << 'EOF'
+Usage: top_txg.sh [OPTIONS] [POOLS] [INTERVAL] [TXG_COUNT]
+
+Monitor ZFS transaction groups (TXGs) with human-readable output.
+
+Arguments:
+  POOLS       Space-separated pool names (default: "hddpool ssdpool")
+  INTERVAL    Refresh interval in seconds (default: 2)
+  TXG_COUNT   Number of TXGs to display per pool (default: 20)
+
+Options:
+  -h, --help  Show this help message
+
+Interactive Keys:
+  t   Sort by TXG number
+  d   Sort by Dirty bytes
+  r   Sort by Read bytes
+  w   Sort by Written bytes
+  o   Sort by Open time
+  u   Sort by Queue time
+  a   Sort by Wait time
+  s   Sort by Sync time
+  m   Sort by MB/s
+  R   Reverse sort order (toggle asc/desc)
+  q   Quit
+
+Columns:
+  DATE/TIME   Current timestamp when line was displayed
+  TXG         Transaction group number
+  STATE       OPEN=accepting writes, QUIESCE=draining, SYNCING=writing to disk, done=committed
+  DIRTY       Bytes pending write in this TXG
+  READ        Bytes read during sync
+  WRITTEN     Bytes written to disk
+  R/W OPS     Read/Write operation counts
+  OPEN        Time TXG was open for writes
+  QUEUE       Time waiting in quiesce
+  WAIT        Time waiting to sync
+  SYNC        Time spent syncing to disk
+  MB/s        Write throughput (written/sync_time)
+
+Examples:
+  top_txg.sh                          # Monitor default pools
+  top_txg.sh "tank"                   # Monitor single pool
+  top_txg.sh "tank rpool" 5           # Two pools, 5s refresh
+  top_txg.sh "tank" 2 30              # 30 TXGs, 2s refresh
+
+EOF
+    exit 0
+}
+
+# Parse options
+case "$1" in
+    -h|--help) show_help ;;
+esac
 
 # Default pools (space-separated) or pass as arguments
 POOLS="${1:-hddpool ssdpool}"
 INTERVAL="${2:-2}"
 TXG_COUNT="${3:-20}"  # TXGs per pool
+
+# Sorting state
+SORT_COL="txg"      # Default sort column
+SORT_REV=0          # 0=ascending, 1=descending
+SORT_FIELD=1        # awk field number for sorting
 
 # Colors
 RED='\033[0;31m'
@@ -16,6 +77,22 @@ CYAN='\033[0;36m'
 BOLD='\033[1m'
 DIM='\033[2m'
 NC='\033[0m'
+UNDERLINE='\033[4m'
+
+# Map sort column to awk field and display name
+get_sort_info() {
+    case "$SORT_COL" in
+        txg)     SORT_FIELD=1;  SORT_NAME="TXG" ;;
+        dirty)   SORT_FIELD=4;  SORT_NAME="DIRTY" ;;
+        read)    SORT_FIELD=5;  SORT_NAME="READ" ;;
+        written) SORT_FIELD=6;  SORT_NAME="WRITTEN" ;;
+        open)    SORT_FIELD=9;  SORT_NAME="OPEN" ;;
+        queue)   SORT_FIELD=10; SORT_NAME="QUEUE" ;;
+        wait)    SORT_FIELD=11; SORT_NAME="WAIT" ;;
+        sync)    SORT_FIELD=12; SORT_NAME="SYNC" ;;
+        mbps)    SORT_FIELD=13; SORT_NAME="MB/s" ;;
+    esac
+}
 
 human_bytes() {
     local bytes=$1
@@ -57,7 +134,11 @@ state_label() {
 
 print_header() {
     local pool="$1"
-    echo -e "${BOLD}${CYAN}${pool}${NC}"
+    get_sort_info
+    local sort_dir="▲"
+    [[ $SORT_REV -eq 1 ]] && sort_dir="▼"
+
+    echo -e "${BOLD}${CYAN}${pool}${NC}  ${DIM}[sorted by ${SORT_NAME} ${sort_dir}]${NC}"
     echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "${BOLD}DATE        TIME      TXG        STATE     DIRTY     READ      WRITTEN   R/W OPS    OPEN     QUEUE    WAIT     SYNC     MB/s     TIME${NC}"
     echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
@@ -76,10 +157,10 @@ format_txg() {
     local qtime=$(echo "$line" | awk '{print $10}')
     local wtime=$(echo "$line" | awk '{print $11}')
     local stime=$(echo "$line" | awk '{print $12}')
-    
+
     # Skip header line
     [[ "$txg" == "txg" ]] && return
-    
+
     local state_str=$(state_label "$state")
     local dirty_h=$(human_bytes $ndirty)
     local read_h=$(human_bytes $nread)
@@ -90,7 +171,6 @@ format_txg() {
     local stime_h=$(human_time_ns $stime)
 
     # Calculate MB/s (written bytes / sync time in seconds)
-    # MB/s = (nwritten / 1048576) / (stime / 1e9) = nwritten * 953.674 / stime
     local mbps_h="-"
     if (( stime > 0 && nwritten > 0 )); then
         local mbps=$(echo "scale=1; $nwritten * 953.674 / $stime" | bc)
@@ -129,13 +209,67 @@ show_summary() {
     fi
 }
 
+print_keys() {
+    echo -e "${DIM}Keys: [t]xg [d]irty [r]ead [w]ritten [o]pen q[u]eue w[a]it [s]ync [m]b/s  [R]everse  [q]uit  [h]elp${NC}"
+}
+
+handle_key() {
+    local key="$1"
+    case "$key" in
+        t) SORT_COL="txg" ;;
+        d) SORT_COL="dirty" ;;
+        r) SORT_COL="read" ;;
+        w) SORT_COL="written" ;;
+        o) SORT_COL="open" ;;
+        u) SORT_COL="queue" ;;
+        a) SORT_COL="wait" ;;
+        s) SORT_COL="sync" ;;
+        m) SORT_COL="mbps" ;;
+        R) SORT_REV=$((1 - SORT_REV)) ;;
+        q) cleanup; exit 0 ;;
+        h)
+            clear
+            show_help
+            ;;
+    esac
+}
+
+sort_txg_data() {
+    local txg_file="$1"
+    get_sort_info
+
+    local sort_opts="-n"
+    [[ $SORT_REV -eq 1 ]] && sort_opts="-rn"
+
+    # For mbps, we need to calculate it inline
+    if [[ "$SORT_COL" == "mbps" ]]; then
+        tail -$((TXG_COUNT + 1)) "$txg_file" | grep -v '^txg' | \
+            awk '{mbps=0; if($12>0 && $6>0) mbps=$6*953.674/$12; print mbps, $0}' | \
+            sort $sort_opts -k1 | cut -d' ' -f2-
+    else
+        tail -$((TXG_COUNT + 1)) "$txg_file" | grep -v '^txg' | \
+            sort $sort_opts -k${SORT_FIELD}
+    fi
+}
+
+cleanup() {
+    tput cnorm  # Show cursor
+    stty echo   # Restore echo
+}
+
+trap cleanup EXIT
+
 # Convert pools string to array
 read -ra POOL_ARRAY <<< "$POOLS"
+
+# Setup terminal
+tput civis  # Hide cursor
+stty -echo  # Disable echo
 
 # Main loop
 clear
 echo -e "${BOLD}ZFS TXG Monitor${NC} ${DIM}(refresh: ${INTERVAL}s, ${TXG_COUNT} TXGs/pool)${NC}"
-echo -e "${DIM}Columns: dirty=pending writes, otime=open duration, qtime=quiesce, wtime=wait, stime=sync, MB/s=written/sync${NC}"
+print_keys
 
 while true; do
     tput cup 2 0  # Move cursor to line 3
@@ -150,8 +284,8 @@ while true; do
 
         print_header "$pool"
 
-        # Show last N TXGs
-        tail -$((TXG_COUNT + 1)) "$txg_file" | while read line; do
+        # Show sorted TXGs
+        sort_txg_data "$txg_file" | while read line; do
             format_txg "$line"
         done
 
@@ -162,5 +296,8 @@ while true; do
     # Clear any leftover lines
     tput ed
 
-    sleep "$INTERVAL"
+    # Non-blocking read for key input
+    if read -rsn1 -t "$INTERVAL" key; then
+        handle_key "$key"
+    fi
 done
