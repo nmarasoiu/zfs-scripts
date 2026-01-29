@@ -290,12 +290,9 @@ func formatCount(count uint64) string {
 
 // Display renders the current state
 type Display struct {
-	batchMode       bool
-	p50Index        int
-	deviceSizes     map[string]string
-	lastSampleCount uint64
-	lastTime        time.Time
-	samplesPerSec   float64
+	batchMode   bool
+	p50Index    int
+	deviceSizes map[string]string
 }
 
 func (d *Display) resetCursor() {
@@ -317,17 +314,6 @@ func formatPercentileHeader(pct float64) string {
 var usbDevices = []string{"sdc", "sdd", "sde", "sdf", "sdg"}
 
 func (d *Display) render(histograms map[string]*Histogram, usbAggregate *Histogram, currents map[string]int, usbAggrCurrent int, totalSamples uint64) {
-	// Calculate samples/sec
-	now := time.Now()
-	if !d.lastTime.IsZero() {
-		elapsed := now.Sub(d.lastTime).Seconds()
-		if elapsed > 0 {
-			d.samplesPerSec = float64(totalSamples-d.lastSampleCount) / elapsed
-		}
-	}
-	d.lastSampleCount = totalSamples
-	d.lastTime = now
-
 	var buf strings.Builder
 
 	timestamp := time.Now().Format("Mon Jan 02 15:04:05 2006")
@@ -426,7 +412,7 @@ func (d *Display) render(histograms map[string]*Histogram, usbAggregate *Histogr
 		buf.WriteString("Legend: █= current  ░= p99 (long-term)  -= unused\n")
 	}
 
-	fmt.Fprintf(&buf, "Samples: %s total @ %.0f/sec\n", formatCount(totalSamples), d.samplesPerSec)
+	fmt.Fprintf(&buf, "Samples: %s\n", formatCount(totalSamples))
 
 	if d.batchMode {
 		buf.WriteString("\n")
