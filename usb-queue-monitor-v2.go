@@ -4,7 +4,6 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"math/rand"
 	"os"
 	"os/signal"
 	"sort"
@@ -18,7 +17,7 @@ import (
 
 const (
 	displayInterval = 50 * time.Millisecond // ~20 FPS display refresh
-	reservoirSize   = 10000
+	reservoirSize   = 10_000_000            // 10M samples × 1 byte = 10MB per device
 	maxQueuePerDev  = 30
 	usbDeviceCount  = 5
 	maxQueueUSBAggr = maxQueuePerDev * usbDeviceCount // 150 total
@@ -32,24 +31,24 @@ var percentiles = []float64{10, 20, 30, 40, 50, 60, 70, 80, 90, 95, 99, 99.5, 99
 
 // ReservoirSampler maintains a fixed-size representative sample using reservoir sampling
 type ReservoirSampler struct {
-	reservoir []int
+	reservoir []uint8 // queue depths fit in uint8 (max 255, USB max is 30)
 	count     uint64
 	sum       uint64 // running sum for true average
 	nonZero   uint64 // count of samples where value > 0
-	max       int    // true maximum ever seen (never decreases)
+	max       uint8  // true maximum ever seen (never decreases), capped at 255
 	size      int
-	rng       *rand.Rand
+	rngState  uint64 // xorshift64 state (faster than rand.Rand)
 }
 
 // NewReservoirSampler creates a new reservoir sampler
 func NewReservoirSampler(size int) *ReservoirSampler {
 	return &ReservoirSampler{
-		reservoir: make([]int, 0, size),
+		reservoir: make([]uint8, 0, size),
 		count:     0,
 		sum:       0,
 		nonZero:   0,
 		size:      size,
-		rng:       rand.New(rand.NewSource(time.Now().UnixNano())),
+		rngState:  uint64(time.Now().UnixNano()) | 1, // ensure non-zero
 	}
 }
 
@@ -60,23 +59,32 @@ func (rs *ReservoirSampler) Add(value int) {
 	if value > 0 {
 		rs.nonZero++
 	}
-	if value > rs.max {
-		rs.max = value
+	// Cap at 255 for uint8 storage
+	v := uint8(value)
+	if value > 255 {
+		v = 255
+	}
+	if v > rs.max {
+		rs.max = v
 	}
 	if len(rs.reservoir) < rs.size {
-		rs.reservoir = append(rs.reservoir, value)
+		rs.reservoir = append(rs.reservoir, v)
 	} else {
 		// Randomly replace elements with decreasing probability
-		j := rs.rng.Int63n(int64(rs.count))
-		if j < int64(rs.size) {
-			rs.reservoir[j] = value
+		// xorshift64: fast PRNG (~3 ops vs rand.Int63n overhead)
+		rs.rngState ^= rs.rngState << 13
+		rs.rngState ^= rs.rngState >> 7
+		rs.rngState ^= rs.rngState << 17
+		j := rs.rngState % rs.count
+		if j < uint64(rs.size) {
+			rs.reservoir[j] = v
 		}
 	}
 }
 
 // GetSamples returns a copy of the reservoir
-func (rs *ReservoirSampler) GetSamples() []int {
-	samples := make([]int, len(rs.reservoir))
+func (rs *ReservoirSampler) GetSamples() []uint8 {
+	samples := make([]uint8, len(rs.reservoir))
 	copy(samples, rs.reservoir)
 	return samples
 }
@@ -103,7 +111,7 @@ func (rs *ReservoirSampler) GetUtilization() float64 {
 }
 
 // GetMax returns the true maximum ever seen (never decreases)
-func (rs *ReservoirSampler) GetMax() int {
+func (rs *ReservoirSampler) GetMax() uint8 {
 	return rs.max
 }
 
@@ -157,20 +165,26 @@ func (ir *InflightReader) Read() (int, error) {
 		return 0, err
 	}
 
-	// Parse "read write\n" format
-	parts := strings.Fields(string(ir.buf[:n]))
-	if len(parts) < 2 {
-		return 0, fmt.Errorf("invalid inflight format")
+	// Zero-allocation parse of "read write\n" format
+	// Hand-rolled ASCII→int for hot path (avoids strings.Fields + strconv.Atoi allocations)
+	read, write := 0, 0
+	i := 0
+
+	// Parse first number (read count)
+	for i < n && ir.buf[i] >= '0' && ir.buf[i] <= '9' {
+		read = read*10 + int(ir.buf[i]-'0')
+		i++
 	}
 
-	read, err := strconv.Atoi(parts[0])
-	if err != nil {
-		return 0, err
+	// Skip whitespace
+	for i < n && (ir.buf[i] == ' ' || ir.buf[i] == '\t') {
+		i++
 	}
 
-	write, err := strconv.Atoi(parts[1])
-	if err != nil {
-		return 0, err
+	// Parse second number (write count)
+	for i < n && ir.buf[i] >= '0' && ir.buf[i] <= '9' {
+		write = write*10 + int(ir.buf[i]-'0')
+		i++
 	}
 
 	return read + write, nil
@@ -206,21 +220,8 @@ func getInflight(device string) (int, error) {
 	return read + write, nil
 }
 
-// calcPercentile calculates the percentile from a list of values (returns integer)
-func calcPercentile(data []int, pct int) int {
-	if len(data) == 0 {
-		return 0
-	}
-	sort.Ints(data)
-	idx := len(data) * pct / 100
-	if idx >= len(data) {
-		idx = len(data) - 1
-	}
-	return data[idx]
-}
-
 // calcPercentileFloat calculates the percentile with linear interpolation
-func calcPercentileFloat(sorted []int, pct float64) float64 {
+func calcPercentileFloat(sorted []uint8, pct float64) float64 {
 	if len(sorted) == 0 {
 		return 0.0
 	}
@@ -240,15 +241,15 @@ func calcPercentileFloat(sorted []int, pct float64) float64 {
 }
 
 // calcPercentiles calculates all configured percentiles
-func calcPercentiles(data []int) []float64 {
+func calcPercentiles(data []uint8) []float64 {
 	results := make([]float64, len(percentiles))
 	if len(data) == 0 {
 		return results
 	}
 
-	sorted := make([]int, len(data))
+	sorted := make([]uint8, len(data))
 	copy(sorted, data)
-	sort.Ints(sorted)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
 
 	for i, pct := range percentiles {
 		results[i] = calcPercentileFloat(sorted, pct)
@@ -617,31 +618,35 @@ func main() {
 				}
 				usbAggrCurrent := int(currents.usbAggrCurr.Load())
 
-				// Get sampler snapshots (needs read lock)
-				state.mu.RLock()
-				// Make copies of samplers for rendering
+				// Snapshot scalars under lock (fast: ~36 bytes per device)
 				samplersCopy := make(map[string]*ReservoirSampler)
+				state.mu.RLock()
 				for dev, s := range state.samplers {
-					// Create a temporary sampler with copied data for rendering
+					// Copy only scalars under lock
 					samplersCopy[dev] = &ReservoirSampler{
-						reservoir: s.GetSamples(), // GetSamples already returns a copy
-						count:     s.count,
-						sum:       s.sum,
-						nonZero:   s.nonZero,
-						max:       s.max,
-						size:      s.size,
+						count:   s.count,
+						sum:     s.sum,
+						nonZero: s.nonZero,
+						max:     s.max,
+						size:    s.size,
 					}
 				}
-				// Copy USB aggregate
+				// Copy USB aggregate scalars
 				display.usbAggregate = &ReservoirSampler{
-					reservoir: state.usbAggregate.GetSamples(),
-					count:     state.usbAggregate.count,
-					sum:       state.usbAggregate.sum,
-					nonZero:   state.usbAggregate.nonZero,
-					max:       state.usbAggregate.max,
-					size:      state.usbAggregate.size,
+					count:   state.usbAggregate.count,
+					sum:     state.usbAggregate.sum,
+					nonZero: state.usbAggregate.nonZero,
+					max:     state.usbAggregate.max,
+					size:    state.usbAggregate.size,
 				}
 				state.mu.RUnlock()
+
+				// Copy reservoirs outside lock (slightly stale but fine for display)
+				// Avoids ~90K int copies under lock
+				for dev, s := range state.samplers {
+					samplersCopy[dev].reservoir = s.GetSamples()
+				}
+				display.usbAggregate.reservoir = state.usbAggregate.GetSamples()
 
 				// Render (outside of lock)
 				display.render(samplersCopy, currentMap, usbAggrCurrent, sampleCount.Load())
