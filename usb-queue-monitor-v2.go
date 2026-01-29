@@ -10,12 +10,14 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
 
 const (
-	sampleInterval  = 100 * time.Millisecond
+	displayInterval = 16 * time.Millisecond // ~60 FPS display refresh
 	reservoirSize   = 10000
 	maxQueuePerDev  = 30
 	usbDeviceCount  = 5
@@ -233,10 +235,13 @@ func formatCount(count uint64) string {
 
 // Display renders the current state
 type Display struct {
-	batchMode    bool
-	p50Index     int
-	deviceSizes  map[string]string
-	usbAggregate *ReservoirSampler
+	batchMode       bool
+	p50Index        int
+	deviceSizes     map[string]string
+	usbAggregate    *ReservoirSampler
+	lastSampleCount uint64
+	lastTime        time.Time
+	samplesPerSec   float64
 }
 
 func (d *Display) resetCursor() {
@@ -257,7 +262,18 @@ func formatPercentileHeader(pct float64) string {
 
 var usbDevices = []string{"sdc", "sdd", "sde", "sdf", "sdg"}
 
-func (d *Display) render(samplers map[string]*ReservoirSampler, currents map[string]int, usbAggrCurrent int) {
+func (d *Display) render(samplers map[string]*ReservoirSampler, currents map[string]int, usbAggrCurrent int, totalSamples uint64) {
+	// Calculate samples/sec
+	now := time.Now()
+	if !d.lastTime.IsZero() {
+		elapsed := now.Sub(d.lastTime).Seconds()
+		if elapsed > 0 {
+			d.samplesPerSec = float64(totalSamples-d.lastSampleCount) / elapsed
+		}
+	}
+	d.lastSampleCount = totalSamples
+	d.lastTime = now
+
 	var buf strings.Builder
 
 	timestamp := time.Now().Format("Mon Jan 02 15:04:05 2006")
@@ -352,10 +368,8 @@ func (d *Display) render(samplers map[string]*ReservoirSampler, currents map[str
 		buf.WriteString("Legend: █= current  ░= p99 (long-term)  -= unused\n")
 	}
 
-	// Use the first device's sampler for total count (they're all the same)
-	sampleCount := samplers[devices[0]].GetCount()
 	reservoirCount := len(samplers[devices[0]].GetSamples())
-	fmt.Fprintf(&buf, "Samples: %s total (%d in reservoir)\n", formatCount(sampleCount), reservoirCount)
+	fmt.Fprintf(&buf, "Samples: %s total (%d in reservoir) @ %.0f/sec\n", formatCount(totalSamples), reservoirCount, d.samplesPerSec)
 
 	if d.batchMode {
 		buf.WriteString("\n")
@@ -364,6 +378,21 @@ func (d *Display) render(samplers map[string]*ReservoirSampler, currents map[str
 	// Write entire buffer at once (reduces flicker)
 	d.resetCursor()
 	fmt.Print(buf.String())
+}
+
+// SamplerState holds the shared state between sampler and display goroutines
+type SamplerState struct {
+	mu           sync.RWMutex
+	samplers     map[string]*ReservoirSampler
+	usbAggregate *ReservoirSampler
+	currents     map[string]int32 // atomic access via dedicated atomics below
+	usbAggrCurr  int32
+}
+
+// Atomics for current values (lock-free access for display)
+type CurrentValues struct {
+	values      map[string]*atomic.Int32
+	usbAggrCurr atomic.Int32
 }
 
 func main() {
@@ -402,6 +431,23 @@ func main() {
 	// Create aggregate sampler for combined USB queue depth
 	usbAggregate := NewReservoirSampler(reservoirSize)
 
+	// Initialize atomic current values
+	currents := &CurrentValues{
+		values: make(map[string]*atomic.Int32),
+	}
+	for _, dev := range devices {
+		if dev == "" {
+			continue
+		}
+		currents.values[dev] = &atomic.Int32{}
+	}
+
+	// Shared state protected by RWMutex for sampler data
+	state := &SamplerState{
+		samplers:     samplers,
+		usbAggregate: usbAggregate,
+	}
+
 	display := &Display{
 		batchMode:    *batchMode,
 		p50Index:     p50Index,
@@ -413,56 +459,119 @@ func main() {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
-	// Initial delay
+	// Channel to signal shutdown to goroutines
+	done := make(chan struct{})
+
+	// Initial message
 	if !*batchMode {
 		fmt.Println("Block I/O Queue Monitor - Ctrl+C to stop")
-		fmt.Println("Building initial sample set...")
+		fmt.Println("Starting sampler (dedicated CPU) and display (60 FPS)...")
 	} else {
-		log.Println("Building initial sample set...")
+		log.Println("Starting sampler (dedicated CPU) and display...")
 	}
-	time.Sleep(500 * time.Millisecond)
 
-	ticker := time.NewTicker(sampleInterval)
-	defer ticker.Stop()
+	// SAMPLER GOROUTINE - runs flat out, no sleep, hogs one CPU core
+	var sampleCount atomic.Uint64
+	go func() {
+		// Pre-allocate slice for batch updates
+		batch := make(map[string]int, len(devices))
 
-	for {
-		select {
-		case <-sigChan:
-			if *batchMode {
-				log.Println("Received interrupt signal, shutting down...")
-			} else {
-				fmt.Println("\nStopped.")
-			}
-			return
-
-		case <-ticker.C:
-			currents := make(map[string]int)
-
-			// Collect samples for each device
-			for _, dev := range devices {
-				if dev == "" {
-					continue
-				}
-				current, err := getInflight(dev)
-				if err != nil {
-					if *batchMode {
-						log.Printf("ERROR: Failed to read inflight for %s: %v", dev, err)
+		for {
+			select {
+			case <-done:
+				return
+			default:
+				// Phase 1: Read all sysfs values (no locks, just I/O)
+				usbSum := int32(0)
+				for _, dev := range devices {
+					if dev == "" {
+						continue
 					}
-					current = 0
+					current, err := getInflight(dev)
+					if err != nil {
+						current = 0
+					}
+					batch[dev] = current
+
+					// Update atomic current value (lock-free for display)
+					currents.values[dev].Store(int32(current))
 				}
-				currents[dev] = current
-				samplers[dev].Add(current)
-			}
 
-			// Calculate and sample aggregate USB queue depth
-			usbAggrCurrent := 0
-			for _, usbDev := range usbDevices {
-				usbAggrCurrent += currents[usbDev]
-			}
-			usbAggregate.Add(usbAggrCurrent)
+				// Calculate USB aggregate
+				for _, usbDev := range usbDevices {
+					usbSum += int32(batch[usbDev])
+				}
+				currents.usbAggrCurr.Store(usbSum)
 
-			// Display current state
-			display.render(samplers, currents, usbAggrCurrent)
+				// Phase 2: Batch update all samplers under single lock
+				state.mu.Lock()
+				for dev, current := range batch {
+					state.samplers[dev].Add(current)
+				}
+				state.usbAggregate.Add(int(usbSum))
+				state.mu.Unlock()
+
+				sampleCount.Add(1)
+			}
 		}
+	}()
+
+	// DISPLAY GOROUTINE - runs at ~60 FPS (16ms)
+	displayTicker := time.NewTicker(displayInterval)
+	go func() {
+		defer displayTicker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-displayTicker.C:
+				// Read current values (lock-free atomics)
+				currentMap := make(map[string]int)
+				for _, dev := range devices {
+					if dev == "" {
+						continue
+					}
+					currentMap[dev] = int(currents.values[dev].Load())
+				}
+				usbAggrCurrent := int(currents.usbAggrCurr.Load())
+
+				// Get sampler snapshots (needs read lock)
+				state.mu.RLock()
+				// Make copies of samplers for rendering
+				samplersCopy := make(map[string]*ReservoirSampler)
+				for dev, s := range state.samplers {
+					// Create a temporary sampler with copied data for rendering
+					samplersCopy[dev] = &ReservoirSampler{
+						reservoir: s.GetSamples(), // GetSamples already returns a copy
+						count:     s.count,
+						sum:       s.sum,
+						nonZero:   s.nonZero,
+						size:      s.size,
+					}
+				}
+				// Copy USB aggregate
+				display.usbAggregate = &ReservoirSampler{
+					reservoir: state.usbAggregate.GetSamples(),
+					count:     state.usbAggregate.count,
+					sum:       state.usbAggregate.sum,
+					nonZero:   state.usbAggregate.nonZero,
+					size:      state.usbAggregate.size,
+				}
+				state.mu.RUnlock()
+
+				// Render (outside of lock)
+				display.render(samplersCopy, currentMap, usbAggrCurrent, sampleCount.Load())
+			}
+		}
+	}()
+
+	// Wait for shutdown signal
+	<-sigChan
+	close(done)
+
+	if *batchMode {
+		log.Printf("Shutting down... Total samples: %d", sampleCount.Load())
+	} else {
+		fmt.Printf("\nStopped. Total samples: %d\n", sampleCount.Load())
 	}
 }
