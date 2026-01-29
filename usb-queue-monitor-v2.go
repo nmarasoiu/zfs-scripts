@@ -782,35 +782,41 @@ func main() {
 				}
 				usbAggrCurrent := int(currents.usbAggrCurr.Load())
 
-				// Get sampler snapshots (needs read lock)
-				state.mu.RLock()
-				// Make copies of samplers for rendering (fixed-size array)
+				// Snapshot scalars under lock (fast: just 5 uint64s per device)
 				var samplersCopy [numDeviceSlots]*ReservoirSampler
+				state.mu.RLock()
 				for i := 0; i < numDeviceSlots; i++ {
 					s := state.samplers[i]
 					if s == nil {
 						continue
 					}
-					// Create a temporary sampler with copied data for rendering
+					// Copy only scalars under lock (36 bytes per device)
 					samplersCopy[i] = &ReservoirSampler{
-						reservoir: s.GetSamples(), // GetSamples already returns a copy
-						count:     s.count,
-						sum:       s.sum,
-						nonZero:   s.nonZero,
-						max:       s.max,
-						size:      s.size,
+						count:   s.count,
+						sum:     s.sum,
+						nonZero: s.nonZero,
+						max:     s.max,
+						size:    s.size,
 					}
 				}
-				// Copy USB aggregate
+				// Copy USB aggregate scalars
 				display.usbAggregate = &ReservoirSampler{
-					reservoir: state.usbAggregate.GetSamples(),
-					count:     state.usbAggregate.count,
-					sum:       state.usbAggregate.sum,
-					nonZero:   state.usbAggregate.nonZero,
-					max:       state.usbAggregate.max,
-					size:      state.usbAggregate.size,
+					count:   state.usbAggregate.count,
+					sum:     state.usbAggregate.sum,
+					nonZero: state.usbAggregate.nonZero,
+					max:     state.usbAggregate.max,
+					size:    state.usbAggregate.size,
 				}
 				state.mu.RUnlock()
+
+				// Copy reservoirs outside lock (slightly stale but fine for display)
+				// This avoids 90K int copies under lock
+				for i := 0; i < numDeviceSlots; i++ {
+					if samplersCopy[i] != nil && state.samplers[i] != nil {
+						samplersCopy[i].reservoir = state.samplers[i].GetSamples()
+					}
+				}
+				display.usbAggregate.reservoir = state.usbAggregate.GetSamples()
 
 				// Render (outside of lock)
 				display.render(samplersCopy, currentValues, usbAggrCurrent, sampleCount.Load())
