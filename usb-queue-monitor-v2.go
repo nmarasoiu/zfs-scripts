@@ -32,6 +32,7 @@ var percentiles = []float64{10, 20, 30, 40, 50, 60, 70, 80, 90, 95, 99, 99.5, 99
 // ReservoirSampler maintains a fixed-size representative sample using reservoir sampling
 type ReservoirSampler struct {
 	reservoir []uint8 // queue depths fit in uint8 (max 255, USB max is 30)
+	populated int     // number of valid samples in reservoir (0 to size)
 	count     uint64
 	sum       uint64 // running sum for true average
 	nonZero   uint64 // count of samples where value > 0
@@ -40,10 +41,11 @@ type ReservoirSampler struct {
 	rngState  uint64 // xorshift64 state (faster than rand.Rand)
 }
 
-// NewReservoirSampler creates a new reservoir sampler
+// NewReservoirSampler creates a new reservoir sampler with preallocated array
 func NewReservoirSampler(size int) *ReservoirSampler {
 	return &ReservoirSampler{
-		reservoir: make([]uint8, 0, size),
+		reservoir: make([]uint8, size), // preallocate full array (zeroed by Go)
+		populated: 0,                   // tracks valid entries
 		count:     0,
 		sum:       0,
 		nonZero:   0,
@@ -67,8 +69,10 @@ func (rs *ReservoirSampler) Add(value int) {
 	if v > rs.max {
 		rs.max = v
 	}
-	if len(rs.reservoir) < rs.size {
-		rs.reservoir = append(rs.reservoir, v)
+	if rs.populated < rs.size {
+		// Fill phase: direct index assignment (no append overhead)
+		rs.reservoir[rs.populated] = v
+		rs.populated++
 	} else {
 		// Randomly replace elements with decreasing probability
 		// xorshift64: fast PRNG (~3 ops vs rand.Int63n overhead)
@@ -82,11 +86,16 @@ func (rs *ReservoirSampler) Add(value int) {
 	}
 }
 
-// GetSamples returns a copy of the reservoir
+// GetSamples returns a copy of the populated portion of the reservoir
 func (rs *ReservoirSampler) GetSamples() []uint8 {
-	samples := make([]uint8, len(rs.reservoir))
-	copy(samples, rs.reservoir)
+	samples := make([]uint8, rs.populated)
+	copy(samples, rs.reservoir[:rs.populated])
 	return samples
+}
+
+// GetPopulated returns the number of valid samples in the reservoir
+func (rs *ReservoirSampler) GetPopulated() int {
+	return rs.populated
 }
 
 // GetCount returns the total number of samples seen
@@ -433,7 +442,7 @@ func (d *Display) render(samplers map[string]*ReservoirSampler, currents map[str
 		buf.WriteString("Legend: █= current  ░= p99 (long-term)  -= unused\n")
 	}
 
-	reservoirCount := len(samplers[devices[0]].GetSamples())
+	reservoirCount := samplers[devices[0]].GetPopulated()
 	fmt.Fprintf(&buf, "Samples: %s total (%d in reservoir) @ %.0f/sec\n", formatCount(totalSamples), reservoirCount, d.samplesPerSec)
 
 	if d.batchMode {
@@ -618,26 +627,28 @@ func main() {
 				}
 				usbAggrCurrent := int(currents.usbAggrCurr.Load())
 
-				// Snapshot scalars under lock (fast: ~36 bytes per device)
+				// Snapshot scalars under lock (fast: ~40 bytes per device)
 				samplersCopy := make(map[string]*ReservoirSampler)
 				state.mu.RLock()
 				for dev, s := range state.samplers {
 					// Copy only scalars under lock
 					samplersCopy[dev] = &ReservoirSampler{
-						count:   s.count,
-						sum:     s.sum,
-						nonZero: s.nonZero,
-						max:     s.max,
-						size:    s.size,
+						populated: s.populated,
+						count:     s.count,
+						sum:       s.sum,
+						nonZero:   s.nonZero,
+						max:       s.max,
+						size:      s.size,
 					}
 				}
 				// Copy USB aggregate scalars
 				display.usbAggregate = &ReservoirSampler{
-					count:   state.usbAggregate.count,
-					sum:     state.usbAggregate.sum,
-					nonZero: state.usbAggregate.nonZero,
-					max:     state.usbAggregate.max,
-					size:    state.usbAggregate.size,
+					populated: state.usbAggregate.populated,
+					count:     state.usbAggregate.count,
+					sum:       state.usbAggregate.sum,
+					nonZero:   state.usbAggregate.nonZero,
+					max:       state.usbAggregate.max,
+					size:      state.usbAggregate.size,
 				}
 				state.mu.RUnlock()
 
