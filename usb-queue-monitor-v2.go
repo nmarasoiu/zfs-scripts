@@ -22,6 +22,7 @@ const (
 	maxQueuePerDev  = 30
 	usbDeviceCount  = 5
 	maxQueueUSBAggr = maxQueuePerDev * usbDeviceCount // 150 total
+	sampleBatchSize = 1000                            // samples before acquiring lock
 )
 
 // Device groups: SSD/NVMe first, then internal rotational, then USB drives
@@ -551,8 +552,14 @@ func main() {
 	// SAMPLER GOROUTINE - runs flat out, no sleep, hogs one CPU core
 	var sampleCount atomic.Uint64
 	go func() {
-		// Pre-allocate slice for batch updates
-		batch := make(map[string]int, len(devices))
+		// Pre-allocate batch storage - accumulate samples locally before locking
+		localBatches := make(map[string][]int, len(devices))
+		for _, dev := range devices {
+			if dev != "" {
+				localBatches[dev] = make([]int, 0, sampleBatchSize)
+			}
+		}
+		localUsbSums := make([]int, 0, sampleBatchSize)
 
 		for {
 			select {
@@ -560,7 +567,7 @@ func main() {
 				return
 			default:
 				// Phase 1: Read all sysfs values via persistent handles (no locks, just I/O)
-				usbSum := int32(0)
+				usbSum := 0
 				for _, dev := range devices {
 					if dev == "" {
 						continue
@@ -573,7 +580,9 @@ func main() {
 					if err != nil {
 						current = 0
 					}
-					batch[dev] = current
+
+					// Accumulate in local batch (no lock needed)
+					localBatches[dev] = append(localBatches[dev], current)
 
 					// Update atomic current value (lock-free for display)
 					currents.values[dev].Store(int32(current))
@@ -581,19 +590,31 @@ func main() {
 
 				// Calculate USB aggregate
 				for _, usbDev := range usbDevices {
-					usbSum += int32(batch[usbDev])
+					if vals := localBatches[usbDev]; len(vals) > 0 {
+						usbSum += vals[len(vals)-1]
+					}
 				}
-				currents.usbAggrCurr.Store(usbSum)
-
-				// Phase 2: Batch update all samplers under single lock
-				state.mu.Lock()
-				for dev, current := range batch {
-					state.samplers[dev].Add(current)
-				}
-				state.usbAggregate.Add(int(usbSum))
-				state.mu.Unlock()
+				localUsbSums = append(localUsbSums, usbSum)
+				currents.usbAggrCurr.Store(int32(usbSum))
 
 				sampleCount.Add(1)
+
+				// Phase 2: Flush batch when full (1000x fewer lock acquisitions)
+				if len(localUsbSums) >= sampleBatchSize {
+					state.mu.Lock()
+					for dev, values := range localBatches {
+						for _, v := range values {
+							state.samplers[dev].Add(v)
+						}
+						// Reset slice, reuse backing array
+						localBatches[dev] = localBatches[dev][:0]
+					}
+					for _, sum := range localUsbSums {
+						state.usbAggregate.Add(sum)
+					}
+					localUsbSums = localUsbSums[:0]
+					state.mu.Unlock()
+				}
 			}
 		}
 	}()
