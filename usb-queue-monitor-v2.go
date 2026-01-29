@@ -149,16 +149,10 @@ func NewInflightReader(device string) (*InflightReader, error) {
 	}, nil
 }
 
-// Read seeks to start and reads the current in-flight count (avoids open/close overhead)
+// Read uses pread to read from offset 0 in a single syscall (avoids seek+read overhead)
 func (ir *InflightReader) Read() (int, error) {
-	// Seek to beginning
-	_, err := ir.file.Seek(0, 0)
-	if err != nil {
-		return 0, err
-	}
-
-	// Read into pre-allocated buffer
-	n, err := ir.file.Read(ir.buf)
+	// Single syscall: pread(fd, buf, len, offset=0) instead of lseek + read
+	n, err := syscall.Pread(int(ir.file.Fd()), ir.buf, 0)
 	if err != nil {
 		return 0, err
 	}
