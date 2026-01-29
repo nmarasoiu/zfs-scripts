@@ -124,12 +124,13 @@ human_time_ns() {
 }
 
 state_label() {
+    # Returns 9-char padded state with colors
     case $1 in
-        O) echo -e "${GREEN}OPEN${NC}    " ;;
-        Q) echo -e "${YELLOW}QUIESCE${NC} " ;;
-        S) echo -e "${RED}SYNCING${NC} " ;;
-        C) echo -e "${DIM}done${NC}    " ;;
-        *) echo -e "${DIM}$1${NC}      " ;;
+        O) echo -e "${GREEN}OPEN${NC}     " ;;
+        Q) echo -e "${YELLOW}QUIESCE${NC}  " ;;
+        S) echo -e "${RED}SYNCING${NC}  " ;;
+        C) echo -e "${DIM}done${NC}     " ;;
+        *) echo -e "${DIM}$1${NC}       " ;;
     esac
 }
 
@@ -139,10 +140,14 @@ print_header() {
     local sort_dir="▲"
     [[ $SORT_REV -eq 1 ]] && sort_dir="▼"
 
+    # Column widths - must match data format exactly
+    # DATE=11, TIME=9, TXG=10, STATE=9, DIRTY=10, READ=10, WRITTEN=10, OPS=13, OPEN=8, QUEUE=8, WAIT=8, SYNC=8, MB/s=8
+    local sep="━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo -e "${BOLD}${CYAN}${pool}${NC}  ${DIM}[sorted by ${SORT_NAME} ${sort_dir}]${NC}"
-    echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${BOLD}DATE        TIME      TXG        STATE     DIRTY     READ      WRITTEN   R/W OPS      OPEN     QUEUE    WAIT     SYNC     MB/s     DURATION${NC}"
-    echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${BOLD}${sep}${NC}"
+    printf "${BOLD}%-11s %-9s %-10s %-9s %-10s %-10s %-10s %-13s %-8s %-8s %-8s %-8s %-8s %s${NC}\n" \
+        "DATE" "TIME" "TXG" "STATE" "DIRTY" "READ" "WRITTEN" "R/W OPS" "OPEN" "QUEUE" "WAIT" "SYNC" "MB/s" "DURATION"
+    echo -e "${BOLD}${sep}${NC}"
 }
 
 # Convert birth hrtime (ns since boot) to wall-clock timestamp
@@ -185,6 +190,8 @@ format_txg() {
     local mbps_h="-"
     if (( stime > 0 && nwritten > 0 )); then
         local mbps=$(echo "scale=1; $nwritten * 953.674 / $stime" | bc)
+        # Ensure leading zero (bc outputs .5 instead of 0.5)
+        [[ "$mbps" == .* ]] && mbps="0$mbps"
         mbps_h="${mbps}"
     fi
 
@@ -204,12 +211,13 @@ format_txg() {
     fi
 
     # Highlight active TXGs
+    # Format: DATE=11, TIME=9, TXG=10, STATE=9(in state_str), DIRTY=10, READ=10, WRITTEN=10, OPS=13, OPEN=8, QUEUE=8, WAIT=8, SYNC=8, MB/s=8
     if [[ "$state" == "O" || "$state" == "S" || "$state" == "Q" ]]; then
-        printf "${CYAN}%-11s %-9s %-10s${NC} %s %-9s %-9s %-9s %5d/%-6d %-8s %-8s %-8s %-8s %-8s %s\n" \
+        printf "${CYAN}%-11s %-9s %-10s${NC}%s%-10s %-10s %-10s %6d/%-6d %-8s %-8s %-8s %-8s %-8s %s\n" \
             "$birth_date" "$birth_time" "$txg" "$state_str" "$dirty_h" "$read_h" "$written_h" "$reads" "$writes" \
             "$otime_h" "$qtime_h" "$wtime_h" "$stime_h" "$mbps_h" "$duration_str"
     else
-        printf "${DIM}%-11s %-9s %-10s${NC} %s %-9s %-9s %-9s %5d/%-6d %-8s %-8s %-8s %-8s %-8s %s\n" \
+        printf "${DIM}%-11s %-9s %-10s${NC}%s%-10s %-10s %-10s %6d/%-6d %-8s %-8s %-8s %-8s %-8s %s\n" \
             "$birth_date" "$birth_time" "$txg" "$state_str" "$dirty_h" "$read_h" "$written_h" "$reads" "$writes" \
             "$otime_h" "$qtime_h" "$wtime_h" "$stime_h" "$mbps_h" "$duration_str"
     fi
