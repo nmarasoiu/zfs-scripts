@@ -271,14 +271,15 @@ sort_txg_data() {
     local sort_opts="-n"
     [[ $SORT_REV -eq 1 ]] && sort_opts="-rn"
 
-    # For mbps, we need to calculate it inline
+    # Sort ALL TXGs in history, then take top N for display
+    # This allows finding e.g. highest MB/s across entire history, not just recent
     if [[ "$SORT_COL" == "mbps" ]]; then
-        tail -$((TXG_COUNT + 1)) "$txg_file" | grep -v '^txg' | \
+        grep -v '^txg' "$txg_file" | \
             awk '{mbps=0; if($12>0 && $6>0) mbps=$6*953.674/$12; print mbps, $0}' | \
-            sort $sort_opts -k1 | cut -d' ' -f2-
+            sort $sort_opts -k1 | head -$TXG_COUNT | cut -d' ' -f2-
     else
-        tail -$((TXG_COUNT + 1)) "$txg_file" | grep -v '^txg' | \
-            sort $sort_opts -k${SORT_FIELD}
+        grep -v '^txg' "$txg_file" | \
+            sort $sort_opts -k${SORT_FIELD} | head -$TXG_COUNT
     fi
 }
 
