@@ -178,20 +178,26 @@ func (ir *InflightReader) Read() (int, error) {
 		return 0, err
 	}
 
-	// Parse "read write\n" format
-	parts := strings.Fields(string(ir.buf[:n]))
-	if len(parts) < 2 {
-		return 0, fmt.Errorf("invalid inflight format")
+	// Zero-allocation parse of "read write\n" format
+	// Hand-rolled ASCII→int for hot path (avoids strings.Fields + strconv.Atoi allocations)
+	read, write := 0, 0
+	i := 0
+
+	// Parse first number (read count)
+	for i < n && ir.buf[i] >= '0' && ir.buf[i] <= '9' {
+		read = read*10 + int(ir.buf[i]-'0')
+		i++
 	}
 
-	read, err := strconv.Atoi(parts[0])
-	if err != nil {
-		return 0, err
+	// Skip whitespace
+	for i < n && (ir.buf[i] == ' ' || ir.buf[i] == '\t') {
+		i++
 	}
 
-	write, err := strconv.Atoi(parts[1])
-	if err != nil {
-		return 0, err
+	// Parse second number (write count)
+	for i < n && ir.buf[i] >= '0' && ir.buf[i] <= '9' {
+		write = write*10 + int(ir.buf[i]-'0')
+		i++
 	}
 
 	return read + write, nil
