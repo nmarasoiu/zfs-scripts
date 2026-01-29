@@ -114,12 +114,10 @@ human_time_ns() {
         printf "%.1fm" $(echo "scale=1; $ns/60000000000" | bc)
     elif (( ns >= 1000000000 )); then
         printf "%.1fs" $(echo "scale=1; $ns/1000000000" | bc)
-    elif (( ns >= 1000000 )); then
-        printf "%.0fms" $(echo "scale=0; $ns/1000000" | bc)
-    elif (( ns >= 1000 )); then
-        printf "%.0fµs" $(echo "scale=0; $ns/1000" | bc)
     else
-        printf "%dns" $ns
+        # Everything sub-second in ms (rounded)
+        local ms=$(( (ns + 500000) / 1000000 ))
+        printf "%dms" $ms
     fi
 }
 
