@@ -21,8 +21,8 @@ const (
 	maxQueueUSBAggr = maxQueuePerDev * usbDeviceCount // 150 total
 )
 
-// Device groups: SSD/NVMe first, then internal rotational, then USB drives
-var devices = []string{"sda", "nvme0n1", "nvme1n1", "", "sdb", "", "sdc", "sdd", "sde", "sdf", "sdg"}
+// Device groups: SSD/NVMe first, then USB drives
+var devices = []string{"sda", "nvme0n1", "nvme1n1", "", "sdc", "sdd", "sde", "sdf", "sdg"}
 
 // Configurable percentiles to display (P0 replaced by Util column)
 var percentiles = []float64{10, 20, 30, 40, 50, 60, 70, 80, 90, 95, 99, 99.5, 99.9, 99.95, 99.99, 99.995, 99.999, 100}
