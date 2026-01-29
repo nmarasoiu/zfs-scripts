@@ -30,8 +30,6 @@ const (
 	devNvme0n1
 	devNvme1n1
 	devSep1 // separator (empty line in display)
-	devSdb
-	devSep2 // separator
 	devSdc
 	devSdd
 	devSde
@@ -41,7 +39,7 @@ const (
 )
 
 // Device names indexed by device constants above
-var deviceNames = [numDeviceSlots]string{"sda", "nvme0n1", "nvme1n1", "", "sdb", "", "sdc", "sdd", "sde", "sdf", "sdg"}
+var deviceNames = [numDeviceSlots]string{"sda", "nvme0n1", "nvme1n1", "", "sdc", "sdd", "sde", "sdf", "sdg"}
 
 // USB device indices for aggregate calculation
 var usbDeviceIndices = [usbDeviceCount]int{devSdc, devSdd, devSde, devSdf, devSdg}
