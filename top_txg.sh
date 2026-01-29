@@ -16,18 +16,17 @@ Arguments:
 Options:
   -h, --help  Show this help message
 
-Interactive Keys:
-  t   Sort by TXG number
-  d   Sort by Dirty bytes
-  r   Sort by Read bytes
-  w   Sort by Written bytes
-  o   Sort by Open time
-  u   Sort by Queue time
-  a   Sort by Wait time
-  s   Sort by Sync time
-  m   Sort by MB/s
-  R   Reverse sort order (toggle asc/desc)
-  q   Quit
+Interactive Keys (lowercase=ascending, UPPERCASE=descending):
+  t/T   Sort by TXG number
+  d/D   Sort by Dirty bytes
+  r/R   Sort by Read bytes
+  w/W   Sort by Written bytes
+  o/O   Sort by Open time
+  u/U   Sort by Queue time
+  a/A   Sort by Wait time
+  s/S   Sort by Sync time
+  m/M   Sort by MB/s
+  q     Quit
 
 Columns:
   DATE/TIME   When the TXG was born (converted from hrtime)
@@ -238,24 +237,32 @@ show_summary() {
 }
 
 print_keys() {
-    echo -e "${DIM}Keys: [t]xg [d]irty [r]ead [w]ritten [o]pen q[u]eue w[a]it [s]ync [m]b/s  [R]everse  [q]uit  [h]elp${NC}"
+    echo -e "${DIM}Keys: [t/T]xg [d/D]irty [r/R]ead [w/W]ritten [o/O]pen q[u/U]eue w[a/A]it [s/S]ync [m/M]b/s  [q]uit  [h]elp  (lowercase=asc, UPPER=desc)${NC}"
 }
 
 handle_key() {
     local key="$1"
     case "$key" in
-        t) SORT_COL="txg" ;;
-        d) SORT_COL="dirty" ;;
-        r) SORT_COL="read" ;;
-        w) SORT_COL="written" ;;
-        o) SORT_COL="open" ;;
-        u) SORT_COL="queue" ;;
-        a) SORT_COL="wait" ;;
-        s) SORT_COL="sync" ;;
-        m) SORT_COL="mbps" ;;
-        R) SORT_REV=$((1 - SORT_REV)) ;;
-        q) cleanup; exit 0 ;;
-        h)
+        t) SORT_COL="txg";     SORT_REV=0 ;;
+        T) SORT_COL="txg";     SORT_REV=1 ;;
+        d) SORT_COL="dirty";   SORT_REV=0 ;;
+        D) SORT_COL="dirty";   SORT_REV=1 ;;
+        r) SORT_COL="read";    SORT_REV=0 ;;
+        R) SORT_COL="read";    SORT_REV=1 ;;
+        w) SORT_COL="written"; SORT_REV=0 ;;
+        W) SORT_COL="written"; SORT_REV=1 ;;
+        o) SORT_COL="open";    SORT_REV=0 ;;
+        O) SORT_COL="open";    SORT_REV=1 ;;
+        u) SORT_COL="queue";   SORT_REV=0 ;;
+        U) SORT_COL="queue";   SORT_REV=1 ;;
+        a) SORT_COL="wait";    SORT_REV=0 ;;
+        A) SORT_COL="wait";    SORT_REV=1 ;;
+        s) SORT_COL="sync";    SORT_REV=0 ;;
+        S) SORT_COL="sync";    SORT_REV=1 ;;
+        m) SORT_COL="mbps";    SORT_REV=0 ;;
+        M) SORT_COL="mbps";    SORT_REV=1 ;;
+        q|Q) cleanup; exit 0 ;;
+        h|H)
             clear
             show_help
             ;;
