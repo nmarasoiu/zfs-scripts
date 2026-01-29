@@ -36,6 +36,7 @@ type ReservoirSampler struct {
 	count     uint64
 	sum       uint64 // running sum for true average
 	nonZero   uint64 // count of samples where value > 0
+	max       int    // true maximum ever seen (never decreases)
 	size      int
 	rng       *rand.Rand
 }
@@ -58,6 +59,9 @@ func (rs *ReservoirSampler) Add(value int) {
 	rs.sum += uint64(value)
 	if value > 0 {
 		rs.nonZero++
+	}
+	if value > rs.max {
+		rs.max = value
 	}
 	if len(rs.reservoir) < rs.size {
 		rs.reservoir = append(rs.reservoir, value)
@@ -96,6 +100,11 @@ func (rs *ReservoirSampler) GetUtilization() float64 {
 		return 0.0
 	}
 	return float64(rs.nonZero) / float64(rs.count) * 100.0
+}
+
+// GetMax returns the true maximum ever seen (never decreases)
+func (rs *ReservoirSampler) GetMax() int {
+	return rs.max
 }
 
 // getDeviceSize reads the device size and returns it as a human-readable string (e.g., "4TB")
@@ -367,6 +376,8 @@ func (d *Display) render(samplers map[string]*ReservoirSampler, currents map[str
 		sampler := samplers[dev]
 		current := currents[dev]
 		pcts := calcPercentiles(sampler.GetSamples())
+		// Use true max for P100 (last percentile) instead of reservoir max
+		pcts[len(pcts)-1] = float64(sampler.GetMax())
 		avg := sampler.GetAverage()
 		util := sampler.GetUtilization()
 
@@ -392,6 +403,8 @@ func (d *Display) render(samplers map[string]*ReservoirSampler, currents map[str
 		// After last USB device, show aggregate USB stats
 		if dev == "sdg" {
 			aggrPcts := calcPercentiles(d.usbAggregate.GetSamples())
+			// Use true max for P100 (last percentile) instead of reservoir max
+			aggrPcts[len(aggrPcts)-1] = float64(d.usbAggregate.GetMax())
 			aggrAvg := d.usbAggregate.GetAverage()
 			aggrUtil := d.usbAggregate.GetUtilization()
 
@@ -621,6 +634,7 @@ func main() {
 						count:     s.count,
 						sum:       s.sum,
 						nonZero:   s.nonZero,
+						max:       s.max,
 						size:      s.size,
 					}
 				}
@@ -630,6 +644,7 @@ func main() {
 					count:     state.usbAggregate.count,
 					sum:       state.usbAggregate.sum,
 					nonZero:   state.usbAggregate.nonZero,
+					max:       state.usbAggregate.max,
 					size:      state.usbAggregate.size,
 				}
 				state.mu.RUnlock()
