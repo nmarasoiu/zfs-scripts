@@ -1,0 +1,55 @@
+# cap scrub/resilver outstanding scan per leaf device (bytes)
+options zfs zfs_scan_vdev_limit=4194304
+
+# Total I/O slots per leaf vdev (physical disk)
+options zfs zfs_vdev_max_active=260
+
+options zfs zfs_vdev_sync_read_min_active=30
+options zfs zfs_vdev_sync_read_max_active=30
+options zfs zfs_vdev_sync_write_min_active=30
+options zfs zfs_vdev_sync_write_max_active=30
+
+options zfs zfs_vdev_async_read_min_active=30
+options zfs zfs_vdev_async_read_max_active=30
+options zfs zfs_vdev_async_write_min_active=90
+options zfs zfs_vdev_async_write_max_active=90
+
+options zfs zfs_vdev_scrub_min_active=30
+options zfs zfs_vdev_scrub_max_active=30
+options zfs zfs_vdev_trim_min_active=1
+options zfs zfs_vdev_trim_max_active=3
+
+# TXG settings - large batches for bulk throughput
+options zfs zfs_txg_timeout=45
+options zfs zfs_txg_history=9999
+
+# Dirty data - larger write buffer
+options zfs zfs_dirty_data_max=6147483648
+options zfs zfs_dirty_data_max_max=10147483648
+options zfs zfs_dirty_data_sync_percent=10
+
+# ARC settings
+options zfs zfs_arc_min=2294967296
+options zfs zfs_arc_max=25769803776
+options zfs zfs_arc_sys_free=2294967296
+
+# Metaslab allocation threshold
+options zfs zfs_mg_noalloc_threshold=47
+options zfs zfs_dmu_offset_next_sync=0
+
+# I/O aggregation - larger coalesced I/Os for HDDs
+options zfs zfs_vdev_aggregation_limit=4194304
+options zfs zfs_vdev_read_gap_limit=1048576
+options zfs zfs_vdev_write_gap_limit=4096
+
+# prefetch limiting for Storj/Torrent
+options zfs zfetch_max_distance=1048576
+options zfs zfetch_max_idistance=1048576
+
+# DEADMAN / TIMEOUT TOLERANCE (Proven 10/15min stability)
+options zfs zfs_deadman_ziotime_ms=600000
+options zfs zfs_deadman_synctime_ms=900000
+options zfs zfs_deadman_failmode=wait
+
+# RESILVER PACING
+options zfs zfs_resilver_min_time_ms=500

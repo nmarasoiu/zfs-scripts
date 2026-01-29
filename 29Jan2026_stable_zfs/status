@@ -1,0 +1,57 @@
+ ZFS Scrub & Faulty Disk Summary
+
+  Current State
+
+  - Pool: Name unknown (not "tank" — need zpool list to confirm)
+  - Scrub: Suspended at some progress percentage
+  - Workload: Storj node running, needs pool online
+  - System: Stable right now
+
+  The Problem Disk
+
+  - Failure mode: Complete bus disconnect under I/O (not just bad sectors)
+  - Symptoms when triggered:
+    - Drive disappears from SATA bus
+    - dmesg -w shows deadlock messages
+    - ZFS processes enter D-state (uninterruptible sleep)
+    - zpool status, zpool export, all ZFS commands hang
+    - Cannot kill -9 the processes
+    - Only recovery: echo b > /proc/sysrq-trigger (hard reboot)
+    - Then struggle to reimport pool
+
+  Why Scrub is Dangerous
+
+  - Scrub systematically reads every block on every disk
+  - When it reaches the faulty disk → triggers disconnect
+  - Even with aggressive throttling (1 IOP, 3-second delay), a single read can kill it
+  - Result: full system hang, forced reboot, Storj downtime
+
+  Throttling Applied (for reference)
+
+  echo 1 > /sys/module/zfs/parameters/zfs_scrub_min_active
+  echo 1 > /sys/module/zfs/parameters/zfs_scrub_max_active
+  echo 3000 > /sys/module/zfs/parameters/zfs_scan_idle
+  echo 1 > /sys/module/zfs/parameters/zfs_scan_strict_mem_lim
+
+  Safe Options (in order of preference)
+
+  1. Replace the disk — physically swap it, resilver to new disk, then scrub safely
+  2. Offline the disk — zpool offline <pool> /dev/sdX then resume scrub (requires redundancy)
+  3. Keep scrub suspended — accept no integrity verification, Storj stays up
+  4. Resume scrub — HIGH RISK, likely triggers hang
+
+  Next Steps Needed
+
+  zpool list                    # Find actual pool name
+  zpool status <poolname>       # See redundancy type, scrub progress, which disk is bad
+  lsblk                         # Map disk to /dev/sdX
+  smartctl -a /dev/sdX          # Check if SMART even responds (may hang!)
+
+  Root Cause (likely hardware)
+
+  - Failing disk controller/electronics
+  - Bad SATA cable
+  - Failing SATA port on motherboard
+  - Power delivery issue to that disk
+
+  Recommendation: Do not resume scrub until disk is replaced or offlined. The bus-disconnect failure mode makes any I/O to that disk a system-wide risk.

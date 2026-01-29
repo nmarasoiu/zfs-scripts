@@ -1,0 +1,81 @@
+# cap scrub/resilver outstanding scan per leaf device (bytes)
+options zfs zfs_scan_vdev_limit=4194304
+
+# Total I/O slots per leaf vdev (physical disk)
+options zfs zfs_vdev_max_active=30
+
+# Sync - guaranteed + modest headroom
+options zfs zfs_vdev_sync_read_min_active=1
+options zfs zfs_vdev_sync_read_max_active=30
+options zfs zfs_vdev_sync_write_min_active=1
+options zfs zfs_vdev_sync_write_max_active=9
+
+# Async - minimal guarantee, fair burst
+options zfs zfs_vdev_async_read_min_active=11
+options zfs zfs_vdev_async_read_max_active=30
+options zfs zfs_vdev_async_write_min_active=1
+options zfs zfs_vdev_async_write_max_active=5
+
+# Scrub/trim - yield under load, fair burst when idle
+options zfs zfs_vdev_scrub_min_active=1
+options zfs zfs_vdev_scrub_max_active=23
+options zfs zfs_vdev_trim_min_active=1
+options zfs zfs_vdev_trim_max_active=3
+
+# TXG settings - large batches for bulk throughput
+options zfs zfs_txg_timeout=45
+options zfs zfs_txg_history=9999
+
+# Dirty data - larger write buffer
+options zfs zfs_dirty_data_max=6147483648
+options zfs zfs_dirty_data_max_max=10147483648
+options zfs zfs_dirty_data_sync_percent=10
+
+# ARC settings
+options zfs zfs_arc_min=2294967296
+options zfs zfs_arc_max=25769803776
+options zfs zfs_arc_sys_free=2294967296
+
+# Metaslab allocation threshold
+options zfs zfs_mg_noalloc_threshold=47
+options zfs zfs_dmu_offset_next_sync=0
+
+# I/O aggregation - larger coalesced I/Os for HDDs
+options zfs zfs_vdev_aggregation_limit=4194304
+options zfs zfs_vdev_read_gap_limit=1048576
+options zfs zfs_vdev_write_gap_limit=4096
+
+# prefetch limiting as it is too enthusiastic by default; optimized for BitTorrent(superseeding mode)/Storj
+options zfs zfetch_max_distance=1048576
+options zfs zfetch_max_idistance=1048576
+
+
+# ============================================
+# DEADMAN / TIMEOUT TOLERANCE (USB/SMR hiccups)
+# ============================================
+# Increase for slow USB/SMR drives - was 300000 (5 min)
+options zfs zfs_deadman_ziotime_ms=600000          # CHANGED: 10 min
+
+# Sync timeout - give slow TXG flushes more time
+options zfs zfs_deadman_synctime_ms=900000         # NEW: 15 min (default 600s)
+
+# Don't panic on stuck I/O, just wait
+options zfs zfs_deadman_failmode=wait              # NEW: (default is wait, but explicit)
+
+# ============================================
+# I/O QUEUE DEPTH - reduce pressure on slow devices
+# ============================================
+# Async writes - lower max to reduce queue buildup on slow dest
+options zfs zfs_vdev_async_write_max_active=5      # CHANGED: was 9
+
+# ============================================
+# RESILVER PACING
+# ============================================
+# Give resilver more breathing room (ms per TXG)
+options zfs zfs_resilver_min_time_ms=500           # CHANGED: was 200
+
+# ============================================
+# TXG / DIRTY DATA (tradeoff: smaller = more predictable, less bursty)
+# ============================================
+# Keep as-is for now, or optionally lower dirty_data_max to 4GB for smaller TXGs
+# options zfs zfs_dirty_data_max=4294967296        # OPTIONAL: 4GB instead of 6GB

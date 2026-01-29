@@ -22,17 +22,18 @@ const (
 	maxQueueUSBAggr = maxQueuePerDev * usbDeviceCount // 150 total
 )
 
-// Device groups: system drives first, then USB/SATA drives
-var devices = []string{"sda", "nvme0n1", "nvme1n1", "", "sdc", "sdd", "sde", "sdf", "sdg"}
+// Device groups: SSD/NVMe first, then internal rotational, then USB drives
+var devices = []string{"sda", "nvme0n1", "nvme1n1", "", "sdb", "", "sdc", "sdd", "sde", "sdf", "sdg"}
 
-// Configurable percentiles to display
-var percentiles = []float64{0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 95, 99, 99.5, 99.9, 99.95, 99.99, 99.995, 99.999, 100}
+// Configurable percentiles to display (P0 replaced by Util column)
+var percentiles = []float64{10, 20, 30, 40, 50, 60, 70, 80, 90, 95, 99, 99.5, 99.9, 99.95, 99.99, 99.995, 99.999, 100}
 
 // ReservoirSampler maintains a fixed-size representative sample using reservoir sampling
 type ReservoirSampler struct {
 	reservoir []int
 	count     uint64
 	sum       uint64 // running sum for true average
+	nonZero   uint64 // count of samples where value > 0
 	size      int
 	rng       *rand.Rand
 }
@@ -43,6 +44,7 @@ func NewReservoirSampler(size int) *ReservoirSampler {
 		reservoir: make([]int, 0, size),
 		count:     0,
 		sum:       0,
+		nonZero:   0,
 		size:      size,
 		rng:       rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
@@ -52,6 +54,9 @@ func NewReservoirSampler(size int) *ReservoirSampler {
 func (rs *ReservoirSampler) Add(value int) {
 	rs.count++
 	rs.sum += uint64(value)
+	if value > 0 {
+		rs.nonZero++
+	}
 	if len(rs.reservoir) < rs.size {
 		rs.reservoir = append(rs.reservoir, value)
 	} else {
@@ -81,6 +86,14 @@ func (rs *ReservoirSampler) GetAverage() float64 {
 		return 0.0
 	}
 	return float64(rs.sum) / float64(rs.count)
+}
+
+// GetUtilization returns the percentage of samples where value > 0
+func (rs *ReservoirSampler) GetUtilization() float64 {
+	if rs.count == 0 {
+		return 0.0
+	}
+	return float64(rs.nonZero) / float64(rs.count) * 100.0
 }
 
 // getDeviceSize reads the device size and returns it as a human-readable string (e.g., "4TB")
@@ -256,10 +269,11 @@ func (d *Display) render(samplers map[string]*ReservoirSampler, currents map[str
 	}
 
 	// Build dynamic header
-	lineWidth := 8 + 9 + len(percentiles)*9 + 9 + 12 + 2 + maxQueuePerDev + 2 + 10 + 5
+	// 8=Device, 9=Current, 9=Util, percentiles*9, 9=Avg, 12=Device(size), 2+30+2=bar, 10=Device, 5=Avg
+	lineWidth := 8 + 9 + 9 + len(percentiles)*9 + 9 + 12 + 2 + maxQueuePerDev + 2 + 10 + 5
 	buf.WriteString(strings.Repeat("=", lineWidth))
 	buf.WriteString("\n")
-	fmt.Fprintf(&buf, "%-8s %8s", "Device", "Current")
+	fmt.Fprintf(&buf, "%-8s %8s %8s", "Device", "Current", "Util")
 	for i, pct := range percentiles {
 		fmt.Fprintf(&buf, " %8s", formatPercentileHeader(pct))
 		if i == d.p50Index {
@@ -281,6 +295,7 @@ func (d *Display) render(samplers map[string]*ReservoirSampler, currents map[str
 		current := currents[dev]
 		pcts := calcPercentiles(sampler.GetSamples())
 		avg := sampler.GetAverage()
+		util := sampler.GetUtilization()
 
 		// Find P99 for bar display
 		p99Int := 0
@@ -291,7 +306,7 @@ func (d *Display) render(samplers map[string]*ReservoirSampler, currents map[str
 			}
 		}
 		bar := makeBar(current, p99Int, maxQueuePerDev)
-		fmt.Fprintf(&buf, "%-8s %4d/%-3d", dev, current, maxQueuePerDev)
+		fmt.Fprintf(&buf, "%-8s %4d/%-3d %7.1f%%", dev, current, maxQueuePerDev, util)
 		for i, val := range pcts {
 			fmt.Fprintf(&buf, " %8.2f", val)
 			if i == d.p50Index {
@@ -305,8 +320,9 @@ func (d *Display) render(samplers map[string]*ReservoirSampler, currents map[str
 		if dev == "sdg" {
 			aggrPcts := calcPercentiles(d.usbAggregate.GetSamples())
 			aggrAvg := d.usbAggregate.GetAverage()
+			aggrUtil := d.usbAggregate.GetUtilization()
 
-			fmt.Fprintf(&buf, "%-8s %4d/%-3d", "USB", usbAggrCurrent, maxQueueUSBAggr)
+			fmt.Fprintf(&buf, "%-8s %4d/%-3d %7.1f%%", "USB", usbAggrCurrent, maxQueueUSBAggr, aggrUtil)
 			for i, val := range aggrPcts {
 				fmt.Fprintf(&buf, " %8.2f", val)
 				if i == d.p50Index {
