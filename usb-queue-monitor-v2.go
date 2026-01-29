@@ -25,8 +25,28 @@ const (
 	sampleBatchSize = 1000                            // samples before acquiring lock
 )
 
-// Device groups: SSD/NVMe first, then internal rotational, then USB drives
-var devices = []string{"sda", "nvme0n1", "nvme1n1", "", "sdb", "", "sdc", "sdd", "sde", "sdf", "sdg"}
+// Device indices for slice-based access (eliminates map overhead in hot path)
+const (
+	devSda = iota
+	devNvme0n1
+	devNvme1n1
+	devSep1 // separator (empty line in display)
+	devSdb
+	devSep2 // separator
+	devSdc
+	devSdd
+	devSde
+	devSdf
+	devSdg
+	numDeviceSlots
+)
+
+// Device names indexed by device constants above
+var deviceNames = [numDeviceSlots]string{"sda", "nvme0n1", "nvme1n1", "", "sdb", "", "sdc", "sdd", "sde", "sdf", "sdg"}
+
+// USB device indices for aggregate calculation
+var usbDeviceIndices = [usbDeviceCount]int{devSdc, devSdd, devSde, devSdf, devSdg}
+
 
 // Configurable percentiles to display (P0 replaced by Util column)
 var percentiles = []float64{10, 20, 30, 40, 50, 60, 70, 80, 90, 95, 99, 99.5, 99.9, 99.95, 99.99, 99.995, 99.999, 100}
@@ -298,7 +318,7 @@ func formatCount(count uint64) string {
 type Display struct {
 	batchMode       bool
 	p50Index        int
-	deviceSizes     map[string]string
+	deviceSizes     [numDeviceSlots]string
 	usbAggregate    *ReservoirSampler
 	lastSampleCount uint64
 	lastTime        time.Time
@@ -321,9 +341,7 @@ func formatPercentileHeader(pct float64) string {
 	return fmt.Sprintf("P%g", pct)
 }
 
-var usbDevices = []string{"sdc", "sdd", "sde", "sdf", "sdg"}
-
-func (d *Display) render(samplers map[string]*ReservoirSampler, currents map[string]int, usbAggrCurrent int, totalSamples uint64) {
+func (d *Display) render(samplers [numDeviceSlots]*ReservoirSampler, currents [numDeviceSlots]int, usbAggrCurrent int, totalSamples uint64) {
 	// Calculate samples/sec
 	now := time.Now()
 	if !d.lastTime.IsZero() {
@@ -361,15 +379,16 @@ func (d *Display) render(samplers map[string]*ReservoirSampler, currents map[str
 	buf.WriteString(strings.Repeat("-", lineWidth))
 	buf.WriteString("\n")
 
-	for _, dev := range devices {
+	for i := 0; i < numDeviceSlots; i++ {
+		dev := deviceNames[i]
 		// Empty string means separator line
 		if dev == "" {
 			buf.WriteString("\n")
 			continue
 		}
 
-		sampler := samplers[dev]
-		current := currents[dev]
+		sampler := samplers[i]
+		current := currents[i]
 		pcts := calcPercentiles(sampler.GetSamples())
 		// Use true max for P100 (last percentile) instead of reservoir max
 		pcts[len(pcts)-1] = float64(sampler.GetMax())
@@ -378,25 +397,25 @@ func (d *Display) render(samplers map[string]*ReservoirSampler, currents map[str
 
 		// Find P99 for bar display
 		p99Int := 0
-		for i, pct := range percentiles {
+		for j, pct := range percentiles {
 			if pct == 99 {
-				p99Int = int(pcts[i] + 0.5)
+				p99Int = int(pcts[j] + 0.5)
 				break
 			}
 		}
 		bar := makeBar(current, p99Int, maxQueuePerDev)
 		fmt.Fprintf(&buf, "%-8s %4d/%-3d %7.1f%%", dev, current, maxQueuePerDev, util)
-		for i, val := range pcts {
+		for j, val := range pcts {
 			fmt.Fprintf(&buf, " %8.2f", val)
-			if i == d.p50Index {
+			if j == d.p50Index {
 				fmt.Fprintf(&buf, " %8.2f", avg)
 			}
 		}
-		devWithSize := fmt.Sprintf("%s(%s)", dev, d.deviceSizes[dev])
+		devWithSize := fmt.Sprintf("%s(%s)", dev, d.deviceSizes[i])
 		fmt.Fprintf(&buf, "  %-11s  [%s]  %-8s%4d\n", devWithSize, bar, dev, int(avg+0.5))
 
 		// After last USB device, show aggregate USB stats
-		if dev == "sdg" {
+		if i == devSdg {
 			aggrPcts := calcPercentiles(d.usbAggregate.GetSamples())
 			// Use true max for P100 (last percentile) instead of reservoir max
 			aggrPcts[len(aggrPcts)-1] = float64(d.usbAggregate.GetMax())
@@ -404,18 +423,18 @@ func (d *Display) render(samplers map[string]*ReservoirSampler, currents map[str
 			aggrUtil := d.usbAggregate.GetUtilization()
 
 			fmt.Fprintf(&buf, "%-8s %4d/%-3d %7.1f%%", "USB", usbAggrCurrent, maxQueueUSBAggr, aggrUtil)
-			for i, val := range aggrPcts {
+			for j, val := range aggrPcts {
 				fmt.Fprintf(&buf, " %8.2f", val)
-				if i == d.p50Index {
+				if j == d.p50Index {
 					fmt.Fprintf(&buf, " %8.2f", aggrAvg)
 				}
 			}
 			// Scaled utilization bar: scale from 0-150 to 0-30 for display
 			scaledCurrent := int(float64(usbAggrCurrent) / float64(maxQueueUSBAggr) * float64(maxQueuePerDev) + 0.5)
 			aggrP99 := 0.0
-			for i, pct := range percentiles {
+			for j, pct := range percentiles {
 				if pct == 99 {
-					aggrP99 = aggrPcts[i]
+					aggrP99 = aggrPcts[j]
 					break
 				}
 			}
@@ -433,7 +452,7 @@ func (d *Display) render(samplers map[string]*ReservoirSampler, currents map[str
 		buf.WriteString("Legend: █= current  ░= p99 (long-term)  -= unused\n")
 	}
 
-	reservoirCount := len(samplers[devices[0]].GetSamples())
+	reservoirCount := len(samplers[devSda].GetSamples())
 	fmt.Fprintf(&buf, "Samples: %s total (%d in reservoir) @ %.0f/sec\n", formatCount(totalSamples), reservoirCount, d.samplesPerSec)
 
 	if d.batchMode {
@@ -446,17 +465,17 @@ func (d *Display) render(samplers map[string]*ReservoirSampler, currents map[str
 }
 
 // SamplerState holds the shared state between sampler and display goroutines
+// Using fixed-size array indexed by device constants (no map overhead)
 type SamplerState struct {
 	mu           sync.RWMutex
-	samplers     map[string]*ReservoirSampler
+	samplers     [numDeviceSlots]*ReservoirSampler
 	usbAggregate *ReservoirSampler
-	currents     map[string]int32 // atomic access via dedicated atomics below
-	usbAggrCurr  int32
 }
 
 // Atomics for current values (lock-free access for display)
+// Using fixed-size array indexed by device constants (no map overhead)
 type CurrentValues struct {
-	values      map[string]*atomic.Int32
+	values      [numDeviceSlots]atomic.Int32
 	usbAggrCurr atomic.Int32
 }
 
@@ -470,13 +489,13 @@ func main() {
 		log.Println("Block I/O Queue Monitor starting in batch mode")
 	}
 
-	// Initialize samplers for each device
-	samplers := make(map[string]*ReservoirSampler)
-	for _, dev := range devices {
-		if dev == "" {
+	// Initialize samplers for each device (slice indexed by device constants)
+	var samplers [numDeviceSlots]*ReservoirSampler
+	for i := 0; i < numDeviceSlots; i++ {
+		if deviceNames[i] == "" {
 			continue
 		}
-		samplers[dev] = NewReservoirSampler(reservoirSize)
+		samplers[i] = NewReservoirSampler(reservoirSize)
 	}
 
 	p50Index := findP50Index()
@@ -484,41 +503,33 @@ func main() {
 		log.Fatal("P50 must be present in percentiles array")
 	}
 
-	// Get device sizes at startup
-	deviceSizes := make(map[string]string)
-	for _, dev := range devices {
-		if dev == "" {
+	// Get device sizes at startup (fixed-size array)
+	var deviceSizes [numDeviceSlots]string
+	for i := 0; i < numDeviceSlots; i++ {
+		if deviceNames[i] == "" {
 			continue
 		}
-		deviceSizes[dev] = getDeviceSize(dev)
+		deviceSizes[i] = getDeviceSize(deviceNames[i])
 	}
 
 	// Create aggregate sampler for combined USB queue depth
 	usbAggregate := NewReservoirSampler(reservoirSize)
 
-	// Initialize atomic current values
-	currents := &CurrentValues{
-		values: make(map[string]*atomic.Int32),
-	}
-	for _, dev := range devices {
-		if dev == "" {
-			continue
-		}
-		currents.values[dev] = &atomic.Int32{}
-	}
+	// Initialize atomic current values (fixed-size array, no map)
+	currents := &CurrentValues{}
 
-	// Open persistent file handles for fast sysfs reads (seek+read vs open/read/close)
-	readers := make(map[string]*InflightReader)
-	for _, dev := range devices {
-		if dev == "" {
+	// Open persistent file handles for fast sysfs reads (slice indexed by device constants)
+	var readers [numDeviceSlots]*InflightReader
+	for i := 0; i < numDeviceSlots; i++ {
+		if deviceNames[i] == "" {
 			continue
 		}
-		reader, err := NewInflightReader(dev)
+		reader, err := NewInflightReader(deviceNames[i])
 		if err != nil {
-			log.Printf("Warning: cannot open inflight file for %s: %v", dev, err)
+			log.Printf("Warning: cannot open inflight file for %s: %v", deviceNames[i], err)
 			continue
 		}
-		readers[dev] = reader
+		readers[i] = reader
 	}
 
 	// Shared state protected by RWMutex for sampler data
@@ -552,14 +563,15 @@ func main() {
 	// SAMPLER GOROUTINE - runs flat out, no sleep, hogs one CPU core
 	var sampleCount atomic.Uint64
 	go func() {
-		// Pre-allocate batch storage - accumulate samples locally before locking
-		localBatches := make(map[string][]int, len(devices))
-		for _, dev := range devices {
-			if dev != "" {
-				localBatches[dev] = make([]int, 0, sampleBatchSize)
+		// Pre-allocate batch storage as fixed-size arrays (no map overhead)
+		var localBatches [numDeviceSlots][]int
+		for i := 0; i < numDeviceSlots; i++ {
+			if deviceNames[i] != "" {
+				localBatches[i] = make([]int, 0, sampleBatchSize)
 			}
 		}
 		localUsbSums := make([]int, 0, sampleBatchSize)
+		batchCount := 0
 
 		for {
 			select {
@@ -568,11 +580,11 @@ func main() {
 			default:
 				// Phase 1: Read all sysfs values via persistent handles (no locks, just I/O)
 				usbSum := 0
-				for _, dev := range devices {
-					if dev == "" {
+				for i := 0; i < numDeviceSlots; i++ {
+					if deviceNames[i] == "" {
 						continue
 					}
-					reader := readers[dev]
+					reader := readers[i]
 					if reader == nil {
 						continue // device not available
 					}
@@ -581,16 +593,16 @@ func main() {
 						current = 0
 					}
 
-					// Accumulate in local batch (no lock needed)
-					localBatches[dev] = append(localBatches[dev], current)
+					// Accumulate in local batch (no lock needed, direct index)
+					localBatches[i] = append(localBatches[i], current)
 
 					// Update atomic current value (lock-free for display)
-					currents.values[dev].Store(int32(current))
+					currents.values[i].Store(int32(current))
 				}
 
-				// Calculate USB aggregate
-				for _, usbDev := range usbDevices {
-					if vals := localBatches[usbDev]; len(vals) > 0 {
+				// Calculate USB aggregate using index array (no map lookup)
+				for _, idx := range usbDeviceIndices {
+					if vals := localBatches[idx]; len(vals) > 0 {
 						usbSum += vals[len(vals)-1]
 					}
 				}
@@ -598,28 +610,33 @@ func main() {
 				currents.usbAggrCurr.Store(int32(usbSum))
 
 				sampleCount.Add(1)
+				batchCount++
 
 				// Phase 2: Flush batch when full (1000x fewer lock acquisitions)
-				if len(localUsbSums) >= sampleBatchSize {
+				if batchCount >= sampleBatchSize {
 					state.mu.Lock()
-					for dev, values := range localBatches {
-						for _, v := range values {
-							state.samplers[dev].Add(v)
+					for i := 0; i < numDeviceSlots; i++ {
+						if state.samplers[i] == nil {
+							continue
+						}
+						for _, v := range localBatches[i] {
+							state.samplers[i].Add(v)
 						}
 						// Reset slice, reuse backing array
-						localBatches[dev] = localBatches[dev][:0]
+						localBatches[i] = localBatches[i][:0]
 					}
 					for _, sum := range localUsbSums {
 						state.usbAggregate.Add(sum)
 					}
 					localUsbSums = localUsbSums[:0]
 					state.mu.Unlock()
+					batchCount = 0
 				}
 			}
 		}
 	}()
 
-	// DISPLAY GOROUTINE - runs at ~60 FPS (16ms)
+	// DISPLAY GOROUTINE - runs at ~20 FPS (50ms)
 	displayTicker := time.NewTicker(displayInterval)
 	go func() {
 		defer displayTicker.Stop()
@@ -628,23 +645,24 @@ func main() {
 			case <-done:
 				return
 			case <-displayTicker.C:
-				// Read current values (lock-free atomics)
-				currentMap := make(map[string]int)
-				for _, dev := range devices {
-					if dev == "" {
-						continue
-					}
-					currentMap[dev] = int(currents.values[dev].Load())
+				// Read current values (lock-free atomics, direct index access)
+				var currentValues [numDeviceSlots]int
+				for i := 0; i < numDeviceSlots; i++ {
+					currentValues[i] = int(currents.values[i].Load())
 				}
 				usbAggrCurrent := int(currents.usbAggrCurr.Load())
 
 				// Get sampler snapshots (needs read lock)
 				state.mu.RLock()
-				// Make copies of samplers for rendering
-				samplersCopy := make(map[string]*ReservoirSampler)
-				for dev, s := range state.samplers {
+				// Make copies of samplers for rendering (fixed-size array)
+				var samplersCopy [numDeviceSlots]*ReservoirSampler
+				for i := 0; i < numDeviceSlots; i++ {
+					s := state.samplers[i]
+					if s == nil {
+						continue
+					}
 					// Create a temporary sampler with copied data for rendering
-					samplersCopy[dev] = &ReservoirSampler{
+					samplersCopy[i] = &ReservoirSampler{
 						reservoir: s.GetSamples(), // GetSamples already returns a copy
 						count:     s.count,
 						sum:       s.sum,
@@ -665,7 +683,7 @@ func main() {
 				state.mu.RUnlock()
 
 				// Render (outside of lock)
-				display.render(samplersCopy, currentMap, usbAggrCurrent, sampleCount.Load())
+				display.render(samplersCopy, currentValues, usbAggrCurrent, sampleCount.Load())
 			}
 		}
 	}()
@@ -676,7 +694,9 @@ func main() {
 
 	// Close persistent file handles
 	for _, reader := range readers {
-		reader.Close()
+		if reader != nil {
+			reader.Close()
+		}
 	}
 
 	if *batchMode {
