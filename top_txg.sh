@@ -58,9 +58,9 @@ state_label() {
 print_header() {
     local pool="$1"
     echo -e "${BOLD}${CYAN}${pool}${NC}"
-    echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${BOLD}TXG        STATE     DIRTY     READ      WRITTEN   R/W OPS    OPEN     QUEUE    WAIT     SYNC     MB/s${NC}"
-    echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${BOLD}DATE        TIME      TXG        STATE     DIRTY     READ      WRITTEN   R/W OPS    OPEN     QUEUE    WAIT     SYNC     MB/s     TIME${NC}"
+    echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 }
 
 format_txg() {
@@ -97,15 +97,19 @@ format_txg() {
         mbps_h="${mbps}"
     fi
 
+    # Get current timestamp
+    local cur_date=$(date +%Y-%m-%d)
+    local cur_time=$(date +%H:%M:%S)
+
     # Highlight active TXGs
     if [[ "$state" == "O" || "$state" == "S" || "$state" == "Q" ]]; then
-        printf "${CYAN}%-10s${NC} %s %-9s %-9s %-9s %4d/%-5d %-8s %-8s %-8s %-8s %s\n" \
-            "$txg" "$state_str" "$dirty_h" "$read_h" "$written_h" "$reads" "$writes" \
-            "$otime_h" "$qtime_h" "$wtime_h" "$stime_h" "$mbps_h"
+        printf "${CYAN}%-11s %-9s %-10s${NC} %s %-9s %-9s %-9s %4d/%-5d %-8s %-8s %-8s %-8s %-8s %s\n" \
+            "$cur_date" "$cur_time" "$txg" "$state_str" "$dirty_h" "$read_h" "$written_h" "$reads" "$writes" \
+            "$otime_h" "$qtime_h" "$wtime_h" "$stime_h" "$mbps_h" "$cur_time"
     else
-        printf "${DIM}%-10s${NC} %s %-9s %-9s %-9s %4d/%-5d %-8s %-8s %-8s %-8s %s\n" \
-            "$txg" "$state_str" "$dirty_h" "$read_h" "$written_h" "$reads" "$writes" \
-            "$otime_h" "$qtime_h" "$wtime_h" "$stime_h" "$mbps_h"
+        printf "${DIM}%-11s %-9s %-10s${NC} %s %-9s %-9s %-9s %4d/%-5d %-8s %-8s %-8s %-8s %-8s %s\n" \
+            "$cur_date" "$cur_time" "$txg" "$state_str" "$dirty_h" "$read_h" "$written_h" "$reads" "$writes" \
+            "$otime_h" "$qtime_h" "$wtime_h" "$stime_h" "$mbps_h" "$cur_time"
     fi
 }
 
