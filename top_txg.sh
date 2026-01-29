@@ -26,6 +26,7 @@ Interactive Keys (lowercase=ascending, UPPERCASE=descending):
   s/S   Sort by Sync time
   m/M   Sort by MB/s
   n     Reset to default (recent TXGs, no sorting)
+  ↓/↑   Navigate pages (next/previous page of sorted results)
   q     Quit
 
 Columns:
@@ -68,6 +69,10 @@ SORT_COL="none"     # Default: no sorting, just tail (most recent TXGs)
 SORT_REV=0          # 0=ascending, 1=descending
 SORT_FIELD=1        # awk field number for sorting
 LAST_KEY=""         # Last key pressed (for visual feedback)
+
+# Pagination state
+PAGE_OFFSET=0       # How many items to skip (for pagination)
+TOTAL_TXGS=0        # Total TXGs available (for page indicator)
 
 # Colors
 RED='\033[0;31m'
@@ -147,7 +152,8 @@ print_header() {
         [[ $SORT_REV -eq 1 ]] && sort_dir="▼"
         sort_indicator="[sorted by ${SORT_NAME} ${sort_dir}]"
     fi
-    echo -e "${BOLD}${CYAN}${pool}${NC}  ${DIM}${sort_indicator}${NC}"
+    local page_info=$(get_page_indicator)
+    echo -e "${BOLD}${CYAN}${pool}${NC}  ${DIM}${sort_indicator}${page_info}${NC}"
     echo -e "${BOLD}${sep}${NC}"
     printf "${BOLD}%-11s %-9s %-10s %-9s %-10s %-10s %-10s %-13s %-8s %-8s %-8s %-8s %-8s %s${NC}\n" \
         "DATE" "TIME" "TXG" "STATE" "DIRTY" "READ" "WRITTEN" "R/W OPS" "OPEN" "QUEUE" "WAIT" "SYNC" "MB/s" "DURATION"
@@ -255,7 +261,17 @@ show_summary() {
 }
 
 print_keys() {
-    echo -e "${DIM}Keys: [d/D]irty [r/R]ead [w/W]ritten [o/O]pen q[u/U]eue w[a/A]it [s/S]ync [m/M]b/s  [n]one  [q]uit  [h]elp  (lower=asc, UPPER=desc)${NC}"
+    echo -e "${DIM}Keys: [d/D]irty [r/R]ead [w/W]ritten [o/O]pen q[u/U]eue w[a/A]it [s/S]ync [m/M]b/s  [n]one  [q]uit  [h]elp  [↑/↓]page  (lower=asc, UPPER=desc)${NC}"
+}
+
+get_page_indicator() {
+    if [[ $TOTAL_TXGS -gt 0 && "$SORT_COL" != "none" ]]; then
+        local current_page=$(( (PAGE_OFFSET / TXG_COUNT) + 1 ))
+        local total_pages=$(( (TOTAL_TXGS + TXG_COUNT - 1) / TXG_COUNT ))
+        local end_item=$((PAGE_OFFSET + TXG_COUNT))
+        [[ $end_item -gt $TOTAL_TXGS ]] && end_item=$TOTAL_TXGS
+        echo " [${PAGE_OFFSET}+${TXG_COUNT} of ${TOTAL_TXGS}]"
+    fi
 }
 
 # Show immediate feedback when key is pressed
@@ -284,6 +300,8 @@ show_key_feedback() {
         M)   desc="MB/s"; dir="▼" ;;
         q|Q) desc="quit" ;;
         h|H) desc="help" ;;
+        arrow_down) desc="page ↓" ;;
+        arrow_up)   desc="page ↑" ;;
         *)   return ;;  # Unknown key, no feedback
     esac
 
@@ -300,23 +318,41 @@ show_key_feedback() {
 handle_key() {
     local key="$1"
     case "$key" in
-        n|N) SORT_COL="none"; LAST_KEY="$key" ;;  # Reset to default (recent TXGs)
-        d) SORT_COL="dirty";   SORT_REV=0; LAST_KEY="$key" ;;
-        D) SORT_COL="dirty";   SORT_REV=1; LAST_KEY="$key" ;;
-        r) SORT_COL="read";    SORT_REV=0; LAST_KEY="$key" ;;
-        R) SORT_COL="read";    SORT_REV=1; LAST_KEY="$key" ;;
-        w) SORT_COL="written"; SORT_REV=0; LAST_KEY="$key" ;;
-        W) SORT_COL="written"; SORT_REV=1; LAST_KEY="$key" ;;
-        o) SORT_COL="open";    SORT_REV=0; LAST_KEY="$key" ;;
-        O) SORT_COL="open";    SORT_REV=1; LAST_KEY="$key" ;;
-        u) SORT_COL="queue";   SORT_REV=0; LAST_KEY="$key" ;;
-        U) SORT_COL="queue";   SORT_REV=1; LAST_KEY="$key" ;;
-        a) SORT_COL="wait";    SORT_REV=0; LAST_KEY="$key" ;;
-        A) SORT_COL="wait";    SORT_REV=1; LAST_KEY="$key" ;;
-        s) SORT_COL="sync";    SORT_REV=0; LAST_KEY="$key" ;;
-        S) SORT_COL="sync";    SORT_REV=1; LAST_KEY="$key" ;;
-        m) SORT_COL="mbps";    SORT_REV=0; LAST_KEY="$key" ;;
-        M) SORT_COL="mbps";    SORT_REV=1; LAST_KEY="$key" ;;
+        n|N) SORT_COL="none"; PAGE_OFFSET=0; LAST_KEY="$key" ;;  # Reset to default (recent TXGs)
+        d) SORT_COL="dirty";   SORT_REV=0; PAGE_OFFSET=0; LAST_KEY="$key" ;;
+        D) SORT_COL="dirty";   SORT_REV=1; PAGE_OFFSET=0; LAST_KEY="$key" ;;
+        r) SORT_COL="read";    SORT_REV=0; PAGE_OFFSET=0; LAST_KEY="$key" ;;
+        R) SORT_COL="read";    SORT_REV=1; PAGE_OFFSET=0; LAST_KEY="$key" ;;
+        w) SORT_COL="written"; SORT_REV=0; PAGE_OFFSET=0; LAST_KEY="$key" ;;
+        W) SORT_COL="written"; SORT_REV=1; PAGE_OFFSET=0; LAST_KEY="$key" ;;
+        o) SORT_COL="open";    SORT_REV=0; PAGE_OFFSET=0; LAST_KEY="$key" ;;
+        O) SORT_COL="open";    SORT_REV=1; PAGE_OFFSET=0; LAST_KEY="$key" ;;
+        u) SORT_COL="queue";   SORT_REV=0; PAGE_OFFSET=0; LAST_KEY="$key" ;;
+        U) SORT_COL="queue";   SORT_REV=1; PAGE_OFFSET=0; LAST_KEY="$key" ;;
+        a) SORT_COL="wait";    SORT_REV=0; PAGE_OFFSET=0; LAST_KEY="$key" ;;
+        A) SORT_COL="wait";    SORT_REV=1; PAGE_OFFSET=0; LAST_KEY="$key" ;;
+        s) SORT_COL="sync";    SORT_REV=0; PAGE_OFFSET=0; LAST_KEY="$key" ;;
+        S) SORT_COL="sync";    SORT_REV=1; PAGE_OFFSET=0; LAST_KEY="$key" ;;
+        m) SORT_COL="mbps";    SORT_REV=0; PAGE_OFFSET=0; LAST_KEY="$key" ;;
+        M) SORT_COL="mbps";    SORT_REV=1; PAGE_OFFSET=0; LAST_KEY="$key" ;;
+        arrow_down)
+            # Next page (only when sorting)
+            if [[ "$SORT_COL" != "none" ]]; then
+                local new_offset=$((PAGE_OFFSET + TXG_COUNT))
+                if [[ $new_offset -lt $TOTAL_TXGS ]]; then
+                    PAGE_OFFSET=$new_offset
+                fi
+            fi
+            LAST_KEY="$key"
+            ;;
+        arrow_up)
+            # Previous page
+            if [[ "$SORT_COL" != "none" ]]; then
+                PAGE_OFFSET=$((PAGE_OFFSET - TXG_COUNT))
+                [[ $PAGE_OFFSET -lt 0 ]] && PAGE_OFFSET=0
+            fi
+            LAST_KEY="$key"
+            ;;
         q|Q) cleanup; exit 0 ;;
         h|H)
             clear
@@ -338,15 +374,15 @@ sort_txg_data() {
     local sort_opts="-n"
     [[ $SORT_REV -eq 1 ]] && sort_opts="-rn"
 
-    # Sort ALL TXGs in history, then take top N for display
+    # Sort ALL TXGs in history, then paginate for display
     # This allows finding e.g. highest MB/s across entire history, not just recent
     if [[ "$SORT_COL" == "mbps" ]]; then
         grep -v '^txg' "$txg_file" | \
             awk '{mbps=0; if($12>0 && $6>0) mbps=$6*953.674/$12; print mbps, $0}' | \
-            sort $sort_opts -k1 | head -$TXG_COUNT | cut -d' ' -f2-
+            sort $sort_opts -k1 | tail -n +$((PAGE_OFFSET + 1)) | head -$TXG_COUNT | cut -d' ' -f2-
     else
         grep -v '^txg' "$txg_file" | \
-            sort $sort_opts -k${SORT_FIELD} | head -$TXG_COUNT
+            sort $sort_opts -k${SORT_FIELD} | tail -n +$((PAGE_OFFSET + 1)) | head -$TXG_COUNT
     fi
 }
 
@@ -376,9 +412,30 @@ clear       # Initial clear only
 
 # Main loop
 while true; do
+    # Calculate TOTAL_TXGS outside the display block (to avoid subshell issues)
+    # Use the first valid pool for pagination
+    TOTAL_TXGS=0
+    if [[ "$SORT_COL" != "none" ]]; then
+        for pool in "${POOL_ARRAY[@]}"; do
+            txg_file="/proc/spl/kstat/zfs/${pool}/txgs"
+            if [[ -f "$txg_file" ]]; then
+                TOTAL_TXGS=$(grep -cv '^txg' "$txg_file")
+                break
+            fi
+        done
+    fi
+
     # Build output in temp file first (atomic display, reduces flicker)
     {
-        echo -e "${BOLD}ZFS TXG Monitor${NC} ${DIM}(refresh: ${INTERVAL}s, ${TXG_COUNT} TXGs/pool)${NC}"
+        # Build sort indicator for title
+        get_sort_info
+        title_sort=""
+        if [[ "$SORT_COL" != "none" ]]; then
+            sort_dir="▲"
+            [[ $SORT_REV -eq 1 ]] && sort_dir="▼"
+            title_sort="                 ${SORT_NAME:0:1} → ${SORT_NAME} ${sort_dir}"
+        fi
+        echo -e "${BOLD}ZFS TXG Monitor${NC} ${DIM}(refresh: ${INTERVAL}s, ${TXG_COUNT} TXGs/pool)${title_sort}${NC}"
         print_keys
 
         for pool in "${POOL_ARRAY[@]}"; do
@@ -409,7 +466,18 @@ while true; do
 
     # Non-blocking read for key input
     if read -rsn1 -t "$INTERVAL" key; then
-        show_key_feedback "$key"  # Immediate visual feedback
-        handle_key "$key"
+        # Handle escape sequences (arrow keys)
+        if [[ "$key" == $'\x1b' ]]; then
+            read -rsn2 -t 0.1 seq
+            case "$seq" in
+                '[A') key="arrow_up" ;;
+                '[B') key="arrow_down" ;;
+                *)    key="" ;;  # Ignore other escape sequences
+            esac
+        fi
+        if [[ -n "$key" ]]; then
+            show_key_feedback "$key"  # Immediate visual feedback
+            handle_key "$key"
+        fi
     fi
 done
