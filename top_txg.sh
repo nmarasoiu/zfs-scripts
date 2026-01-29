@@ -332,6 +332,7 @@ BOOT_EPOCH=$(echo "$(date +%s) - $uptime_sec" | bc | cut -d. -f1)
 # Setup terminal
 tput civis  # Hide cursor
 stty -echo  # Disable echo
+clear       # Initial clear only
 
 # Main loop
 while true; do
@@ -360,9 +361,11 @@ while true; do
         done
     } > "$TMP_FILE"
 
-    # Display atomically: clear screen, show buffer
-    clear
-    cat "$TMP_FILE"
+    # Display atomically: move cursor home, overwrite content, clear leftovers
+    # This avoids flash (unlike clear-then-write)
+    printf '\033[H'      # cursor to home (0,0)
+    cat "$TMP_FILE"      # overwrite in place
+    printf '\033[J'      # clear from cursor to end of screen (leftover lines)
 
     # Non-blocking read for key input
     if read -rsn1 -t "$INTERVAL" key; then
