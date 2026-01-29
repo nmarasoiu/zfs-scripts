@@ -14,3 +14,4 @@ backups/usb-queue-monitor-v1
 # Editor/IDE
 .claude/
 zfs-github-src
+top_txg
