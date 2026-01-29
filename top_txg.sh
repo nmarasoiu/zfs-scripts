@@ -17,6 +17,7 @@ Options:
   -h, --help  Show this help message
 
 Interactive Keys (lowercase=ascending, UPPERCASE=descending):
+  t/T   Sort by TXG number (time)
   d/D   Sort by Dirty bytes
   r/R   Sort by Read bytes
   w/W   Sort by Written bytes
@@ -26,7 +27,7 @@ Interactive Keys (lowercase=ascending, UPPERCASE=descending):
   s/S   Sort by Sync time
   m/M   Sort by MB/s
   n     Reset to default (recent TXGs, no sorting)
-  ↓/↑   Navigate pages (next/previous page of sorted results)
+  ↑/↓   Page up/down (only in sort modes)
   q     Quit
 
 Columns:
@@ -89,6 +90,7 @@ UNDERLINE='\033[4m'
 get_sort_info() {
     case "$SORT_COL" in
         none)    SORT_FIELD=0;  SORT_NAME="recent" ;;
+        txg)     SORT_FIELD=1;  SORT_NAME="TXG" ;;
         dirty)   SORT_FIELD=4;  SORT_NAME="DIRTY" ;;
         read)    SORT_FIELD=5;  SORT_NAME="READ" ;;
         written) SORT_FIELD=6;  SORT_NAME="WRITTEN" ;;
@@ -261,15 +263,11 @@ show_summary() {
 }
 
 print_keys() {
-    echo -e "${DIM}Keys: [d/D]irty [r/R]ead [w/W]ritten [o/O]pen q[u/U]eue w[a/A]it [s/S]ync [m/M]b/s  [n]one  [q]uit  [h]elp  [↑/↓]page  (lower=asc, UPPER=desc)${NC}"
+    echo -e "${DIM}Keys: [t/T]xg [d/D]irty [r/R]ead [w/W]ritten [o/O]pen q[u/U]eue w[a/A]it [s/S]ync [m/M]b/s  [n]one  [q]uit  [h]elp  [↑/↓]page  (lower=asc, UPPER=desc)${NC}"
 }
 
 get_page_indicator() {
     if [[ $TOTAL_TXGS -gt 0 && "$SORT_COL" != "none" ]]; then
-        local current_page=$(( (PAGE_OFFSET / TXG_COUNT) + 1 ))
-        local total_pages=$(( (TOTAL_TXGS + TXG_COUNT - 1) / TXG_COUNT ))
-        local end_item=$((PAGE_OFFSET + TXG_COUNT))
-        [[ $end_item -gt $TOTAL_TXGS ]] && end_item=$TOTAL_TXGS
         echo " [${PAGE_OFFSET}+${TXG_COUNT} of ${TOTAL_TXGS}]"
     fi
 }
@@ -282,6 +280,8 @@ show_key_feedback() {
 
     case "$key" in
         n|N) desc="none (recent)" ;;
+        t)   desc="TXG"; dir="▲" ;;
+        T)   desc="TXG"; dir="▼" ;;
         d)   desc="DIRTY"; dir="▲" ;;
         D)   desc="DIRTY"; dir="▼" ;;
         r)   desc="READ"; dir="▲" ;;
@@ -319,6 +319,8 @@ handle_key() {
     local key="$1"
     case "$key" in
         n|N) SORT_COL="none"; PAGE_OFFSET=0; LAST_KEY="$key" ;;  # Reset to default (recent TXGs)
+        t) SORT_COL="txg";     SORT_REV=0; PAGE_OFFSET=0; LAST_KEY="$key" ;;
+        T) SORT_COL="txg";     SORT_REV=1; PAGE_OFFSET=0; LAST_KEY="$key" ;;
         d) SORT_COL="dirty";   SORT_REV=0; PAGE_OFFSET=0; LAST_KEY="$key" ;;
         D) SORT_COL="dirty";   SORT_REV=1; PAGE_OFFSET=0; LAST_KEY="$key" ;;
         r) SORT_COL="read";    SORT_REV=0; PAGE_OFFSET=0; LAST_KEY="$key" ;;
@@ -336,7 +338,7 @@ handle_key() {
         m) SORT_COL="mbps";    SORT_REV=0; PAGE_OFFSET=0; LAST_KEY="$key" ;;
         M) SORT_COL="mbps";    SORT_REV=1; PAGE_OFFSET=0; LAST_KEY="$key" ;;
         arrow_down)
-            # Next page (only when sorting)
+            # Next page (only in sort modes)
             if [[ "$SORT_COL" != "none" ]]; then
                 local new_offset=$((PAGE_OFFSET + TXG_COUNT))
                 if [[ $new_offset -lt $TOTAL_TXGS ]]; then
@@ -346,7 +348,7 @@ handle_key() {
             LAST_KEY="$key"
             ;;
         arrow_up)
-            # Previous page
+            # Previous page (only in sort modes)
             if [[ "$SORT_COL" != "none" ]]; then
                 PAGE_OFFSET=$((PAGE_OFFSET - TXG_COUNT))
                 [[ $PAGE_OFFSET -lt 0 ]] && PAGE_OFFSET=0
@@ -413,7 +415,7 @@ clear       # Initial clear only
 # Main loop
 while true; do
     # Calculate TOTAL_TXGS outside the display block (to avoid subshell issues)
-    # Use the first valid pool for pagination
+    # Only needed for sort modes (pagination)
     TOTAL_TXGS=0
     if [[ "$SORT_COL" != "none" ]]; then
         for pool in "${POOL_ARRAY[@]}"; do
