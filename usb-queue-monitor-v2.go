@@ -121,7 +121,64 @@ func getDeviceSize(device string) string {
 	return fmt.Sprintf("%.0fG", gb)
 }
 
-// getInflight reads the current in-flight IO count for a device
+// InflightReader holds an open file handle for fast repeated reads
+type InflightReader struct {
+	file *os.File
+	buf  []byte
+}
+
+// NewInflightReader opens a persistent file handle for the device's inflight file
+func NewInflightReader(device string) (*InflightReader, error) {
+	path := fmt.Sprintf("/sys/block/%s/inflight", device)
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	return &InflightReader{
+		file: f,
+		buf:  make([]byte, 64), // inflight file is small: "0 0\n" typically
+	}, nil
+}
+
+// Read seeks to start and reads the current in-flight count (avoids open/close overhead)
+func (ir *InflightReader) Read() (int, error) {
+	// Seek to beginning
+	_, err := ir.file.Seek(0, 0)
+	if err != nil {
+		return 0, err
+	}
+
+	// Read into pre-allocated buffer
+	n, err := ir.file.Read(ir.buf)
+	if err != nil {
+		return 0, err
+	}
+
+	// Parse "read write\n" format
+	parts := strings.Fields(string(ir.buf[:n]))
+	if len(parts) < 2 {
+		return 0, fmt.Errorf("invalid inflight format")
+	}
+
+	read, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return 0, err
+	}
+
+	write, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return 0, err
+	}
+
+	return read + write, nil
+}
+
+// Close closes the file handle
+func (ir *InflightReader) Close() error {
+	return ir.file.Close()
+}
+
+// getInflight reads the current in-flight IO count for a device (legacy, used at startup)
 func getInflight(device string) (int, error) {
 	data, err := os.ReadFile(fmt.Sprintf("/sys/block/%s/inflight", device))
 	if err != nil {
@@ -442,6 +499,20 @@ func main() {
 		currents.values[dev] = &atomic.Int32{}
 	}
 
+	// Open persistent file handles for fast sysfs reads (seek+read vs open/read/close)
+	readers := make(map[string]*InflightReader)
+	for _, dev := range devices {
+		if dev == "" {
+			continue
+		}
+		reader, err := NewInflightReader(dev)
+		if err != nil {
+			log.Printf("Warning: cannot open inflight file for %s: %v", dev, err)
+			continue
+		}
+		readers[dev] = reader
+	}
+
 	// Shared state protected by RWMutex for sampler data
 	state := &SamplerState{
 		samplers:     samplers,
@@ -481,13 +552,17 @@ func main() {
 			case <-done:
 				return
 			default:
-				// Phase 1: Read all sysfs values (no locks, just I/O)
+				// Phase 1: Read all sysfs values via persistent handles (no locks, just I/O)
 				usbSum := int32(0)
 				for _, dev := range devices {
 					if dev == "" {
 						continue
 					}
-					current, err := getInflight(dev)
+					reader := readers[dev]
+					if reader == nil {
+						continue // device not available
+					}
+					current, err := reader.Read()
 					if err != nil {
 						current = 0
 					}
@@ -568,6 +643,11 @@ func main() {
 	// Wait for shutdown signal
 	<-sigChan
 	close(done)
+
+	// Close persistent file handles
+	for _, reader := range readers {
+		reader.Close()
+	}
 
 	if *batchMode {
 		log.Printf("Shutting down... Total samples: %d", sampleCount.Load())
