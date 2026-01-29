@@ -65,7 +65,7 @@ TXG_COUNT="${3:-20}"  # TXGs per pool
 
 # Sorting state
 SORT_COL="txg"      # Default sort column
-SORT_REV=0          # 0=ascending, 1=descending
+SORT_REV=1          # 0=ascending, 1=descending (default desc to show newest/active TXGs)
 SORT_FIELD=1        # awk field number for sorting
 
 # Colors
