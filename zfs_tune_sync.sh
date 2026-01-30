@@ -12,8 +12,8 @@ fi
 
 report() {
     echo -e "\n--- ZFS Parameter Comparison ---"
-    printf "%-35s | %-15s | %-15s | %-10s\n" "Parameter" "Config File" "Current Kernel" "Status"
-    echo "---------------------------------------------------------------------------------------"
+    printf "%-35s | %-15s | %-15s | %-18s\n" "Parameter" "Config File" "Current Kernel" "Status"
+    echo "---------------------------------------------------------------------------------------------"
 
     # Extract parameters from zfs.conf (ignoring comments and empty lines)
     while read -r line; do
@@ -26,14 +26,24 @@ report() {
             if [ "$config_val" == "$current_val" ]; then
                 status="OK"
             else
-                status="MISMATCH"
+                # Calculate percentage difference from config (desired) value
+                if [ "$config_val" -ne 0 ]; then
+                    pct=$(awk "BEGIN {printf \"%.0f\", (($current_val - $config_val) / $config_val) * 100}")
+                    if [ "$pct" -ge 0 ]; then
+                        status="MISMATCH : +${pct}%"
+                    else
+                        status="MISMATCH : ${pct}%"
+                    fi
+                else
+                    status="MISMATCH"
+                fi
             fi
-            printf "%-35s | %-15s | %-15s | %-10s\n" "$param" "$config_val" "$current_val" "$status"
+            printf "%-35s | %-15s | %-15s | %-18s\n" "$param" "$config_val" "$current_val" "$status"
         else
-            printf "%-35s | %-15s | %-15s | %-10s\n" "$param" "$config_val" "NOT FOUND" "ERROR"
+            printf "%-35s | %-15s | %-15s | %-18s\n" "$param" "$config_val" "NOT FOUND" "ERROR"
         fi
     done < "$CONF_FILE"
-    echo -e "---------------------------------------------------------------------------------------\n"
+    echo -e "---------------------------------------------------------------------------------------------\n"
 }
 
 sync_values() {
