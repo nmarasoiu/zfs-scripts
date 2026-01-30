@@ -146,6 +146,11 @@ func lookupDevName(dev uint32) string {
 	return name
 }
 
+// isTrackedDevice returns true if device should be tracked (nvme* or sd* only)
+func isTrackedDevice(name string) bool {
+	return strings.HasPrefix(name, "nvme") || strings.HasPrefix(name, "sd")
+}
+
 func parseDeviceFilter(filter string) ([]uint32, error) {
 	if filter == "" {
 		return nil, nil
@@ -306,13 +311,13 @@ func (d *Display) render(stats map[uint32]*deviceStats, startTime, lastReset tim
 
 	fmt.Fprintf(&buf, "Block I/O Latency Monitor - %s (uptime: %s, interval: %s/%s)\n",
 		timestamp, formatDuration(elapsed), formatDuration(intervalElapsed), formatDuration(intervalDur))
-	buf.WriteString(strings.Repeat("=", 130))
+	buf.WriteString(strings.Repeat("=", 120))
 	buf.WriteString("\n")
 
 	// Header
-	fmt.Fprintf(&buf, "%-10s │ %8s %8s %8s %8s %8s %8s %8s %8s │ %9s\n",
-		"INTERVAL", "avg", "p50", "p90", "p95", "p99", "p99.9", "max", "min", "samples")
-	buf.WriteString(strings.Repeat("-", 130))
+	fmt.Fprintf(&buf, "%-10s │ %8s %8s %8s %8s %8s %8s %8s │ %9s\n",
+		"INTERVAL", "avg", "p50", "p90", "p95", "p99", "p99.9", "max", "samples")
+	buf.WriteString(strings.Repeat("-", 120))
 	buf.WriteString("\n")
 
 	// Interval stats
@@ -322,11 +327,11 @@ func (d *Display) render(stats map[uint32]*deviceStats, startTime, lastReset tim
 		h := ds.interval
 		n := h.TotalCount()
 		if n == 0 {
-			fmt.Fprintf(&buf, "%-10s │ %8s %8s %8s %8s %8s %8s %8s %8s │ %9s\n",
-				name, "-", "-", "-", "-", "-", "-", "-", "-", "0")
+			fmt.Fprintf(&buf, "%-10s │ %8s %8s %8s %8s %8s %8s %8s │ %9s\n",
+				name, "-", "-", "-", "-", "-", "-", "-", "0")
 			continue
 		}
-		fmt.Fprintf(&buf, "%-10s │ %s %s %s %s %s %s %s %s │ %9s\n",
+		fmt.Fprintf(&buf, "%-10s │ %s %s %s %s %s %s %s │ %9s\n",
 			name,
 			formatLatencyPadded(int64(h.Mean())),
 			formatLatencyPadded(h.ValueAtQuantile(50)),
@@ -335,15 +340,14 @@ func (d *Display) render(stats map[uint32]*deviceStats, startTime, lastReset tim
 			formatLatencyPadded(h.ValueAtQuantile(99)),
 			formatLatencyPadded(h.ValueAtQuantile(99.9)),
 			formatLatencyPadded(h.Max()),
-			formatLatencyPadded(h.Min()),
 			formatCount(n),
 		)
 	}
 
 	buf.WriteString("\n")
-	fmt.Fprintf(&buf, "%-10s │ %8s %8s %8s %8s %8s %8s %8s %8s │ %9s\n",
-		"LIFETIME", "avg", "p50", "p90", "p95", "p99", "p99.9", "max", "min", "samples")
-	buf.WriteString(strings.Repeat("-", 130))
+	fmt.Fprintf(&buf, "%-10s │ %8s %8s %8s %8s %8s %8s %8s │ %9s\n",
+		"LIFETIME", "avg", "p50", "p90", "p95", "p99", "p99.9", "max", "samples")
+	buf.WriteString(strings.Repeat("-", 120))
 	buf.WriteString("\n")
 
 	// Lifetime stats
@@ -355,11 +359,11 @@ func (d *Display) render(stats map[uint32]*deviceStats, startTime, lastReset tim
 		n := h.TotalCount()
 		totalSamples += n
 		if n == 0 {
-			fmt.Fprintf(&buf, "%-10s │ %8s %8s %8s %8s %8s %8s %8s %8s │ %9s\n",
-				name, "-", "-", "-", "-", "-", "-", "-", "-", "0")
+			fmt.Fprintf(&buf, "%-10s │ %8s %8s %8s %8s %8s %8s %8s │ %9s\n",
+				name, "-", "-", "-", "-", "-", "-", "-", "0")
 			continue
 		}
-		fmt.Fprintf(&buf, "%-10s │ %s %s %s %s %s %s %s %s │ %9s\n",
+		fmt.Fprintf(&buf, "%-10s │ %s %s %s %s %s %s %s │ %9s\n",
 			name,
 			formatLatencyPadded(int64(h.Mean())),
 			formatLatencyPadded(h.ValueAtQuantile(50)),
@@ -368,12 +372,11 @@ func (d *Display) render(stats map[uint32]*deviceStats, startTime, lastReset tim
 			formatLatencyPadded(h.ValueAtQuantile(99)),
 			formatLatencyPadded(h.ValueAtQuantile(99.9)),
 			formatLatencyPadded(h.Max()),
-			formatLatencyPadded(h.Min()),
 			formatCount(n),
 		)
 	}
 
-	buf.WriteString(strings.Repeat("=", 130))
+	buf.WriteString(strings.Repeat("=", 120))
 	buf.WriteString("\n")
 
 	// Stats summary
@@ -520,6 +523,12 @@ func main() {
 		}
 
 		if err := binary.Read(bytes.NewReader(record.RawSample), binary.LittleEndian, &event); err != nil {
+			continue
+		}
+
+		// Only track nvme* and sd* devices
+		devName := lookupDevName(event.Dev)
+		if !isTrackedDevice(devName) {
 			continue
 		}
 
