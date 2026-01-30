@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"os/signal"
 	"strconv"
@@ -288,11 +289,173 @@ func formatCount(count uint64) string {
 	return fmt.Sprintf("%d", count)
 }
 
+// formatDuration formats a duration in human-readable format
+func formatDuration(d time.Duration) string {
+	if d < time.Minute {
+		return fmt.Sprintf("%.1fs", d.Seconds())
+	} else if d < time.Hour {
+		m := int(d.Minutes())
+		s := int(d.Seconds()) % 60
+		return fmt.Sprintf("%dm%ds", m, s)
+	}
+	h := int(d.Hours())
+	m := int(d.Minutes()) % 60
+	return fmt.Sprintf("%dh%dm", h, m)
+}
+
+// renderBucketBar creates a bar representing a percentage (0-100) using log scale
+// Log scale: maps 0.001% → 0, 0.1% → 40%, 1% → 60%, 100% → 100%
+func renderBucketBar(pct float64, barWidth int) string {
+	var fillRatio float64
+	if pct <= 0 {
+		fillRatio = 0
+	} else {
+		// log10 scale: (log10(pct) + 3) / 5 maps [0.001%, 100%] to [0, 1]
+		fillRatio = (math.Log10(pct) + 3) / 5
+		if fillRatio < 0 {
+			fillRatio = 0
+		}
+		if fillRatio > 1 {
+			fillRatio = 1
+		}
+	}
+	filled := int(fillRatio*float64(barWidth) + 0.5)
+	var bar strings.Builder
+	for i := 0; i < barWidth; i++ {
+		if i < filled {
+			bar.WriteString("░")
+		} else {
+			bar.WriteString("-")
+		}
+	}
+	return bar.String()
+}
+
+const maxHistoRows = 25 // max rows per device histogram
+
+// getTopDepths returns top N depths by count for a histogram, sorted by depth
+func getTopDepths(h *Histogram, maxRows int) []int {
+	if h == nil || h.total == 0 {
+		return nil
+	}
+
+	// Collect non-empty depths with counts
+	type dc struct {
+		depth int
+		count uint64
+	}
+	var nonEmpty []dc
+	for i := 0; i < 256; i++ {
+		if h.buckets[i] > 0 {
+			nonEmpty = append(nonEmpty, dc{i, h.buckets[i]})
+		}
+	}
+
+	if len(nonEmpty) == 0 {
+		return nil
+	}
+
+	// If within limit, return all sorted by depth
+	if len(nonEmpty) <= maxRows {
+		result := make([]int, len(nonEmpty))
+		for i, d := range nonEmpty {
+			result[i] = d.depth
+		}
+		return result
+	}
+
+	// Select top N by count
+	selected := make(map[int]bool)
+	for i := 0; i < maxRows; i++ {
+		maxIdx := -1
+		var maxCount uint64
+		for j, d := range nonEmpty {
+			if !selected[d.depth] && d.count > maxCount {
+				maxCount = d.count
+				maxIdx = j
+			}
+		}
+		if maxIdx >= 0 {
+			selected[nonEmpty[maxIdx].depth] = true
+		}
+	}
+
+	// Return selected depths sorted by depth
+	var result []int
+	for depth := 0; depth < 256; depth++ {
+		if selected[depth] {
+			result = append(result, depth)
+		}
+	}
+	return result
+}
+
+// renderAllHistograms renders queue depth distributions as vertical columns per device
+func renderAllHistograms(buf *strings.Builder, histograms map[string]*Histogram, usbAggregate *Histogram, barWidth int) {
+	devOrder := []string{"sda", "nvme0n1", "nvme1n1", "sdc", "sdd", "sde", "sdf", "sdg"}
+	shortNames := []string{"sda", "nvme0", "nvme1", "sdc", "sdd", "sde", "sdf", "sdg", "USB"}
+
+	// Get top depths for each device independently
+	allDepths := make([][]int, len(devOrder)+1)
+	for i, dev := range devOrder {
+		allDepths[i] = getTopDepths(histograms[dev], maxHistoRows)
+	}
+	allDepths[len(devOrder)] = getTopDepths(usbAggregate, maxHistoRows)
+
+	// Find max rows needed
+	maxRows := 0
+	for _, depths := range allDepths {
+		if len(depths) > maxRows {
+			maxRows = len(depths)
+		}
+	}
+
+	if maxRows == 0 {
+		return
+	}
+
+	// Column width: "DDD:░░░░░" = 3 + 1 + barWidth = 9 for barWidth=5
+	colWidth := 4 + barWidth + 2 // depth(3) + colon(1) + bar + spacing
+
+	// Header
+	for _, name := range shortNames {
+		fmt.Fprintf(buf, "%-*s", colWidth, name)
+	}
+	buf.WriteString("\n")
+
+	// Data rows - each device shows its own depth at row i
+	for row := 0; row < maxRows; row++ {
+		for i := range allDepths {
+			if row < len(allDepths[i]) {
+				depth := allDepths[i][row]
+				var h *Histogram
+				if i < len(devOrder) {
+					h = histograms[devOrder[i]]
+				} else {
+					h = usbAggregate
+				}
+				pct := 0.0
+				if h != nil && h.total > 0 {
+					pct = float64(h.buckets[depth]) / float64(h.total) * 100.0
+				}
+				bar := renderBucketBar(pct, barWidth)
+				cell := fmt.Sprintf("%3d:%s", depth, bar)
+				fmt.Fprintf(buf, "%-*s", colWidth, cell)
+			} else {
+				fmt.Fprintf(buf, "%-*s", colWidth, "")
+			}
+		}
+		buf.WriteString("\n")
+	}
+}
+
 // Display renders the current state
 type Display struct {
-	batchMode   bool
-	p50Index    int
-	deviceSizes map[string]string
+	batchMode    bool
+	p50Index     int
+	deviceSizes  map[string]string
+	startTime    time.Time
+	displayCount uint64
 }
 
 func (d *Display) resetCursor() {
@@ -314,6 +477,7 @@ func formatPercentileHeader(pct float64) string {
 var usbDevices = []string{"sdc", "sdd", "sde", "sdf", "sdg"}
 
 func (d *Display) render(histograms map[string]*Histogram, usbAggregate *Histogram, currents map[string]int, usbAggrCurrent int, totalSamples uint64) {
+	d.displayCount++
 	var buf strings.Builder
 
 	timestamp := time.Now().Format("Mon Jan 02 15:04:05 2006")
@@ -412,7 +576,22 @@ func (d *Display) render(histograms map[string]*Histogram, usbAggregate *Histogr
 		buf.WriteString("Legend: █= current  ░= p99 (long-term)  -= unused\n")
 	}
 
-	fmt.Fprintf(&buf, "Samples: %s\n", formatCount(totalSamples))
+	// Sampling and display stats
+	elapsed := time.Since(d.startTime)
+	elapsedSec := elapsed.Seconds()
+	sampleRate := 0.0
+	displayRate := 0.0
+	if elapsedSec > 0 {
+		sampleRate = float64(totalSamples) / elapsedSec
+		displayRate = float64(d.displayCount) / elapsedSec
+	}
+	fmt.Fprintf(&buf, "Samples: %s in %s  |  Rate: %s/s  |  Display: %.1f FPS\n",
+		formatCount(totalSamples), formatDuration(elapsed), formatCount(uint64(sampleRate)), displayRate)
+
+	// Histogram distribution display (all devices side by side)
+	buf.WriteString("\n")
+	renderAllHistograms(&buf, histograms, usbAggregate, 5)
+	buf.WriteString("Log scale: ░░░░░=100%  ░░░--=1%  ░░---=0.1%  ░----=0.01%\n")
 
 	if d.batchMode {
 		buf.WriteString("\n")
@@ -507,6 +686,7 @@ func main() {
 		batchMode:   *batchMode,
 		p50Index:    p50Index,
 		deviceSizes: deviceSizes,
+		startTime:   time.Now(),
 	}
 
 	// Setup signal handling for clean shutdown
