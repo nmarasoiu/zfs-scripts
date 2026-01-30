@@ -28,10 +28,18 @@ import (
 	"github.com/cilium/ebpf/rlimit"
 )
 
+const (
+	displayInterval = 100 * time.Millisecond // 10 FPS display refresh
+	// HDR histogram range: 1µs to 60s, 3 significant figures
+	histMin    = 1
+	histMax    = 60_000_000
+	histSigFig = 3
+)
+
 var (
-	interval   = flag.Duration("i", 10*time.Second, "stats interval")
+	interval   = flag.Duration("i", 10*time.Second, "stats interval for interval view")
 	devices    = flag.String("d", "", "comma-separated device filter (e.g., sdc,sdd or 8:32,8:48)")
-	continuous = flag.Bool("c", false, "continuous output (no clear screen)")
+	batch      = flag.Bool("batch", false, "batch mode (no screen clearing)")
 )
 
 // Device names cache: dev -> name
@@ -39,6 +47,62 @@ var (
 	devNames   = make(map[uint32]string)
 	devNamesMu sync.RWMutex
 )
+
+// formatLatency formats a latency value (in µs) to human-readable string
+func formatLatency(us int64) string {
+	if us < 1000 {
+		return fmt.Sprintf("%dµs", us)
+	}
+	if us < 1_000_000 {
+		ms := float64(us) / 1000
+		if ms < 10 {
+			return fmt.Sprintf("%.2fms", ms)
+		}
+		if ms < 100 {
+			return fmt.Sprintf("%.1fms", ms)
+		}
+		return fmt.Sprintf("%.0fms", ms)
+	}
+	s := float64(us) / 1_000_000
+	if s < 10 {
+		return fmt.Sprintf("%.2fs", s)
+	}
+	return fmt.Sprintf("%.1fs", s)
+}
+
+// formatLatencyPadded formats latency right-aligned in 8 chars
+func formatLatencyPadded(us int64) string {
+	return fmt.Sprintf("%8s", formatLatency(us))
+}
+
+// formatCount formats sample counts
+func formatCount(n int64) string {
+	if n >= 1_000_000_000 {
+		return fmt.Sprintf("%.1fB", float64(n)/1_000_000_000)
+	}
+	if n >= 1_000_000 {
+		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
+	}
+	if n >= 1_000 {
+		return fmt.Sprintf("%.1fK", float64(n)/1_000)
+	}
+	return fmt.Sprintf("%d", n)
+}
+
+// formatDuration formats elapsed time
+func formatDuration(d time.Duration) string {
+	if d < time.Minute {
+		return fmt.Sprintf("%.1fs", d.Seconds())
+	}
+	if d < time.Hour {
+		m := int(d.Minutes())
+		s := int(d.Seconds()) % 60
+		return fmt.Sprintf("%dm%ds", m, s)
+	}
+	h := int(d.Hours())
+	m := int(d.Minutes()) % 60
+	return fmt.Sprintf("%dh%dm", h, m)
+}
 
 func devToMajorMinor(dev uint32) (uint32, uint32) {
 	return dev >> 20, dev & 0xFFFFF
@@ -132,16 +196,200 @@ func parseDeviceFilter(filter string) ([]uint32, error) {
 	return devs, nil
 }
 
+// deviceStats holds both interval and lifetime histograms for a device
 type deviceStats struct {
-	hist    *hdrhistogram.Histogram
-	samples int64
+	interval *hdrhistogram.Histogram // Current interval (reset each period)
+	lifetime *hdrhistogram.Histogram // All-time accumulation
 }
 
 func newDeviceStats() *deviceStats {
-	// 1µs to 60s range, 3 significant digits
 	return &deviceStats{
-		hist: hdrhistogram.New(1, 60_000_000, 3),
+		interval: hdrhistogram.New(histMin, histMax, histSigFig),
+		lifetime: hdrhistogram.New(histMin, histMax, histSigFig),
 	}
+}
+
+// Record adds a latency sample to both histograms
+func (ds *deviceStats) Record(latencyUs int64) {
+	ds.interval.RecordValue(latencyUs)
+	ds.lifetime.RecordValue(latencyUs)
+}
+
+// ResetInterval clears the interval histogram (lifetime persists)
+func (ds *deviceStats) ResetInterval() {
+	ds.interval.Reset()
+}
+
+// Snapshot creates deep copies of both histograms for lock-free display
+func (ds *deviceStats) Snapshot() *deviceStats {
+	return &deviceStats{
+		interval: hdrhistogram.Import(ds.interval.Export()),
+		lifetime: hdrhistogram.Import(ds.lifetime.Export()),
+	}
+}
+
+// State holds all device stats with mutex protection
+type State struct {
+	mu        sync.RWMutex
+	stats     map[uint32]*deviceStats
+	startTime time.Time
+	lastReset time.Time
+}
+
+func newState() *State {
+	now := time.Now()
+	return &State{
+		stats:     make(map[uint32]*deviceStats),
+		startTime: now,
+		lastReset: now,
+	}
+}
+
+func (s *State) Record(dev uint32, latencyUs int64) {
+	s.mu.Lock()
+	ds, ok := s.stats[dev]
+	if !ok {
+		ds = newDeviceStats()
+		s.stats[dev] = ds
+	}
+	ds.Record(latencyUs)
+	s.mu.Unlock()
+}
+
+func (s *State) ResetIntervals() {
+	s.mu.Lock()
+	for _, ds := range s.stats {
+		ds.ResetInterval()
+	}
+	s.lastReset = time.Now()
+	s.mu.Unlock()
+}
+
+func (s *State) Snapshot() (map[uint32]*deviceStats, time.Time, time.Time) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	snap := make(map[uint32]*deviceStats)
+	for dev, ds := range s.stats {
+		snap[dev] = ds.Snapshot()
+	}
+	return snap, s.startTime, s.lastReset
+}
+
+// Display handles rendering
+type Display struct {
+	batchMode bool
+}
+
+func (d *Display) resetCursor() {
+	if !d.batchMode {
+		fmt.Print("\033[H\033[J")
+	}
+}
+
+func (d *Display) render(stats map[uint32]*deviceStats, startTime, lastReset time.Time, intervalDur time.Duration) {
+	var buf strings.Builder
+	now := time.Now()
+
+	// Sort devices by name
+	var devList []uint32
+	for dev := range stats {
+		devList = append(devList, dev)
+	}
+	sort.Slice(devList, func(i, j int) bool {
+		return lookupDevName(devList[i]) < lookupDevName(devList[j])
+	})
+
+	timestamp := now.Format("15:04:05")
+	elapsed := now.Sub(startTime)
+	intervalElapsed := now.Sub(lastReset)
+
+	fmt.Fprintf(&buf, "Block I/O Latency Monitor - %s (uptime: %s, interval: %s/%s)\n",
+		timestamp, formatDuration(elapsed), formatDuration(intervalElapsed), formatDuration(intervalDur))
+	buf.WriteString(strings.Repeat("=", 130))
+	buf.WriteString("\n")
+
+	// Header
+	fmt.Fprintf(&buf, "%-10s │ %8s %8s %8s %8s %8s %8s %8s %8s │ %9s\n",
+		"INTERVAL", "avg", "p50", "p90", "p95", "p99", "p99.9", "max", "min", "samples")
+	buf.WriteString(strings.Repeat("-", 130))
+	buf.WriteString("\n")
+
+	// Interval stats
+	for _, dev := range devList {
+		ds := stats[dev]
+		name := lookupDevName(dev)
+		h := ds.interval
+		n := h.TotalCount()
+		if n == 0 {
+			fmt.Fprintf(&buf, "%-10s │ %8s %8s %8s %8s %8s %8s %8s %8s │ %9s\n",
+				name, "-", "-", "-", "-", "-", "-", "-", "-", "0")
+			continue
+		}
+		fmt.Fprintf(&buf, "%-10s │ %s %s %s %s %s %s %s %s │ %9s\n",
+			name,
+			formatLatencyPadded(int64(h.Mean())),
+			formatLatencyPadded(h.ValueAtQuantile(50)),
+			formatLatencyPadded(h.ValueAtQuantile(90)),
+			formatLatencyPadded(h.ValueAtQuantile(95)),
+			formatLatencyPadded(h.ValueAtQuantile(99)),
+			formatLatencyPadded(h.ValueAtQuantile(99.9)),
+			formatLatencyPadded(h.Max()),
+			formatLatencyPadded(h.Min()),
+			formatCount(n),
+		)
+	}
+
+	buf.WriteString("\n")
+	fmt.Fprintf(&buf, "%-10s │ %8s %8s %8s %8s %8s %8s %8s %8s │ %9s\n",
+		"LIFETIME", "avg", "p50", "p90", "p95", "p99", "p99.9", "max", "min", "samples")
+	buf.WriteString(strings.Repeat("-", 130))
+	buf.WriteString("\n")
+
+	// Lifetime stats
+	var totalSamples int64
+	for _, dev := range devList {
+		ds := stats[dev]
+		name := lookupDevName(dev)
+		h := ds.lifetime
+		n := h.TotalCount()
+		totalSamples += n
+		if n == 0 {
+			fmt.Fprintf(&buf, "%-10s │ %8s %8s %8s %8s %8s %8s %8s %8s │ %9s\n",
+				name, "-", "-", "-", "-", "-", "-", "-", "-", "0")
+			continue
+		}
+		fmt.Fprintf(&buf, "%-10s │ %s %s %s %s %s %s %s %s │ %9s\n",
+			name,
+			formatLatencyPadded(int64(h.Mean())),
+			formatLatencyPadded(h.ValueAtQuantile(50)),
+			formatLatencyPadded(h.ValueAtQuantile(90)),
+			formatLatencyPadded(h.ValueAtQuantile(95)),
+			formatLatencyPadded(h.ValueAtQuantile(99)),
+			formatLatencyPadded(h.ValueAtQuantile(99.9)),
+			formatLatencyPadded(h.Max()),
+			formatLatencyPadded(h.Min()),
+			formatCount(n),
+		)
+	}
+
+	buf.WriteString(strings.Repeat("=", 130))
+	buf.WriteString("\n")
+
+	// Stats summary
+	rate := float64(0)
+	if elapsed.Seconds() > 0 {
+		rate = float64(totalSamples) / elapsed.Seconds()
+	}
+	fmt.Fprintf(&buf, "Total: %s samples | Rate: %s/s | HDR histograms: ~40KB/device\n",
+		formatCount(totalSamples), formatCount(int64(rate)))
+
+	if d.batchMode {
+		buf.WriteString("\n")
+	}
+
+	d.resetCursor()
+	fmt.Print(buf.String())
 }
 
 func main() {
@@ -167,13 +415,11 @@ func main() {
 
 	// Set up device filter if specified
 	if len(filterDevs) > 0 {
-		// Enable filter
 		var key uint32 = 0
 		var enabled uint8 = 1
 		if err := objs.LatConfig.Put(key, enabled); err != nil {
 			log.Fatalf("Failed to enable filter: %v", err)
 		}
-		// Add devices to filter
 		for _, dev := range filterDevs {
 			var val uint8 = 1
 			if err := objs.DevFilter.Put(dev, val); err != nil {
@@ -207,110 +453,84 @@ func main() {
 	}
 	defer rd.Close()
 
-	// Per-device histograms
-	stats := make(map[uint32]*deviceStats)
-	var statsMu sync.Mutex
-
-	// Stats printer
-	ticker := time.NewTicker(*interval)
-	defer ticker.Stop()
-
-	printStats := func() {
-		statsMu.Lock()
-		defer statsMu.Unlock()
-
-		if len(stats) == 0 {
-			fmt.Println("No samples collected")
-			return
-		}
-
-		// Sort devices by name
-		var devList []uint32
-		for dev := range stats {
-			devList = append(devList, dev)
-		}
-		sort.Slice(devList, func(i, j int) bool {
-			return lookupDevName(devList[i]) < lookupDevName(devList[j])
-		})
-
-		if !*continuous {
-			fmt.Print("\033[H\033[2J") // Clear screen
-		}
-		fmt.Printf("%-12s %8s %8s %8s %8s %8s %8s %9s\n",
-			"device", "p50_us", "p75_us", "p90_us", "p95_us", "p99_us", "max_us", "samples")
-
-		for _, dev := range devList {
-			ds := stats[dev]
-			name := lookupDevName(dev)
-			fmt.Printf("%-12s %8d %8d %8d %8d %8d %8d %9d\n",
-				name,
-				ds.hist.ValueAtQuantile(50),
-				ds.hist.ValueAtQuantile(75),
-				ds.hist.ValueAtQuantile(90),
-				ds.hist.ValueAtQuantile(95),
-				ds.hist.ValueAtQuantile(99),
-				ds.hist.Max(),
-				ds.samples,
-			)
-		}
-		fmt.Println()
-
-		// Reset histograms
-		for _, ds := range stats {
-			ds.hist.Reset()
-			ds.samples = 0
-		}
-	}
+	state := newState()
+	display := &Display{batchMode: *batch}
 
 	// Signal handling
+	done := make(chan struct{})
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 
 	go func() {
 		<-sig
-		printStats()
-		os.Exit(0)
+		close(done)
 	}()
 
-	// Timer goroutine
+	// Display goroutine (10 FPS)
+	displayTicker := time.NewTicker(displayInterval)
 	go func() {
-		for range ticker.C {
-			printStats()
+		defer displayTicker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-displayTicker.C:
+				stats, startTime, lastReset := state.Snapshot()
+				if len(stats) > 0 {
+					display.render(stats, startTime, lastReset, *interval)
+				}
+			}
 		}
 	}()
 
-	log.Printf("Tracing block I/O latency (interval=%v)...", *interval)
+	// Interval reset goroutine
+	intervalTicker := time.NewTicker(*interval)
+	go func() {
+		defer intervalTicker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-intervalTicker.C:
+				state.ResetIntervals()
+			}
+		}
+	}()
 
-	// Ring buffer consumer
+	log.Printf("Tracing block I/O latency (interval=%v, display=10fps)...", *interval)
+
+	// Ring buffer consumer (main loop)
 	var event bpfLatencyEvent
 	for {
+		select {
+		case <-done:
+			// Final stats
+			stats, startTime, lastReset := state.Snapshot()
+			display.render(stats, startTime, lastReset, *interval)
+			return
+		default:
+		}
+
 		record, err := rd.Read()
 		if err != nil {
 			if err == ringbuf.ErrClosed {
 				return
 			}
-			log.Printf("Ring buffer read error: %v", err)
 			continue
 		}
 
 		if err := binary.Read(bytes.NewReader(record.RawSample), binary.LittleEndian, &event); err != nil {
-			log.Printf("Failed to parse event: %v", err)
 			continue
 		}
 
-		latencyUs := event.LatencyNs / 1000
-		if latencyUs == 0 {
-			latencyUs = 1 // Minimum 1µs
+		latencyUs := int64(event.LatencyNs / 1000)
+		if latencyUs < 1 {
+			latencyUs = 1
+		}
+		if latencyUs > histMax {
+			latencyUs = histMax
 		}
 
-		statsMu.Lock()
-		ds, ok := stats[event.Dev]
-		if !ok {
-			ds = newDeviceStats()
-			stats[event.Dev] = ds
-		}
-		ds.hist.RecordValue(int64(latencyUs))
-		ds.samples++
-		statsMu.Unlock()
+		state.Record(event.Dev, latencyUs)
 	}
 }
