@@ -54,19 +54,10 @@ func formatLatency(us int64) string {
 		return fmt.Sprintf("%dµs", us)
 	}
 	if us < 1_000_000 {
-		ms := float64(us) / 1000
-		if ms < 10 {
-			return fmt.Sprintf("%.2fms", ms)
-		}
-		if ms < 100 {
-			return fmt.Sprintf("%.1fms", ms)
-		}
-		return fmt.Sprintf("%.0fms", ms)
+		ms := (us + 500) / 1000 // round to nearest ms
+		return fmt.Sprintf("%dms", ms)
 	}
 	s := float64(us) / 1_000_000
-	if s < 10 {
-		return fmt.Sprintf("%.2fs", s)
-	}
 	return fmt.Sprintf("%.1fs", s)
 }
 
