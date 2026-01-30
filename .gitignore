@@ -2,7 +2,11 @@
 usb-queue-monitor-v2
 usb-queue-monitor-stable
 zpool-latency/zpool-latency
+syscalls/syscall-latency
 backups/usb-queue-monitor-v1
+
+# Generated kernel headers (large)
+*/vmlinux.h
 
 # Logs
 *.log
