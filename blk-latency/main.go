@@ -247,12 +247,72 @@ func (t *topN) Clone() *topN {
 	return clone
 }
 
+// bottomN tracks the bottom N minimum values
+type bottomN struct {
+	values []int64
+	n      int
+}
+
+func newBottomN(n int) *bottomN {
+	return &bottomN{
+		values: make([]int64, 0, n),
+		n:      n,
+	}
+}
+
+// Add inserts a value if it belongs in the bottom N
+func (b *bottomN) Add(v int64) {
+	if len(b.values) < b.n {
+		// Still filling up - insert in sorted position (descending)
+		i := sort.Search(len(b.values), func(i int) bool { return b.values[i] <= v })
+		b.values = append(b.values, 0)
+		copy(b.values[i+1:], b.values[i:])
+		b.values[i] = v
+		return
+	}
+	// Full - only insert if smaller than largest (first element)
+	if v < b.values[0] {
+		i := sort.Search(len(b.values), func(i int) bool { return b.values[i] <= v })
+		if i > 0 {
+			copy(b.values[:i-1], b.values[1:i])
+			b.values[i-1] = v
+		}
+	}
+}
+
+// Get returns values sorted ascending (index 0 = min, last = largest of bottom N)
+func (b *bottomN) Get() []int64 {
+	result := make([]int64, len(b.values))
+	// Reverse to get ascending order
+	for i, v := range b.values {
+		result[len(b.values)-1-i] = v
+	}
+	return result
+}
+
+// Reset clears all values
+func (b *bottomN) Reset() {
+	b.values = b.values[:0]
+}
+
+// Clone creates a deep copy
+func (b *bottomN) Clone() *bottomN {
+	clone := &bottomN{
+		values: make([]int64, len(b.values)),
+		n:      b.n,
+	}
+	copy(clone.values, b.values)
+	return clone
+}
+
 // deviceStats holds both interval and lifetime histograms for a device
 type deviceStats struct {
 	interval    *hdrhistogram.Histogram // Current interval (reset each period)
 	lifetime    *hdrhistogram.Histogram // All-time accumulation
 	intervalTop *topN                   // Top 10 for current interval
 	lifetimeTop *topN                   // Top 10 all-time
+	intervalBot *bottomN                // Bottom 5 for current interval
+	lifetimeBot *bottomN                // Bottom 5 all-time
 }
 
 func newDeviceStats() *deviceStats {
@@ -261,21 +321,26 @@ func newDeviceStats() *deviceStats {
 		lifetime:    hdrhistogram.New(histMin, histMax, histSigFig),
 		intervalTop: newTopN(10),
 		lifetimeTop: newTopN(10),
+		intervalBot: newBottomN(5),
+		lifetimeBot: newBottomN(5),
 	}
 }
 
-// Record adds a latency sample to both histograms and top trackers
+// Record adds a latency sample to both histograms and top/bottom trackers
 func (ds *deviceStats) Record(latencyUs int64) {
 	ds.interval.RecordValue(latencyUs)
 	ds.lifetime.RecordValue(latencyUs)
 	ds.intervalTop.Add(latencyUs)
 	ds.lifetimeTop.Add(latencyUs)
+	ds.intervalBot.Add(latencyUs)
+	ds.lifetimeBot.Add(latencyUs)
 }
 
 // ResetInterval clears the interval histogram (lifetime persists)
 func (ds *deviceStats) ResetInterval() {
 	ds.interval.Reset()
 	ds.intervalTop.Reset()
+	ds.intervalBot.Reset()
 }
 
 // Snapshot creates deep copies of both histograms for lock-free display
@@ -285,6 +350,8 @@ func (ds *deviceStats) Snapshot() *deviceStats {
 		lifetime:    hdrhistogram.Import(ds.lifetime.Export()),
 		intervalTop: ds.intervalTop.Clone(),
 		lifetimeTop: ds.lifetimeTop.Clone(),
+		intervalBot: ds.intervalBot.Clone(),
+		lifetimeBot: ds.lifetimeBot.Clone(),
 	}
 }
 
@@ -364,7 +431,24 @@ func formatTop10(top *topN) string {
 	return strings.Join(parts, " ")
 }
 
-const lineWidth = 210
+// formatBot5 formats bottom 5 values as fixed columns (min through min+4)
+// Missing values shown as "-"
+func formatBot5(bot *bottomN) string {
+	vals := bot.Get() // ascending: index 0 = min, last = min+4
+	var parts []string
+	// Add actual values first
+	for _, v := range vals {
+		parts = append(parts, formatLatencyPadded(v))
+	}
+	// Pad missing with "-"
+	numMissing := 5 - len(vals)
+	for i := 0; i < numMissing; i++ {
+		parts = append(parts, fmt.Sprintf("%8s", "-"))
+	}
+	return strings.Join(parts, " ")
+}
+
+const lineWidth = 258
 
 func (d *Display) render(stats map[uint32]*deviceStats, startTime, lastReset time.Time, intervalDur time.Duration) {
 	var buf strings.Builder
@@ -388,9 +472,10 @@ func (d *Display) render(stats map[uint32]*deviceStats, startTime, lastReset tim
 	buf.WriteString(strings.Repeat("=", lineWidth))
 	buf.WriteString("\n")
 
-	// Header - fixed columns: percentiles then top 10 max
-	fmt.Fprintf(&buf, "%-10s │ %8s %8s %8s %8s %8s %8s %8s %8s │ %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s │ %9s\n",
+	// Header - fixed columns: percentiles, bottom 5 min, top 10 max
+	fmt.Fprintf(&buf, "%-10s │ %8s %8s %8s %8s %8s %8s %8s %8s │ %8s %8s %8s %8s %8s │ %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s │ %9s\n",
 		"INTERVAL", "avg", "p50", "p90", "p95", "p99", "p99.9", "p99.99", "p99.999",
+		"min", "min+1", "min+2", "min+3", "min+4",
 		"max-9", "max-8", "max-7", "max-6", "max-5", "max-4", "max-3", "max-2", "max-1", "max", "samples")
 	buf.WriteString(strings.Repeat("-", lineWidth))
 	buf.WriteString("\n")
@@ -402,12 +487,13 @@ func (d *Display) render(stats map[uint32]*deviceStats, startTime, lastReset tim
 		h := ds.interval
 		n := h.TotalCount()
 		if n == 0 {
-			fmt.Fprintf(&buf, "%-10s │ %8s %8s %8s %8s %8s %8s %8s %8s │ %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s │ %9s\n",
+			fmt.Fprintf(&buf, "%-10s │ %8s %8s %8s %8s %8s %8s %8s %8s │ %8s %8s %8s %8s %8s │ %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s │ %9s\n",
 				name, "-", "-", "-", "-", "-", "-", "-", "-",
+				"-", "-", "-", "-", "-",
 				"-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "0")
 			continue
 		}
-		fmt.Fprintf(&buf, "%-10s │ %s %s %s %s %s %s %s %s │ %s │ %9s\n",
+		fmt.Fprintf(&buf, "%-10s │ %s %s %s %s %s %s %s %s │ %s │ %s │ %9s\n",
 			name,
 			formatLatencyPadded(int64(h.Mean())),
 			formatLatencyPadded(h.ValueAtQuantile(50)),
@@ -417,14 +503,16 @@ func (d *Display) render(stats map[uint32]*deviceStats, startTime, lastReset tim
 			formatLatencyPadded(h.ValueAtQuantile(99.9)),
 			formatLatencyPadded(h.ValueAtQuantile(99.99)),
 			formatLatencyPadded(h.ValueAtQuantile(99.999)),
+			formatBot5(ds.intervalBot),
 			formatTop10(ds.intervalTop),
 			formatCount(n),
 		)
 	}
 
 	buf.WriteString("\n")
-	fmt.Fprintf(&buf, "%-10s │ %8s %8s %8s %8s %8s %8s %8s %8s │ %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s │ %9s\n",
+	fmt.Fprintf(&buf, "%-10s │ %8s %8s %8s %8s %8s %8s %8s %8s │ %8s %8s %8s %8s %8s │ %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s │ %9s\n",
 		"LIFETIME", "avg", "p50", "p90", "p95", "p99", "p99.9", "p99.99", "p99.999",
+		"min", "min+1", "min+2", "min+3", "min+4",
 		"max-9", "max-8", "max-7", "max-6", "max-5", "max-4", "max-3", "max-2", "max-1", "max", "samples")
 	buf.WriteString(strings.Repeat("-", lineWidth))
 	buf.WriteString("\n")
@@ -438,12 +526,13 @@ func (d *Display) render(stats map[uint32]*deviceStats, startTime, lastReset tim
 		n := h.TotalCount()
 		totalSamples += n
 		if n == 0 {
-			fmt.Fprintf(&buf, "%-10s │ %8s %8s %8s %8s %8s %8s %8s %8s │ %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s │ %9s\n",
+			fmt.Fprintf(&buf, "%-10s │ %8s %8s %8s %8s %8s %8s %8s %8s │ %8s %8s %8s %8s %8s │ %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s │ %9s\n",
 				name, "-", "-", "-", "-", "-", "-", "-", "-",
+				"-", "-", "-", "-", "-",
 				"-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "0")
 			continue
 		}
-		fmt.Fprintf(&buf, "%-10s │ %s %s %s %s %s %s %s %s │ %s │ %9s\n",
+		fmt.Fprintf(&buf, "%-10s │ %s %s %s %s %s %s %s %s │ %s │ %s │ %9s\n",
 			name,
 			formatLatencyPadded(int64(h.Mean())),
 			formatLatencyPadded(h.ValueAtQuantile(50)),
@@ -453,6 +542,7 @@ func (d *Display) render(stats map[uint32]*deviceStats, startTime, lastReset tim
 			formatLatencyPadded(h.ValueAtQuantile(99.9)),
 			formatLatencyPadded(h.ValueAtQuantile(99.99)),
 			formatLatencyPadded(h.ValueAtQuantile(99.999)),
+			formatBot5(ds.lifetimeBot),
 			formatTop10(ds.lifetimeTop),
 			formatCount(n),
 		)
