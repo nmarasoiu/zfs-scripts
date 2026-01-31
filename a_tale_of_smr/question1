@@ -1,0 +1,5 @@
+we tried for 1year smartctl and even seagate own binaries to get some stats on those devices, temperatures, trim support, real util, so far no luck.
+we aim to catalogue what we can track on those external usb devices;
+feel free to query the linux os and zfs , readonly commands only u can do them without confirming with me if no danger,
+as the smr cliff is there and i dont know how long till there
+your thoughts

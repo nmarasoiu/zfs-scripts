@@ -1,0 +1,3 @@
+  │ What to watch        │ iotmo_cnt, latency spikes, write throughput collapse
+
+iotmo_cnt (I/O Timeout Count) is a kernel-level counter used in Linux to track the number of I/O request timeouts for a specific SCSI device.
