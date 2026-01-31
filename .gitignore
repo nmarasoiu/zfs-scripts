@@ -10,7 +10,6 @@ backups/usb-queue-monitor-v1
 
 # Logs
 *.log
-*.txt
 
 # Backup files
 *~
