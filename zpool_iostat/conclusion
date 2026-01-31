@@ -1,0 +1,6 @@
+
+
+nvme0 has an odd profile — 77.67% of operations clustering at exactly 8ms is unusual for NVMe. That's suspiciously uniform. My educated guess: either it's doing something special (maybe L2ARC or SLOG duties with specific write patterns?), or there's some queuing/throttling happening at the device or controller level.
+
+sdg stands out from its SMR siblings — much heavier tail toward 33-67ms (40%+ at 33ms vs ~19% for others). Could be: more write-heavy workload hitting that specific drive, or it's in a different zone state, or early signs of degradation worth watching.
+

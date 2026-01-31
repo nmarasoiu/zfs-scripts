@@ -1,0 +1,29 @@
+
+● Done. Committed and pushed:
+
+  Commit 4ce522b - Add README.md and zpool_iostat tool
+
+  Files added:
+  - README.md - Comprehensive documentation of all 7 tools
+  - zpool_iostat/main.go - Quick ZFS histogram percentage viewer
+
+  README covers:
+  ┌──────────────────────┬─────────────────┬───────────────────────────────────┐
+  │         Tool         │      Stats      │             Use Case              │
+  ├──────────────────────┼─────────────────┼───────────────────────────────────┤
+  │ blk-latency          │ HDR Histogram   │ Per-device I/O latency to p99.999 │
+  ├──────────────────────┼─────────────────┼───────────────────────────────────┤
+  │ blk-ddsketch         │ DDSketch        │ Best long-tail (±1% guaranteed)   │
+  ├──────────────────────┼─────────────────┼───────────────────────────────────┤
+  │ zpool-latency        │ Fixed buckets   │ ZFS pool latency (coarse)         │
+  ├──────────────────────┼─────────────────┼───────────────────────────────────┤
+  │ zpool_iostat         │ Fixed buckets   │ Quick ZFS histogram %             │
+  ├──────────────────────┼─────────────────┼───────────────────────────────────┤
+  │ syscalls             │ HDR Histogram   │ Per-syscall latency               │
+  ├──────────────────────┼─────────────────┼───────────────────────────────────┤
+  │ top_txg              │ Direct          │ Interactive TXG monitor           │
+  ├──────────────────────┼─────────────────┼───────────────────────────────────┤
+  │ usb-queue-monitor-v2 │ Exact histogram │ Queue depth distribution          │
+  └──────────────────────┴─────────────────┴───────────────────────────────────┘
+
+✻ Cooked for 1m 28s
