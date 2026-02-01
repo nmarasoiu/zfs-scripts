@@ -378,12 +378,46 @@ Drive failure scenarios:
 
 ---
 
+## Special Vdev: Mirrored NVMe
+
+**Goal:** Mirror nvme0 + nvme1 for the special vdev (metadata).
+
+**The Problem:**
+- nvme1: Healthy (avg 365us, max 119ms) but has PCIe correctable errors
+- nvme0: Pathological (avg 5ms, max 29s observed) due to thermal history + 87% fill
+
+**Mirror Write Constraint:**
+```
+sync write → mirror → wait for BOTH nvme0 AND nvme1 to ack
+```
+If nvme0 stalls for 2s, metadata writes stall for 2s. Unacceptable.
+
+**Solution:** Rehabilitate nvme0 before mirroring.
+
+See [03_nvme0_rehabilitation.md](03_nvme0_rehabilitation.md) for:
+- blkdiscard to reclaim SLC cache
+- fio sync write testing with tail latency targets
+- Temperature monitoring under load
+- Pass/fail criteria for mirror duty
+
+**If nvme0 passes:** Mirror special vdev
+```bash
+special mirror \
+    nvme-WD_BLACK_SN770_2TB_244932Z481591-part1 \
+    nvme-WD_BLACK_SN770_2TB_245077404326-part1
+```
+
+**If nvme0 fails:** Demote to L2ARC (read cache, stalls don't block writes)
+
+---
+
 ## Recommendation
 
 1. **If time/money constrained**: Go with Option 1 (standard migration) + simple 5-drive dRAID
 2. **If want maximum capacity with moderate complexity**: Option 2 (two dRAIDs)
 3. **If want absolute maximum utilization and have sdb available**: Option 3 (pyramid)
 4. **Either way**: Eliminate the single-device DHQR as a standalone vdev
+5. **Special vdev**: Mirror nvme0+nvme1 only after nvme0 rehabilitation (see 03_nvme0_rehabilitation.md)
 
 ---
 

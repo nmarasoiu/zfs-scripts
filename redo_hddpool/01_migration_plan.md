@@ -124,9 +124,12 @@ zpool destroy temppool
    - `spa_load_verify_data=0`
    - `spa_load_verify_metadata=0`
 
-2. Consider ssdpool:
-   - If important data already saved, wipe nvme0n1p2
-   - nvme0 can then be repurposed (SLOG, L2ARC, or just avoid it)
+2. **nvme0 Rehabilitation** (see [03_nvme0_rehabilitation.md](03_nvme0_rehabilitation.md)):
+   - After migration, nvme0 is free from pool obligations
+   - Full blkdiscard to reclaim SLC cache
+   - Qualification testing with sync write fio
+   - If passes: mirror partner for special vdev
+   - If fails: demote to L2ARC or retire
 
 ## References
 
