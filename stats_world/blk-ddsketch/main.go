@@ -355,7 +355,7 @@ func getQuantileSafe(s *ddsketch.DDSketch, q float64) (float64, bool) {
 	return v, true
 }
 
-const lineWidth = 140
+const lineWidth = 196
 
 func (d *Display) render(stats map[uint32]*deviceStats, startTime, lastReset time.Time, intervalDur time.Duration, alpha float64) {
 	var buf strings.Builder
@@ -379,9 +379,9 @@ func (d *Display) render(stats map[uint32]*deviceStats, startTime, lastReset tim
 	buf.WriteString(strings.Repeat("=", lineWidth))
 	buf.WriteString("\n")
 
-	// Header: min, avg, p50, p90, p95, p99, p99.9, p99.99, p99.999, max, samples
-	fmt.Fprintf(&buf, "%-10s │ %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s │ %9s\n",
-		"INTERVAL", "min", "avg", "p50", "p90", "p99", "p99.9", "p99.99", "p99.999", "max", "stdev", "samples")
+	// Header: min, avg, p10-p90, p99, p99.9, p99.99, p99.999, max, samples
+	fmt.Fprintf(&buf, "%-10s │ %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s │ %9s\n",
+		"INTERVAL", "min", "avg", "p10", "p20", "p30", "p40", "p50", "p60", "p70", "p80", "p90", "p99", "p99.9", "p99.99", "p99.999", "max", "samples")
 	buf.WriteString(strings.Repeat("-", lineWidth))
 	buf.WriteString("\n")
 
@@ -392,14 +392,21 @@ func (d *Display) render(stats map[uint32]*deviceStats, startTime, lastReset tim
 		s := ds.interval
 		n := ds.intervalPrecise.count
 		if n == 0 {
-			fmt.Fprintf(&buf, "%-10s │ %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s │ %9s\n",
-				name, "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "0")
+			fmt.Fprintf(&buf, "%-10s │ %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s │ %9s\n",
+				name, "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "0")
 			continue
 		}
 
 		avg := ds.intervalPrecise.Avg()
 		min, _ := getQuantileSafe(s, 0.0)
+		p10, _ := getQuantileSafe(s, 0.10)
+		p20, _ := getQuantileSafe(s, 0.20)
+		p30, _ := getQuantileSafe(s, 0.30)
+		p40, _ := getQuantileSafe(s, 0.40)
 		p50, _ := getQuantileSafe(s, 0.50)
+		p60, _ := getQuantileSafe(s, 0.60)
+		p70, _ := getQuantileSafe(s, 0.70)
+		p80, _ := getQuantileSafe(s, 0.80)
 		p90, _ := getQuantileSafe(s, 0.90)
 		p99, _ := getQuantileSafe(s, 0.99)
 		p999, _ := getQuantileSafe(s, 0.999)
@@ -407,25 +414,31 @@ func (d *Display) render(stats map[uint32]*deviceStats, startTime, lastReset tim
 		p99999, _ := getQuantileSafe(s, 0.99999)
 		max, _ := getQuantileSafe(s, 1.0)
 
-		fmt.Fprintf(&buf, "%-10s │ %s %s %s %s %s %s %s %s %s %8s │ %9s\n",
+		fmt.Fprintf(&buf, "%-10s │ %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s │ %9s\n",
 			name,
 			formatLatencyPadded(min),
 			formatLatencyPadded(avg),
+			formatLatencyPadded(p10),
+			formatLatencyPadded(p20),
+			formatLatencyPadded(p30),
+			formatLatencyPadded(p40),
 			formatLatencyPadded(p50),
+			formatLatencyPadded(p60),
+			formatLatencyPadded(p70),
+			formatLatencyPadded(p80),
 			formatLatencyPadded(p90),
 			formatLatencyPadded(p99),
 			formatLatencyPadded(p999),
 			formatLatencyPadded(p9999),
 			formatLatencyPadded(p99999),
 			formatLatencyPadded(max),
-			"-", // stdev placeholder - could compute if needed
 			formatCount(n),
 		)
 	}
 
 	buf.WriteString("\n")
-	fmt.Fprintf(&buf, "%-10s │ %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s │ %9s\n",
-		"LIFETIME", "min", "avg", "p50", "p90", "p99", "p99.9", "p99.99", "p99.999", "max", "stdev", "samples")
+	fmt.Fprintf(&buf, "%-10s │ %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s │ %9s\n",
+		"LIFETIME", "min", "avg", "p10", "p20", "p30", "p40", "p50", "p60", "p70", "p80", "p90", "p99", "p99.9", "p99.99", "p99.999", "max", "samples")
 	buf.WriteString(strings.Repeat("-", lineWidth))
 	buf.WriteString("\n")
 
@@ -438,14 +451,21 @@ func (d *Display) render(stats map[uint32]*deviceStats, startTime, lastReset tim
 		n := ds.lifetimePrecise.count
 		totalSamples += n
 		if n == 0 {
-			fmt.Fprintf(&buf, "%-10s │ %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s │ %9s\n",
-				name, "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "0")
+			fmt.Fprintf(&buf, "%-10s │ %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s │ %9s\n",
+				name, "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "0")
 			continue
 		}
 
 		avg := ds.lifetimePrecise.Avg()
 		min, _ := getQuantileSafe(s, 0.0)
+		p10, _ := getQuantileSafe(s, 0.10)
+		p20, _ := getQuantileSafe(s, 0.20)
+		p30, _ := getQuantileSafe(s, 0.30)
+		p40, _ := getQuantileSafe(s, 0.40)
 		p50, _ := getQuantileSafe(s, 0.50)
+		p60, _ := getQuantileSafe(s, 0.60)
+		p70, _ := getQuantileSafe(s, 0.70)
+		p80, _ := getQuantileSafe(s, 0.80)
 		p90, _ := getQuantileSafe(s, 0.90)
 		p99, _ := getQuantileSafe(s, 0.99)
 		p999, _ := getQuantileSafe(s, 0.999)
@@ -453,18 +473,24 @@ func (d *Display) render(stats map[uint32]*deviceStats, startTime, lastReset tim
 		p99999, _ := getQuantileSafe(s, 0.99999)
 		max, _ := getQuantileSafe(s, 1.0)
 
-		fmt.Fprintf(&buf, "%-10s │ %s %s %s %s %s %s %s %s %s %8s │ %9s\n",
+		fmt.Fprintf(&buf, "%-10s │ %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s │ %9s\n",
 			name,
 			formatLatencyPadded(min),
 			formatLatencyPadded(avg),
+			formatLatencyPadded(p10),
+			formatLatencyPadded(p20),
+			formatLatencyPadded(p30),
+			formatLatencyPadded(p40),
 			formatLatencyPadded(p50),
+			formatLatencyPadded(p60),
+			formatLatencyPadded(p70),
+			formatLatencyPadded(p80),
 			formatLatencyPadded(p90),
 			formatLatencyPadded(p99),
 			formatLatencyPadded(p999),
 			formatLatencyPadded(p9999),
 			formatLatencyPadded(p99999),
 			formatLatencyPadded(max),
-			"-",
 			formatCount(n),
 		)
 	}
