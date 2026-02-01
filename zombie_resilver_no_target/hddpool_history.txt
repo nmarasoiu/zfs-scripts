@@ -1,0 +1,660 @@
+History for 'hddpool':
+2025-01-18.22:18:01 zpool create hddpool draid1:3d:4c:0s-0 /dev/disk/by-id/usb-Seagate_Expansion_HDD_00000000NT17FBP5-0:0 /dev/disk/by-id/usb-Seagate_Expansion_HDD_00000000NT17FBQC-0:0 /dev/disk/by-id/usb-Seagate_Expansion_HDD_00000000NT17FC6F-0:0 /dev/disk/by-id/usb-Seagate_Expansion_HDD_00000000NT17FC7Z-0:0 special /dev/disk/by-id/wwn-0x5002538da01ceedd-part6 -f
+2025-01-18.22:19:26 zpool scrub hddpool
+2025-01-18.22:20:57 zpool scrub hddpool
+2025-01-18.22:22:16 zfs create hddpool/storj
+2025-01-18.22:22:21 zfs set compression=lz4 hddpool
+2025-01-18.22:22:35 zfs set atime=off hddpool
+2025-01-18.22:22:50 zfs set recordsize=4M hddpool
+2025-01-18.22:28:58 zpool scrub hddpool
+2025-01-18.22:29:38 zfs set recordsize=4M hddpool/storj
+2025-01-18.22:42:54 zpool add hddpool log /dev/sda5
+2025-01-19.09:57:17 zfs set recordsize=256k hddpool/storj
+2025-01-19.10:03:47 zfs set recordsize=256k hddpool
+2025-01-19.13:51:44 zfs set sync=disabled hddpool/storj
+2025-01-19.13:52:11 zfs set sync=disabled hddpool
+2025-01-19.13:52:17 zfs set sync=disabled hddpool/storj
+2025-01-19.14:29:29 zfs set sync=standard hddpool
+2025-01-19.14:29:32 zfs set sync=standard hddpool/storj
+2025-01-19.15:30:59 zpool scrub hddpool
+2025-01-19.15:37:52 zpool set autotrim=on hddpool
+2025-01-19.20:10:29 zfs set recordsize=64K hddpool
+2025-01-19.20:10:32 zfs set recordsize=64K hddpool/storj
+2025-01-19.20:46:00 zpool scrub hddpool
+2025-01-20.12:47:47 zfs set special_small_blocks=2k hddpool
+2025-01-20.12:48:41 zfs set special_small_blocks=2k hddpool
+2025-01-20.15:22:00 zpool scrub hddpool
+2025-01-20.17:39:36 zpool set autotrim=off hddpool
+2025-01-20.17:39:53 zpool set autotrim=off hddpool
+2025-01-20.18:35:03 zpool set autotrim=on hddpool
+2025-01-20.18:49:21 zpool scrub hddpool
+2025-01-21.04:09:02 zpool scrub hddpool
+2025-01-21.09:11:20 zfs set special_small_blocks=256k hddpool
+2025-01-21.09:11:46 zfs set special_small_blocks=64k hddpool
+2025-01-21.09:16:17 zfs set special_small_blocks=128k hddpool
+2025-01-21.11:41:52 zpool scrub hddpool
+2025-01-21.11:55:33 zfs set logbias=throughput hddpool
+2025-01-21.12:00:24 zfs set recordsize=1M hddpool
+2025-01-21.12:01:09 zfs set recordsize=256K hddpool
+2025-01-21.12:01:55 zfs set recordsize=512K hddpool
+2025-01-21.12:02:17 zfs set recordsize=512K hddpool/storj
+2025-01-21.15:04:24 zpool add hddpool special nvme1n1
+2025-01-21.15:56:17 zfs set special_small_blocks=256k hddpool
+2025-01-21.17:26:21 zfs set special_small_blocks=512k hddpool
+2025-01-21.17:49:48 zfs set special_small_blocks=128k hddpool
+2025-01-21.17:51:33 zfs set special_small_blocks=32k hddpool
+2025-01-21.17:53:58 zfs set special_small_blocks=16k hddpool
+2025-01-21.17:55:53 zfs set special_small_blocks=32k hddpool
+2025-01-22.04:09:04 zpool scrub hddpool
+2025-01-22.08:34:07 zfs set recordsize=4M hddpool/storj
+2025-01-22.08:34:20 zfs set recordsize=4M hddpool
+2025-01-22.15:17:03 zfs set special_small_blocks=128k hddpool
+2025-01-22.15:17:06 zfs set special_small_blocks=128k hddpool/storj
+2025-01-22.20:18:06 zfs set recordsize=2M hddpool
+2025-01-22.20:18:11 zfs set recordsize=2M hddpool/storj
+2025-01-22.20:18:30 zfs set recordsize=1M hddpool/storj
+2025-01-22.20:18:33 zfs set recordsize=1M hddpool
+2025-01-22.20:19:01 zfs set special_small_blocks=64k hddpool/storj
+2025-01-22.20:19:08 zfs set special_small_blocks=64k hddpool
+2025-01-22.20:41:40 zfs set special_small_blocks=32k hddpool
+2025-01-22.20:41:43 zfs set special_small_blocks=32k hddpool/storj
+2025-01-22.20:45:13 zfs set special_small_blocks=16k hddpool
+2025-01-22.20:45:17 zfs set special_small_blocks=16k hddpool/storj
+2025-01-22.21:32:12 zfs set xattr=off hddpool
+2025-01-23.04:09:02 zpool scrub hddpool
+2025-01-23.07:05:20 zpool scrub hddpool
+2025-01-23.20:30:29 zpool scrub hddpool
+2025-01-23.21:23:26 zfs set recordsize=512k hddpool
+2025-01-23.21:23:29 zfs set recordsize=512k hddpool/storj
+2025-01-23.21:39:38 zfs set recordsize=1M hddpool/storj
+2025-01-23.21:39:57 zfs set recordsize=1M hddpool
+2025-01-23.22:07:51 zfs set sync=disabled hddpool/storj
+2025-01-23.22:13:52 zfs set sync=standard hddpool
+2025-01-23.22:14:19 zfs set sync=standard hddpool/storj
+2025-01-23.22:15:31 zfs set sync=disabled hddpool/storj
+2025-01-23.22:15:38 zfs set sync=disabled hddpool
+2025-01-23.22:28:18 zfs set sync=standard hddpool/storj
+2025-01-23.22:32:08 zfs set sync=disabled hddpool
+2025-01-23.22:32:13 zfs set sync=disabled hddpool/storj
+2025-01-23.22:58:36 zfs set sync=standard hddpool/storj
+2025-01-23.22:58:38 zfs set sync=standard hddpool
+2025-01-24.04:09:03 zpool scrub hddpool
+2025-01-24.07:04:18 zfs set recordsize=1M hddpool
+2025-01-24.08:09:58 zfs set sync=disabled hddpool/storj
+2025-01-24.08:10:01 zfs set sync=disabled hddpool
+2025-01-24.13:27:23 zpool set autotrim=off hddpool
+2025-01-24.13:30:41 zfs set sync=standard hddpool
+2025-01-24.13:30:43 zfs set sync=standard hddpool/storj
+2025-01-24.13:31:11 zfs set sync=disabled hddpool
+2025-01-24.13:31:14 zfs set sync=disabled hddpool/storj
+2025-01-24.17:00:08 zfs set special_small_blocks=128k hddpool
+2025-01-24.17:00:11 zfs set special_small_blocks=128k hddpool/storj
+2025-01-24.17:09:40 zfs set special_small_blocks=64k hddpool/storj
+2025-01-24.17:09:43 zfs set special_small_blocks=64k hddpool
+2025-01-24.17:12:32 zfs set special_small_blocks=128k hddpool/storj
+2025-01-24.17:12:36 zfs set special_small_blocks=128k hddpool
+2025-01-24.17:27:42 zfs set special_small_blocks=256k hddpool
+2025-01-24.17:27:45 zfs set special_small_blocks=256k hddpool/storj
+2025-01-24.17:51:14 zfs set special_small_blocks=512k hddpool/storj
+2025-01-24.17:51:17 zfs set special_small_blocks=512k hddpool
+2025-01-24.18:07:48 zfs set recordsize=4M hddpool
+2025-01-24.18:07:51 zfs set recordsize=4M hddpool/storj
+2025-01-24.18:08:28 zfs set special_small_blocks=512k hddpool
+2025-01-24.20:17:58 zfs set sync=standard hddpool/storj
+2025-01-24.20:18:26 zfs set sync=disabled hddpool/storj
+2025-01-24.23:55:09 zfs set sync=standard hddpool/storj
+2025-01-24.23:55:11 zfs set sync=standard hddpool
+2025-01-24.23:58:46 zfs set logbias=latency hddpool
+2025-01-25.02:10:05 zpool scrub hddpool
+2025-01-25.10:02:25 zfs set special_small_blocks=128k hddpool
+2025-01-25.10:02:28 zfs set special_small_blocks=128k hddpool/storj
+2025-01-25.13:06:56 zfs set recordsize=1M hddpool
+2025-01-25.13:06:58 zfs set recordsize=1M hddpool/storj
+2025-01-25.17:30:07 zpool import hddpool
+2025-01-25.17:30:36 zpool scrub hddpool
+2025-01-25.21:42:58 zpool set autotrim=on hddpool
+2025-01-26.02:10:03 zpool scrub hddpool
+2025-01-26.10:27:03 zpool set autotrim=off hddpool
+2025-01-26.10:35:29 zfs set special_small_blocks=64k hddpool/storj
+2025-01-26.10:35:31 zfs set special_small_blocks=64k hddpool
+2025-01-26.10:59:52 zfs set special_small_blocks=128k hddpool/storj
+2025-01-26.10:59:54 zfs set special_small_blocks=128k hddpool
+2025-01-26.11:09:29 zpool set autotrim=on hddpool
+2025-01-26.12:35:46 zfs set special_small_blocks=256k hddpool/storj
+2025-01-26.12:35:50 zfs set special_small_blocks=256k hddpool
+2025-01-27.02:10:03 zpool scrub hddpool
+2025-01-27.17:11:14 zfs set sync=disabled hddpool/storj
+2025-01-27.17:13:15 zfs set sync=standard hddpool/storj
+2025-01-27.17:18:45 zfs set special_small_blocks=128k hddpool
+2025-01-27.17:18:49 zfs set special_small_blocks=128k hddpool/storj
+2025-01-28.02:10:02 zpool scrub hddpool
+2025-01-29.02:10:03 zpool scrub hddpool
+2025-01-29.09:44:18 zfs snapshot -r hddpool@migrate_20250129
+2025-01-29.10:09:52 zfs send -R hddpool@migrate_20250129
+2025-01-29.11:00:04 zfs set special_small_blocks=256k hddpool
+2025-01-29.11:00:08 zfs set special_small_blocks=256k hddpool/storj
+2025-01-29.11:00:33 zfs set recordsize=4M hddpool/storj
+2025-01-29.11:00:36 zfs set recordsize=4M hddpool
+2025-01-29.11:01:19 zfs set special_small_blocks=256k hddpool/storj
+2025-01-30.02:10:06 zpool scrub hddpool
+2025-01-31.02:10:05 zpool scrub hddpool
+2025-01-31.09:44:24 zfs set special_small_blocks=256k hddpool/storj
+2025-01-31.09:44:28 zfs set special_small_blocks=256k hddpool
+2025-01-31.10:18:36 zpool scrub hddpool
+2025-01-31.16:13:20 zfs set special_small_blocks=128k hddpool
+2025-01-31.16:13:26 zfs set special_small_blocks=128k hddpool/storj
+2025-01-31.16:23:07 zfs destroy hddpool@migrate_20250129
+2025-01-31.16:23:15 zfs destroy hddpool/storj@migrate_20250129
+2025-01-31.16:58:36 zfs set special_small_blocks=256k hddpool
+2025-01-31.16:58:39 zfs set special_small_blocks=256k hddpool/storj
+2025-01-31.17:30:05 zfs set sync=disabled hddpool
+2025-01-31.17:30:08 zfs set sync=disabled hddpool/storj
+2025-01-31.17:30:30 zpool set autotrim=off hddpool
+2025-01-31.17:31:42 zpool set autotrim=on hddpool
+2025-01-31.17:32:02 zfs set sync=standard hddpool
+2025-01-31.17:32:40 zfs set sync=standard hddpool/storj
+2025-02-02.17:24:29 zfs set sync=disabled hddpool
+2025-02-02.17:24:31 zfs set sync=disabled hddpool/storj
+2025-02-02.17:26:51 zpool set autotrim=off hddpool
+2025-02-02.17:38:13 zfs set sync=standard hddpool
+2025-02-02.17:38:20 zfs set sync=standard hddpool/storj
+2025-02-02.17:40:21 zfs set sync=disabled hddpool/storj
+2025-02-02.17:40:23 zfs set sync=disabled hddpool
+2025-02-02.17:44:59 zfs set sync=standard hddpool/storj
+2025-02-02.17:45:03 zfs set sync=standard hddpool
+2025-02-02.18:38:30 zfs set sync=disabled hddpool/storj
+2025-02-02.18:38:33 zfs set sync=disabled hddpool
+2025-02-02.18:52:28 zfs set sync=standard hddpool/storj
+2025-02-02.18:52:30 zfs set sync=standard hddpool
+2025-02-03.09:58:43 zfs set special_small_blocks=128k hddpool/storj
+2025-02-03.09:58:44 zfs set special_small_blocks=128k hddpool
+2025-02-05.05:02:29 zfs set special_small_blocks=256k hddpool/storj
+2025-02-05.05:02:31 zfs set special_small_blocks=256k hddpool
+2025-02-06.13:58:06 zfs set special_small_blocks=512k hddpool/storj
+2025-02-06.13:58:09 zfs set special_small_blocks=512k hddpool
+2025-02-06.14:03:05 zfs set special_small_blocks=256k hddpool
+2025-02-06.14:03:08 zfs set special_small_blocks=256k hddpool/storj
+2025-02-09.00:24:05 zpool scrub hddpool
+2025-02-13.12:12:28 zfs receive -F hddpool/ssd_data
+2025-02-16.09:43:38 zpool scrub hddpool
+2025-02-16.17:58:37 zfs set special_small_blocks=128k hddpool/storj
+2025-02-16.17:58:43 zfs set special_small_blocks=128k hddpool
+2025-02-19.10:49:11 zpool add hddpool /dev/disk/by-id/usb-Seagate_Expansion_HDD_00000000NT17DHQR-0:0
+2025-02-19.19:46:46 zpool add hddpool cache /dev/sda4
+2025-02-19.21:29:16 zpool remove hddpool sda4
+2025-02-19.21:29:17 zpool add hddpool cache sda4
+2025-02-20.11:23:48 zpool scrub hddpool
+2025-02-22.07:04:57 zpool remove hddpool sda4
+2025-02-22.08:02:26 zfs set special_small_blocks=256k hddpool
+2025-02-22.08:02:29 zfs set special_small_blocks=256k hddpool/storj
+2025-02-22.17:07:39 zfs set special_small_blocks=128k hddpool
+2025-02-22.17:07:42 zfs set special_small_blocks=128k hddpool/storj
+2025-02-24.11:24:02 zfs destroy hddpool/ssd_data@2024-feb-13
+2025-02-24.11:24:02 zfs destroy hddpool/ssd_data/db@2024-feb-13
+2025-02-24.11:24:02 zfs destroy hddpool/ssd_data/logs@2024-feb-13
+2025-02-24.18:49:55 zfs set special_small_blocks=256k hddpool/storj
+2025-02-24.18:50:21 zfs set special_small_blocks=256k hddpool
+2025-02-24.18:51:47 zfs destroy -r hddpool/ssd_data/db
+2025-02-24.18:51:47 zfs destroy -r hddpool/ssd_data/logs
+2025-02-24.18:51:48 zfs destroy -r hddpool/ssd_data
+2025-02-24.19:02:24 zfs set special_small_blocks=128k hddpool
+2025-02-24.19:02:27 zfs set special_small_blocks=128k hddpool/storj
+2025-02-25.15:54:47 zfs set special_small_blocks=256k hddpool
+2025-02-25.15:54:51 zfs set special_small_blocks=256k hddpool/storj
+2025-03-01.08:47:34 zfs set special_small_blocks=128k hddpool/storj
+2025-03-01.08:47:36 zfs set special_small_blocks=128k hddpool
+2025-03-01.14:50:55 zfs set special_small_blocks=128k hddpool
+2025-03-09.00:24:06 zpool scrub hddpool
+2025-04-07.09:44:03 zfs set recordsize=1M hddpool
+2025-04-07.09:46:42 zfs set recordsize=1M hddpool
+2025-04-07.09:48:15 zfs create -o recordsize=1M -o compression=lz4 hddpool/sia
+2025-04-07.14:52:01 zfs set special_small_blocks=0 hddpool/sia
+2025-04-07.17:22:42 zpool scrub hddpool
+2025-04-08.12:33:02 zfs create -o compression=lz4 -o recordsize=1M -o special_small_blocks=0 hddpool/timemachine
+2025-04-08.12:49:49 zfs create -o compression=lz4 -o recordsize=128K -o special_small_blocks=0 hddpool/googledrive
+2025-04-08.14:05:41 zfs receive hddpool/ssdpool-db
+2025-04-08.14:06:09 zfs receive hddpool/ssdpool-git
+2025-04-08.14:06:10 zfs receive hddpool/ssdpool-logs
+2025-04-08.14:07:10 zfs create hddpool/ssdpool_root
+2025-04-09.06:00:36 zfs receive hddpool/ssdpool-db
+2025-04-09.06:00:36 zfs receive hddpool/ssdpool-git
+2025-04-09.06:00:37 zfs receive hddpool/ssdpool-logs
+2025-04-09.06:32:49 zpool remove hddpool sda5
+2025-04-09.06:39:51 zpool add hddpool log /dev/nvme0n1p1
+2025-04-09.06:42:12 zfs snapshot hddpool/ssdpool-db@migration2
+2025-04-09.06:42:12 zfs snapshot hddpool/ssdpool-git@migration2
+2025-04-09.06:42:26 zfs snapshot hddpool/ssdpool-logs@migration2
+2025-04-09.11:16:00 zfs create hddpool/debian-mirror -o recordsize=1M -o compression=lz4 -o special_small_blocks=0
+2025-04-09.11:40:33 zfs create hddpool/arch-linux-mirror -o recordsize=1M -o compression=lz4 -o special_small_blocks=0
+2025-04-09.15:20:34 zfs destroy hddpool/arch-linux-mirror
+2025-04-09.15:20:53 zfs destroy hddpool/debian-mirror
+2025-04-09.15:21:25 zfs create hddpool/mirrors
+2025-04-09.15:21:35 zfs set atime=off hddpool/mirrors
+2025-04-09.15:21:46 zfs set recordsize=4M hddpool/mirrors
+2025-04-09.15:21:59 zfs set compression=lz4 hddpool/mirrors
+2025-04-09.15:23:11 zfs set special_small_blocks=4k hddpool/mirrors
+2025-04-09.17:54:08 zfs snapshot hddpool/mirrors@initial
+2025-04-09.18:30:58 zfs snapshot hddpool/googledrive@initial
+2025-04-09.18:31:10 zfs snapshot hddpool/timemachine@initial
+2025-04-09.19:45:54 zfs destroy -r hddpool/mirrors
+2025-04-10.06:45:58 zpool add hddpool special /dev/sda5
+2025-04-11.08:14:51 zpool add hddpool log /dev/sda4
+2025-04-11.10:43:18 zfs create -o recordsize=1M -o compression=lz4 -o atime=off -o relatime=off -o normalization=formD -o xattr=sa hddpool/torrents
+2025-04-12.07:51:59 zfs create -o recordsize=16k -o compression=lz4 -o atime=off -o relatime=off -o normalization=formD -o xattr=sa hddpool/torrents2
+2025-04-12.07:59:08 zfs destroy hddpool/torrents2
+2025-04-12.08:25:49 zpool remove hddpool nvme0n1p1
+2025-04-12.09:53:22 zpool add hddpool nvme0n1p1
+2025-04-12.10:49:13 zpool import -c /etc/zfs/zpool.cache -aN
+2025-04-12.10:54:26 zpool import -c /etc/zfs/zpool.cache -aN
+2025-04-12.11:51:29 zfs rename hddpool/ssdpool-db hddpool/ssdpool-db-initial-sendrcv
+2025-04-12.11:52:01 zpool scrub hddpool
+2025-04-13.00:24:07 zpool scrub hddpool
+2025-04-14.14:35:46 zfs rename hddpool/torrents hddpool/torrents_hdd
+2025-04-14.14:38:53 zfs rename hddpool/torrents_hdd hddpool/torrents
+2025-04-16.07:17:24 zpool add hddpool log /dev/zvol/ssdpool/slog_zvol
+2025-04-16.07:31:35 zpool remove hddpool zvol/ssdpool/slog_zvol
+2025-04-16.07:32:06 zpool add hddpool log /dev/zvol/ssdpool/slog_zvol
+2025-04-16.07:33:24 zpool remove hddpool zvol/ssdpool/slog_zvol
+2025-04-16.07:35:32 zpool add hddpool log /dev/zvol/ssdpool/slog_zvol
+2025-04-16.07:42:34 zpool remove hddpool sda4
+2025-04-16.08:11:10 zpool add hddpool log /dev/sda4
+2025-04-16.13:15:07 zpool import hddpool
+2025-04-16.13:27:03 zpool scrub hddpool
+2025-04-16.14:57:30 zpool remove hddpool zvol/ssdpool/slog_zvol
+2025-04-19.04:16:19 zpool import hddpool
+2025-05-11.00:24:18 zpool scrub hddpool
+2025-05-18.16:29:09 zfs snapshot hddpool/storj@for_copy
+2025-05-19.12:28:28 zfs receive hddpool/storj2
+2025-05-20.12:55:27 zfs snapshot hddpool/storj@for_copy2
+2025-05-20.17:22:49 zfs receive hddpool/storj2
+2025-05-21.03:36:00 zfs snapshot hddpool/storj@for_copy3
+2025-05-21.06:07:42 zfs receive hddpool/storj2
+2025-05-21.07:06:42 zfs snapshot hddpool/storj@for_copy4
+2025-05-21.07:13:36 zfs receive hddpool/storj2
+2025-05-21.07:27:19 zfs snapshot hddpool/storj@for_copy5
+2025-05-21.07:27:47 zfs receive hddpool/storj2
+2025-05-21.07:28:30 zfs rename hddpool/storj hddpool/storj_orig
+2025-05-21.07:28:45 zfs rename hddpool/storj2 hddpool/storj
+2025-05-21.07:32:41 zfs rename hddpool/storj hddpool/storj_new
+2025-05-21.07:49:21 zfs destroy -r hddpool/storj_new
+2025-05-21.07:49:21 zfs rename hddpool/storj_orig hddpool/storj
+2025-05-21.08:01:34 zfs destroy hddpool/storj@for_copy,for_copy2,for_copy3,for_copy4,for_copy5
+2025-06-08.00:24:08 zpool scrub hddpool
+2025-06-14.09:30:21 zfs set sync=disabled hddpool/torrents
+2025-06-23.10:50:52 zfs set recordsize=128k hddpool/torrents
+2025-06-24.10:41:22 zfs set recordsize=1m hddpool/torrents
+2025-07-04.17:07:27 zpool online hddpool usb-Seagate_Expansion_HDD_00000000NT17FBP5-0:0
+2025-07-22.12:32:47 zpool online hddpool usb-Seagate_Expansion_HDD_00000000NT17FBP5-0:0
+2025-07-26.11:45:16 zpool online hddpool usb-Seagate_Expansion_HDD_00000000NT17FBP5-0:0
+2025-08-10.00:24:04 zpool scrub hddpool
+2025-09-14.00:24:06 zpool scrub hddpool
+2025-09-26.14:11:51 zpool online hddpool usb-Seagate_Expansion_HDD_00000000NT17FBP5-0:0
+2025-09-26.14:16:28 zpool online hddpool usb-Seagate_Expansion_HDD_00000000NT17FBP5-0:0
+2025-09-26.14:17:12 zpool online hddpool usb-Seagate_Expansion_HDD_00000000NT17FBP5-0:0
+2025-09-26.14:17:18 zpool online hddpool usb-Seagate_Expansion_HDD_00000000NT17FBP5-0:0
+2025-10-03.14:36:48 zpool online hddpool usb-Seagate_Expansion_HDD_00000000NT17FBP5-0:0
+2025-10-05.15:20:28 zpool online hddpool usb-Seagate_Expansion_HDD_00000000NT17FBP5-0:0
+2025-12-14.00:24:04 zpool scrub hddpool
+2026-01-01.19:16:49 zfs set special_small_blocks=256k hddpool/storj
+2026-01-01.19:33:40 zfs set special_small_blocks=128K hddpool/storj
+2026-01-01.19:33:40 zfs set special_small_blocks=128K hddpool/timemachine
+2026-01-02.12:54:54 zfs create hddpool/ssdpool_torrent
+2026-01-02.12:54:55 zfs set recordsize=1M hddpool/ssdpool_torrent
+2026-01-02.12:54:55 zfs set compression=lz4 hddpool/ssdpool_torrent
+2026-01-02.12:54:55 zfs set atime=off hddpool/ssdpool_torrent
+2026-01-02.12:54:56 zfs set copies=1 hddpool/ssdpool_torrent
+2026-01-02.18:49:19 zfs set special_small_blocks=128K hddpool/googledrive
+2026-01-02.18:49:23 zfs set special_small_blocks=128K hddpool/sia
+2026-01-02.18:50:57 zfs set special_small_blocks=128K hddpool/timemachine
+2026-01-02.18:51:07 zfs set special_small_blocks=512K hddpool/timemachine
+2026-01-02.18:58:00 zfs set special_small_blocks=1M hddpool/timemachine
+2026-01-02.18:58:43 zfs set special_small_blocks=1M hddpool/timemachine
+2026-01-02.19:00:50 zfs set special_small_blocks=256k hddpool/timemachine
+2026-01-02.19:21:31 zfs set special_small_blocks=256k hddpool/torrents
+2026-01-03.14:23:32 zfs create -o recordsize=1M -o atime=off -o special_small_blocks=128K hddpool/ssdpool
+2026-01-03.14:39:58 zfs destroy -r hddpool/ssdpool
+2026-01-04.19:59:17 zfs snapshot -r hddpool@2026jan
+2026-01-05.10:59:30 zpool scrub hddpool
+2026-01-06.10:55:36 zpool scrub hddpool
+2026-01-06.15:33:12 zfs create hddpool/root_backup
+2026-01-06.18:39:31 zfs set special_small_blocks=256K hddpool/storj
+2026-01-07.14:19:41 zpool scrub hddpool
+2026-01-07.16:12:21 zpool scrub -s hddpool
+2026-01-07.23:05:36 zpool set autotrim=on hddpool
+2026-01-08.08:40:08 zfs set recsize=512k hddpool/storj
+2026-01-08.08:40:11 zfs set recsize=512k hddpool
+2026-01-08.08:40:40 zfs set recsize=512k hddpool/sia
+2026-01-08.08:40:50 zfs set recsize=512k hddpool/timemachine
+2026-01-08.08:40:54 zfs set recsize=512k hddpool/torrents
+2026-01-08.08:41:11 zfs set recsize=512k hddpool/ssdpool_torrent
+2026-01-08.12:10:42 zfs snapshot -r hddpool@backup2
+2026-01-08.12:16:01 zpool scrub hddpool
+2026-01-08.12:31:23 zfs snapshot -r hddpool@backup-20260108-1230
+2026-01-08.15:22:12 zfs snapshot -r hddpool@backup-20260108-15-21
+2026-01-08.15:40:16 zpool scrub -s hddpool
+2026-01-08.20:01:27 zpool import hddpool
+2026-01-08.20:13:18 zpool scrub hddpool
+2026-01-09.07:11:56 zpool attach hddpool nvme1n1p1 /dev/disk/by-id/wwn-0x3e54314833464435-part2
+2026-01-09.10:23:23 zfs set special_small_blocks=128K hddpool/storj
+2026-01-09.10:24:16 zfs set special_small_blocks=128k hddpool/timemachine
+2026-01-09.10:24:20 zfs set special_small_blocks=128k hddpool/torrents
+2026-01-09.10:24:24 zfs set special_small_blocks=128k hddpool
+2026-01-09.10:29:42 zfs set recordsize=256k hddpool
+2026-01-09.10:30:43 zfs set recordsize=256k hddpool/storj
+2026-01-09.10:30:48 zfs set recordsize=256k hddpool/torrents
+2026-01-09.10:32:11 zfs destroy -r hddpool/timemachine
+2026-01-09.10:33:26 zfs set recordsize=256k hddpool/sia
+2026-01-09.10:33:32 zfs set recordsize=256k hddpool/ssdpool_torrent
+2026-01-09.10:33:45 zfs set recordsize=256k hddpool/googledrive
+2026-01-09.19:40:28 zpool attach -w hddpool wwn-0x5002538da01ceedd-part6 /dev/disk/by-id/wwn-0x3e54314833464435-part3
+2026-01-09.23:09:42 zpool set failmode=wait hddpool
+2026-01-09.23:10:01 zpool set failmode=wait hddpool
+2026-01-10.10:30:26 zpool import -c /etc/zfs/zpool.cache -aN
+2026-01-10.10:50:40 zpool online hddpool 204961841233271636
+2026-01-10.10:51:55 zpool clear hddpool 204961841233271636
+2026-01-10.10:53:52 zpool replace hddpool 204961841233271636 /dev/disk/by-id/nvme-WD_BLACK_SN770_2TB_245077404326-part1
+2026-01-10.11:12:53 zpool detach hddpool nvme-WD_BLACK_SN770_2TB_245077404326-part1
+2026-01-10.15:03:15 zpool clear hddpool
+2026-01-10.15:07:56 zpool replace hddpool 204961841233271636 /dev/disk/by-id/nvme-WD_BLACK_SN770_2TB_245077404326-part1
+2026-01-11.14:39:50 zfs set recordsize=64k hddpool/googledrive
+2026-01-11.14:40:03 zfs set recordsize=64k hddpool/torrents
+2026-01-11.14:40:14 zfs set recordsize=64k hddpool/storj
+2026-01-11.14:40:29 zfs set special_small_blocks=32k hddpool
+2026-01-11.14:40:49 zfs set special_small_blocks=32k hddpool/googledrive
+2026-01-11.14:40:58 zfs set special_small_blocks=32k hddpool/storj
+2026-01-11.14:41:58 zfs set recordsize=64k hddpool
+2026-01-11.14:42:10 zfs set special_small_blocks=32k hddpool
+2026-01-11.14:43:58 zfs inherit -r recordsize hddpool
+2026-01-11.14:46:07 zfs inherit -r special_small_blocks hddpool
+2026-01-11.14:46:46 zfs set recordsize=64k hddpool
+2026-01-11.14:47:01 zfs set special_small_blocks=32k hddpool
+2026-01-12.06:11:49 zpool attach -w -s hddpool usb-Seagate_Expansion_HDD_00000000NT17DHQR-0:0 /dev/disk/by-id/wwn-0x3e54314833464435-part1
+2026-01-12.10:11:57 zpool scrub -p hddpool
+2026-01-12.10:15:21 zpool import -c /etc/zfs/zpool.cache -aN
+2026-01-12.16:03:23 zpool scrub -p hddpool
+2026-01-12.20:30:03 zpool scrub -p hddpool
+2026-01-12.20:56:23 zpool scrub -p hddpool
+2026-01-12.21:04:06 zpool scrub -p hddpool
+2026-01-12.21:06:34 zpool import -c /etc/zfs/zpool.cache -aN
+2026-01-13.00:24:39 zfs set special_small_blocks=0k hddpool
+2026-01-13.00:25:52 zfs set recordsize=4k hddpool
+2026-01-13.00:28:24 zfs set recordsize=64k hddpool
+2026-01-13.00:32:26 zpool attach hddpool sda4 /dev/disk/by-id/wwn-0x3e54314833464435-part6
+2026-01-13.00:36:40 zpool detach hddpool /dev/disk/by-id/wwn-0x3e54314833464435-part6
+2026-01-13.00:41:29 zpool export hddpool
+2026-01-13.00:44:26 zpool import -d /dev/disk/by-id hddpool
+2026-01-13.00:48:10 zpool clear hddpool
+2026-01-13.00:59:21 zpool scrub hddpool
+2026-01-13.03:36:29 zfs set recordsize=128k hddpool
+2026-01-13.03:38:41 zfs set special_small_blocks=64k hddpool
+2026-01-13.03:43:50 zfs set recordsize=256k hddpool
+2026-01-13.03:44:03 zfs set special_small_blocks=128k hddpool
+2026-01-13.04:01:20 zfs set special_small_blocks=64k hddpool
+2026-01-13.04:01:52 zfs set recordsize=128k hddpool/googledrive
+2026-01-13.04:01:57 zfs set recordsize=128k hddpool
+2026-01-13.04:14:17 zfs inherit -r recordsize hddpool
+2026-01-13.04:14:54 zfs inherit -r special_small_blocks hddpool
+2026-01-13.04:15:24 zfs set special_small_blocks=64k hddpool
+2026-01-13.04:55:13 zpool scrub -p hddpool
+2026-01-13.05:00:31 zpool export hddpool
+2026-01-13.05:13:10 zpool scrub -p hddpool
+2026-01-13.05:13:37 zpool export hddpool
+2026-01-13.05:19:02 zpool import hddpool
+2026-01-13.05:28:08 zpool scrub -p hddpool
+2026-01-13.05:31:32 zpool scrub -p hddpool
+2026-01-13.05:39:50 zpool scrub -p hddpool
+2026-01-13.06:28:52 zpool scrub -s hddpool
+2026-01-13.06:59:54 zpool scrub hddpool
+2026-01-13.09:00:55 zpool scrub -s hddpool
+2026-01-13.09:03:39 zpool export hddpool
+2026-01-13.09:43:51 zpool import hddpool
+2026-01-13.09:52:45 zpool scrub hddpool
+2026-01-13.10:00:43 zpool scrub -p hddpool
+2026-01-13.10:01:50 zpool scrub -p hddpool
+2026-01-13.10:03:14 zpool scrub -p hddpool
+2026-01-13.10:07:17 zpool scrub -p hddpool
+2026-01-13.10:16:12 zpool scrub -p hddpool
+2026-01-13.10:34:17 zpool scrub -p hddpool
+2026-01-13.10:46:32 zpool scrub -p hddpool
+2026-01-13.11:12:14 zpool scrub -p hddpool
+2026-01-13.11:24:26 zpool scrub -p hddpool
+2026-01-13.12:21:11 zpool scrub -p hddpool
+2026-01-13.13:11:02 zpool scrub -p hddpool
+2026-01-13.13:40:57 zpool scrub -p hddpool
+2026-01-13.14:42:14 zpool scrub -p hddpool
+2026-01-26.16:30:54 zpool import hddpool
+2026-01-26.16:31:12 zpool scrub -p hddpool
+2026-01-26.17:08:30 zpool scrub -s hddpool
+2026-01-26.19:29:08 zpool detach hddpool 15804153059957593833
+2026-01-26.19:29:08 zpool detach hddpool 8975435589811420789
+2026-01-26.19:29:08 zpool detach hddpool 3782320132545174016
+2026-01-26.19:29:08 zpool detach hddpool 349919681207657026
+2026-01-26.19:29:09 zpool detach hddpool 14749408423007555725
+2026-01-27.10:49:09 zfs set recordsize=4M hddpool
+2026-01-27.10:54:34 zfs set special_small_blocks=128k hddpool
+2026-01-27.13:25:46 zpool import hddpool
+2026-01-27.13:27:36 zfs set special_small_blocks=64k hddpool
+2026-01-27.13:28:01 zfs set recordsize=1M hddpool
+2026-01-27.13:39:37 zpool import hddpool
+2026-01-27.14:20:28 zfs set recordsize=4M hddpool
+2026-01-27.16:20:30 zfs set recordsize=128k hddpool
+2026-01-27.19:08:54 zfs destroy hddpool/storj@2026jan
+2026-01-27.21:32:04 zfs set special_small_blocks=0 xattr=off hddpool/ssdpool_torrent
+2026-01-27.21:32:04 zfs set special_small_blocks=0 xattr=off hddpool/torrents
+2026-01-27.21:33:26 zfs set special_small_blocks=0 xattr=off hddpool/ssdpool_torrent
+2026-01-27.21:33:27 zfs set special_small_blocks=0 xattr=off hddpool/torrents
+2026-01-27.21:37:10 zfs destroy -r hddpool/ssdpool_torrent@%
+2026-01-28.11:36:59 zfs set recordsize=1M hddpool
+2026-01-28.11:37:08 zfs set special_small_blocks=128k hddpool
+2026-01-28.11:38:46 zfs set special_small_blocks=128k hddpool/ssdpool_torrent
+2026-01-28.11:38:51 zfs set special_small_blocks=128k hddpool/torrents
+2026-01-28.11:52:13 zfs set recordsize=4M hddpool
+2026-01-28.11:53:10 zfs set recordsize=128k hddpool
+2026-01-28.11:53:17 zfs set recordsize=256k hddpool
+2026-01-28.14:32:23 zfs set special_small_blocks=0k hddpool/torrents
+2026-01-28.14:32:43 zfs set special_small_blocks=0k hddpool/ssdpool_torrent
+2026-01-28.16:50:20 zpool import hddpool
+2026-01-28.17:53:44 zpool import -N hddpool
+2026-01-28.17:56:32 zpool export hddpool
+2026-01-28.17:56:58 zpool import hddpool
+2026-01-28.18:00:59 zpool import hddpool
+2026-01-28.18:47:00 zfs set special_small_blocks=0k hddpool/root_backup
+2026-01-28.18:47:17 zfs set special_small_blocks=0k hddpool/ssdpool_root
+2026-01-28.18:47:24 zfs set special_small_blocks=0k hddpool/sia
+2026-01-28.18:47:42 zfs set special_small_blocks=0k hddpool/googledrive
+2026-01-28.18:48:08 zfs set special_small_blocks=128k hddpool/storj
+2026-01-28.18:48:29 zfs set special_small_blocks=16k hddpool
+2026-01-28.19:49:53 zfs create -o copies=3 -o compression=lz4 -o atime=off -o recordsize=8M -o special_small_blocks=1M hddpool/storj-db
+2026-01-29.06:15:24 zpool import hddpool
+2026-01-29.07:36:43 zpool import -N hddpool
+2026-01-29.07:36:44 zpool detach hddpool 4060908642400989107
+2026-01-29.10:47:34 zpool export hddpool
+2026-01-29.10:48:07 zpool import hddpool
+2026-01-29.11:55:07 zfs set special_small_blocks=64k hddpool/storj
+2026-01-29.11:55:22 zfs set recordsize=128k hddpool/storj
+2026-01-29.12:26:48 zfs set recordsize=2M hddpool/storj-db
+2026-01-30.07:49:33 zfs set sync=disabled hddpool/storj
+2026-01-30.07:49:42 zfs set sync=disabled hddpool/storj-db
+2026-01-30.07:53:21 zfs destroy hddpool/storj@backup2%backup-20260108-15-21
+2026-01-30.07:54:55 zfs destroy hddpool@2026jan
+2026-01-30.07:54:57 zfs destroy hddpool@backup2
+2026-01-30.07:54:58 zfs destroy hddpool@backup-20260108-1230
+2026-01-30.07:54:59 zfs destroy hddpool@backup-20260108-15-21
+2026-01-30.07:55:01 zfs destroy hddpool/googledrive@initial
+2026-01-30.07:55:02 zfs destroy hddpool/googledrive@2026jan
+2026-01-30.07:55:03 zfs destroy hddpool/googledrive@backup2
+2026-01-30.07:55:04 zfs destroy hddpool/googledrive@backup-20260108-1230
+2026-01-30.07:55:06 zfs destroy hddpool/googledrive@backup-20260108-15-21
+2026-01-30.07:55:07 zfs destroy hddpool/root_backup@backup2
+2026-01-30.07:55:08 zfs destroy hddpool/root_backup@backup-20260108-1230
+2026-01-30.07:55:09 zfs destroy hddpool/root_backup@backup-20260108-15-21
+2026-01-30.07:55:11 zfs destroy hddpool/sia@2026jan
+2026-01-30.07:55:12 zfs destroy hddpool/sia@backup2
+2026-01-30.07:55:13 zfs destroy hddpool/sia@backup-20260108-1230
+2026-01-30.07:55:14 zfs destroy hddpool/sia@backup-20260108-15-21
+2026-01-30.07:55:16 zfs destroy hddpool/ssdpool-db-initial-sendrcv@migration
+2026-01-30.07:55:17 zfs destroy hddpool/ssdpool-db-initial-sendrcv@final
+2026-01-30.07:55:18 zfs destroy hddpool/ssdpool-db-initial-sendrcv@migration2
+2026-01-30.07:55:19 zfs destroy hddpool/ssdpool-db-initial-sendrcv@2026jan
+2026-01-30.07:55:21 zfs destroy hddpool/ssdpool-db-initial-sendrcv@backup2
+2026-01-30.07:55:22 zfs destroy hddpool/ssdpool-db-initial-sendrcv@backup-20260108-1230
+2026-01-30.07:55:23 zfs destroy hddpool/ssdpool-db-initial-sendrcv@backup-20260108-15-21
+2026-01-30.07:55:24 zfs destroy hddpool/ssdpool-git@migration
+2026-01-30.07:55:26 zfs destroy hddpool/ssdpool-git@final
+2026-01-30.07:55:27 zfs destroy hddpool/ssdpool-git@migration2
+2026-01-30.07:55:28 zfs destroy hddpool/ssdpool-git@2026jan
+2026-01-30.07:55:29 zfs destroy hddpool/ssdpool-git@backup2
+2026-01-30.07:55:31 zfs destroy hddpool/ssdpool-git@backup-20260108-1230
+2026-01-30.07:55:32 zfs destroy hddpool/ssdpool-git@backup-20260108-15-21
+2026-01-30.07:55:33 zfs destroy hddpool/ssdpool-logs@migration
+2026-01-30.07:55:34 zfs destroy hddpool/ssdpool-logs@final
+2026-01-30.07:55:36 zfs destroy hddpool/ssdpool-logs@migration2
+2026-01-30.07:55:36 zfs destroy hddpool/ssdpool-logs@2026jan
+2026-01-30.07:55:37 zfs destroy hddpool/ssdpool-logs@backup2
+2026-01-30.07:55:37 zfs destroy hddpool/ssdpool-logs@backup-20260108-1230
+2026-01-30.07:55:39 zfs destroy hddpool/ssdpool-logs@backup-20260108-15-21
+2026-01-30.07:55:40 zfs destroy hddpool/ssdpool_root@2026jan
+2026-01-30.07:55:41 zfs destroy hddpool/ssdpool_root@backup2
+2026-01-30.07:55:43 zfs destroy hddpool/ssdpool_root@backup-20260108-1230
+2026-01-30.07:55:44 zfs destroy hddpool/ssdpool_root@backup-20260108-15-21
+2026-01-30.07:55:45 zfs destroy hddpool/torrents@2026jan
+2026-01-30.07:55:46 zfs destroy hddpool/torrents@backup2
+2026-01-30.07:55:48 zfs destroy hddpool/torrents@backup-20260108-1230
+2026-01-30.07:55:49 zfs destroy hddpool/torrents@backup-20260108-15-21
+2026-01-30.08:00:04 zfs set sync=disabled hddpool
+2026-01-30.09:52:05 zfs set recordsize=8M hddpool/storj-db
+2026-01-30.09:52:07 zfs set recordsize=8M hddpool/storj
+2026-01-30.09:52:25 zfs set special_small_blocks=128k hddpool/storj
+2026-01-30.09:52:51 zfs set special_small_blocks=128k hddpool
+2026-01-30.09:52:56 zfs set recordsize=8M hddpool
+2026-01-30.09:52:59 zfs set special_small_blocks=128k hddpool
+2026-01-30.09:53:34 zfs set recordsize=512k hddpool/storj-db
+2026-01-30.09:53:46 zfs set recordsize=8M hddpool/storj-db
+2026-01-30.09:54:04 zfs set special_small_blocks=128K hddpool/storj-db
+2026-01-30.09:54:12 zfs set special_small_blocks=512K hddpool/storj-db
+2026-01-30.09:54:30 zfs set special_small_blocks=128K hddpool/googledrive
+2026-01-30.09:54:34 zfs set special_small_blocks=128K hddpool/sia
+2026-01-30.09:54:38 zfs set special_small_blocks=128K hddpool/root_backup
+2026-01-30.09:54:43 zfs set special_small_blocks=128K hddpool/ssdpool_root
+2026-01-30.09:55:16 zfs set special_small_blocks=0 hddpool/ssdpool_torrent
+2026-01-30.09:55:17 zfs set special_small_blocks=0 hddpool/ssdpool_torrents
+2026-01-30.20:25:48 zfs set special_small_blocks=4M hddpool/storj-db
+2026-01-30.20:26:28 zfs set recordsize=16M hddpool/storj-db
+2026-01-30.20:26:37 zfs set special_small_blocks=8M hddpool/storj-db
+2026-01-30.22:32:23 zfs set sync=standard hddpool/storj-db
+2026-01-30.22:32:55 zfs set sync=standard hddpool/storj
+2026-01-30.22:33:16 zfs set sync=standard hddpool
+2026-01-31.00:04:25 zfs set recordsize=16M hddpool/storj-db
+2026-01-31.00:20:24 zfs set special_small_blocks=16M hddpool/storj-db
+2026-01-31.10:41:15 zfs set recordsize=16M hddpool/storj
+2026-01-31.10:41:17 zfs set recordsize=16M hddpool
+2026-01-31.10:41:43 zfs set special_small_blocks=8M hddpool/storj-db
+2026-01-31.11:18:58 zfs set special_small_blocks=128k hddpool/storj-db
+2026-01-31.11:19:05 zfs set special_small_blocks=64k hddpool/storj-db
+2026-01-31.11:19:08 zfs set special_small_blocks=64k hddpool/storj
+2026-01-31.11:19:11 zfs set special_small_blocks=64k hddpool
+2026-01-31.11:19:26 zfs set special_small_blocks=64k hddpool/sia
+2026-01-31.11:19:32 zfs set special_small_blocks=64k hddpool/ssdpool_root
+2026-01-31.11:19:39 zfs set special_small_blocks=64k hddpool/root_backup
+2026-01-31.11:19:46 zfs set special_small_blocks=64k hddpool/googledrive
+2026-01-31.11:21:25 zfs set special_small_blocks=16k hddpool
+2026-01-31.11:21:28 zfs set special_small_blocks=16k hddpool/storj
+2026-01-31.11:21:32 zfs set special_small_blocks=16k hddpool/storj-db
+2026-01-31.11:21:36 zfs set special_small_blocks=16k hddpool/sia
+2026-01-31.11:21:40 zfs set special_small_blocks=16k hddpool/googledrive
+2026-01-31.11:27:30 zfs set special_small_blocks=4k hddpool
+2026-01-31.11:27:34 zfs set special_small_blocks=4k hddpool/storj
+2026-01-31.11:27:39 zfs set special_small_blocks=4k hddpool/storj-db
+2026-01-31.11:41:25 zfs set sync=disabled hddpool
+2026-01-31.11:41:28 zfs set sync=disabled hddpool/storj
+2026-01-31.11:41:32 zfs set sync=disabled hddpool/storj-db
+2026-01-31.11:55:46 zfs set special_small_blocks=0k hddpool/storj-db
+2026-01-31.11:55:49 zfs set special_small_blocks=0k hddpool/storj
+2026-01-31.11:55:53 zfs set special_small_blocks=0k hddpool
+2026-01-31.11:56:00 zfs set special_small_blocks=0k hddpool/sia
+2026-01-31.11:56:13 zfs set special_small_blocks=0k hddpool/googledrive
+2026-01-31.11:56:20 zfs set special_small_blocks=0k hddpool/root_backup
+2026-01-31.11:56:50 zfs set special_small_blocks=0k hddpool/ssdpool_root
+2026-01-31.12:26:00 zfs set special_small_blocks=8M hddpool/storj-db
+2026-01-31.12:26:12 zfs set special_small_blocks=64k hddpool/storj
+2026-01-31.12:26:20 zfs set special_small_blocks=32k hddpool
+2026-01-31.12:26:23 zfs set special_small_blocks=32k hddpool/sia
+2026-01-31.12:26:29 zfs set special_small_blocks=32k hddpool/googledrive
+2026-01-31.12:26:38 zfs set special_small_blocks=32k hddpool/ssdpool_root
+2026-01-31.12:27:21 zfs set special_small_blocks=32k hddpool/storj
+2026-01-31.12:27:41 zfs set special_small_blocks=512k hddpool/storj-db
+2026-01-31.12:28:00 zfs set special_small_blocks=128k hddpool/storj-db
+2026-01-31.12:28:15 zfs set special_small_blocks=64k hddpool/storj
+2026-01-31.12:29:01 zfs set special_small_blocks=32k hddpool/root_backup
+2026-01-31.14:36:52 zfs set special_small_blocks=1M hddpool/storj-db
+2026-01-31.15:38:04 zfs set special_small_blocks=64K recordsize=512K hddpool
+2026-01-31.15:38:30 zfs set special_small_blocks=64K recordsize=512K hddpool/googledrive
+2026-01-31.15:38:43 zfs set special_small_blocks=64K recordsize=512K hddpool/root_backup
+2026-01-31.15:38:54 zfs set special_small_blocks=64K recordsize=512K hddpool/sia
+2026-01-31.15:39:07 zfs set special_small_blocks=64K recordsize=512K hddpool/ssdpool-db-initial-sendrcv
+2026-01-31.15:39:19 zfs set special_small_blocks=64K recordsize=512K hddpool/ssdpool-git
+2026-01-31.15:39:47 zfs set special_small_blocks=64K recordsize=512K hddpool/ssdpool-logs
+2026-01-31.15:40:14 zfs set special_small_blocks=64K recordsize=512K hddpool/ssdpool_root
+2026-01-31.15:40:36 zfs set special_small_blocks=64K recordsize=512K hddpool/ssdpool_torrent
+2026-01-31.15:40:56 zfs set special_small_blocks=64K recordsize=512K hddpool/ssdpool_torrents
+2026-01-31.15:41:13 zfs set special_small_blocks=64K recordsize=512K hddpool/storj
+2026-01-31.15:41:33 zfs set special_small_blocks=64K recordsize=512K hddpool/storj-db
+2026-01-31.15:41:52 zfs set special_small_blocks=64K recordsize=512K hddpool/torrents
+2026-01-31.15:55:50 zfs set recordsize=16M hddpool
+2026-01-31.15:56:12 zfs set recordsize=16M hddpool/storj
+2026-01-31.15:57:34 zfs set recordsize=16M hddpool/storj-db
+2026-01-31.15:58:03 zfs set recordsize=16M hddpool/ssdpool_root
+2026-01-31.15:58:20 zfs set recordsize=16M hddpool/ssdpool_torrents
+2026-01-31.15:58:33 zfs set recordsize=16M hddpool/torrents
+2026-01-31.15:58:45 zfs set recordsize=16M hddpool/ssdpool_torrent
+2026-01-31.15:58:56 zfs set recordsize=16M hddpool/sia
+2026-01-31.15:59:04 zfs set recordsize=16M hddpool/root_backup
+2026-01-31.15:59:15 zfs set recordsize=16M hddpool/googledrive
+2026-01-31.16:01:51 zfs set recordsize=2M hddpool/googledrive
+2026-01-31.16:02:39 zfs set recordsize=1M hddpool/storj
+2026-01-31.16:02:52 zfs set recordsize=1M hddpool/storj-db
+2026-01-31.16:03:05 zfs set recordsize=1M hddpool/torrents
+2026-01-31.16:03:24 zfs set recordsize=256k hddpool/storj-db
+2026-01-31.16:04:41 zfs set recordsize=256k hddpool
+2026-01-31.16:04:48 zfs set recordsize=1M hddpool/googledrive
+2026-01-31.16:04:49 zfs set recordsize=1M hddpool/root_backup
+2026-01-31.16:04:53 zfs set recordsize=1M hddpool/sia
+2026-01-31.16:04:56 zfs set recordsize=1M hddpool/ssdpool_root
+2026-01-31.16:05:02 zfs set recordsize=1M hddpool/ssdpool_torrent
+2026-01-31.16:05:04 zfs set recordsize=1M hddpool/ssdpool_torrents
+2026-01-31.16:05:07 zfs set recordsize=1M hddpool/ssdpool-db-initial-sendrcv
+2026-01-31.16:05:11 zfs set recordsize=1M hddpool/ssdpool-git
+2026-01-31.16:05:14 zfs set recordsize=1M hddpool/ssdpool-logs
+2026-01-31.16:05:15 zfs set recordsize=64K hddpool/storj-db
+2026-01-31.16:07:45 zfs set recordsize=256K hddpool/storj
+2026-01-31.16:10:43 zfs set recordsize=256K hddpool/ssdpool-git
+2026-01-31.16:11:21 zfs set recordsize=256K hddpool/ssdpool_root
+2026-01-31.16:11:45 zfs set recordsize=256K hddpool/torrents
+2026-01-31.16:11:58 zfs set recordsize=256K hddpool/ssdpool_torrent
+2026-01-31.16:12:11 zfs set recordsize=256K hddpool/ssdpool_torrents
+2026-01-31.16:12:30 zfs set recordsize=256K hddpool/root_backup
+2026-01-31.16:12:54 zfs set recordsize=256K hddpool/ssdpool-logs
+2026-01-31.16:13:17 zfs set recordsize=256K hddpool/ssdpool-db-initial-sendrcv
+2026-01-31.16:13:25 zfs set recordsize=256K hddpool/sia
+2026-01-31.16:13:38 zfs set recordsize=256K hddpool/googledrive
+2026-01-31.16:14:17 zfs set recordsize=128k hddpool/storj-db
+2026-01-31.23:59:54 zfs set special_small_blocks=128k hddpool/root_backup
+2026-01-31.23:59:58 zfs set special_small_blocks=128k hddpool/sia
+2026-02-01.00:00:24 zfs set special_small_blocks=128k hddpool
+2026-02-01.00:00:27 zfs set special_small_blocks=128k hddpool/storj
+2026-02-01.00:00:32 zfs set special_small_blocks=128k hddpool/storj-db
+2026-02-01.00:00:44 zfs set recordsize=256k hddpool/storj-db
+2026-02-01.00:02:02 zfs inherit -r special_small_blocks hddpool
+2026-02-01.00:02:07 zfs inherit -r recordsize hddpool
+2026-02-01.00:02:21 zfs set recordsize=256k hddpool
+2026-02-01.00:02:28 zfs set special_small_blocks=128k hddpool
+2026-02-01.01:08:25 zfs set special_small_blocks=64k hddpool
+2026-02-01.01:08:43 zfs set recordsize=128k hddpool
+2026-02-01.01:44:55 zfs set recordsize=2M hddpool
+2026-02-01.01:45:11 zfs set special_small_blocks=1M hddpool/storj-db
+2026-02-01.01:46:40 zfs set special_small_blocks=512k hddpool/storj-db
+2026-02-01.01:46:52 zfs set recordsize=1M hddpool
+2026-02-01.01:47:23 zfs set special_small_blocks=128k hddpool
+2026-02-01.07:05:14 zfs set special_small_blocks=128k hddpool/storj-db
+2026-02-01.07:05:29 zfs set recordsize=256k hddpool
+

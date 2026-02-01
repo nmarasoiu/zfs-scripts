@@ -1,0 +1,61 @@
+2025-01-18.22:18:00 [txg:4] set feature@resilver_defer=enabled
+2025-02-19.21:29:16 [txg:48939] vdev remove hddpool vdev (l2cache) /dev/sda4
+2025-02-19.21:29:16 zpool remove hddpool sda4
+2025-02-22.07:04:57 [txg:50807] vdev remove hddpool vdev (l2cache) /dev/sda4
+2025-02-22.07:04:57 zpool remove hddpool sda4
+2025-04-09.06:32:49 [txg:102105] vdev remove hddpool vdev (log) /dev/sda5
+2025-04-09.06:32:49 zpool remove hddpool sda5
+2025-04-12.08:25:49 [txg:108144] vdev remove hddpool vdev (log) /dev/nvme0n1p1
+2025-04-12.08:25:49 zpool remove hddpool nvme0n1p1
+2025-04-16.07:31:35 [txg:114858] vdev remove hddpool vdev (log) /dev/zvol/ssdpool/slog_zvol-part1
+2025-04-16.07:31:35 zpool remove hddpool zvol/ssdpool/slog_zvol
+2025-04-16.07:33:24 [txg:114878] vdev remove hddpool vdev (log) /dev/zvol/ssdpool/slog_zvol-part1
+2025-04-16.07:33:24 zpool remove hddpool zvol/ssdpool/slog_zvol
+2025-04-16.07:42:34 [txg:114918] vdev remove hddpool vdev (log) /dev/sda4
+2025-04-16.07:42:34 zpool remove hddpool sda4
+2025-04-16.14:57:30 [txg:115127] vdev remove hddpool vdev (log) /dev/zvol/ssdpool/slog_zvol-part1
+2025-04-16.14:57:30 zpool remove hddpool zvol/ssdpool/slog_zvol
+2025-07-04.17:07:27 zpool online hddpool usb-Seagate_Expansion_HDD_00000000NT17FBP5-0:0
+2025-07-22.12:32:47 zpool online hddpool usb-Seagate_Expansion_HDD_00000000NT17FBP5-0:0
+2025-07-26.11:45:16 zpool online hddpool usb-Seagate_Expansion_HDD_00000000NT17FBP5-0:0
+2025-09-26.14:11:51 zpool online hddpool usb-Seagate_Expansion_HDD_00000000NT17FBP5-0:0
+2025-09-26.14:16:28 zpool online hddpool usb-Seagate_Expansion_HDD_00000000NT17FBP5-0:0
+2025-09-26.14:17:12 zpool online hddpool usb-Seagate_Expansion_HDD_00000000NT17FBP5-0:0
+2025-09-26.14:17:18 zpool online hddpool usb-Seagate_Expansion_HDD_00000000NT17FBP5-0:0
+2025-10-03.14:36:48 zpool online hddpool usb-Seagate_Expansion_HDD_00000000NT17FBP5-0:0
+2025-10-05.15:20:28 zpool online hddpool usb-Seagate_Expansion_HDD_00000000NT17FBP5-0:0
+2025-11-09.09:27:27 [txg:2446977] starting deferred resilver errors=3
+2026-01-09.07:11:56 [txg:2658002] vdev attach attach vdev=/dev/disk/by-id/wwn-0x3e54314833464435-part2 to vdev=/dev/nvme1n1p1
+2026-01-09.07:11:56 zpool attach hddpool nvme1n1p1 /dev/disk/by-id/wwn-0x3e54314833464435-part2
+2026-01-09.13:41:30 [txg:2658787] vdev attach attach vdev=/dev/disk/by-id/wwn-0x3e54314833464435-part3 to vdev=/dev/disk/by-id/wwn-0x5002538da01ceedd-part6
+2026-01-09.19:40:28 zpool attach -w hddpool wwn-0x5002538da01ceedd-part6 /dev/disk/by-id/wwn-0x3e54314833464435-part3
+2026-01-09.19:40:28 [txg:2659330] vdev attach attach vdev=/dev/disk/by-id/wwn-0x3e54314833464435-part4 to vdev=/dev/disk/by-id/nvme-WD_BLACK_SN770_2TB_24493Z401591-part1
+2026-01-10.08:40:27 [txg:2661348] vdev attach attach vdev=/dev/disk/by-id/wwn-0x3e54314833464435-part5 to vdev=/dev/sda5
+2026-01-10.10:50:40 zpool online hddpool 204961841233271636
+2026-01-10.10:53:52 [txg:2661858] vdev attach replace vdev=/dev/disk/by-id/nvme-WD_BLACK_SN770_2TB_245077404326-part1 for vdev=/dev/nvme1n1p1
+2026-01-10.10:53:52 zpool replace hddpool 204961841233271636 /dev/disk/by-id/nvme-WD_BLACK_SN770_2TB_245077404326-part1
+2026-01-10.11:12:53 [txg:2661950] detach vdev=/dev/disk/by-id/nvme-WD_BLACK_SN770_2TB_245077404326-part1
+2026-01-10.11:12:53 zpool detach hddpool nvme-WD_BLACK_SN770_2TB_245077404326-part1
+2026-01-10.15:07:56 [txg:2662500] vdev attach replace vdev=/dev/disk/by-id/nvme-WD_BLACK_SN770_2TB_245077404326-part1 for vdev=/dev/nvme1n1p1
+2026-01-10.15:07:56 zpool replace hddpool 204961841233271636 /dev/disk/by-id/nvme-WD_BLACK_SN770_2TB_245077404326-part1
+2026-01-11.17:02:42 [txg:2664352] starting deferred resilver errors=0
+2026-01-11.22:59:22 [txg:2664809] detach vdev=/dev/nvme1n1p1
+2026-01-11.23:17:31 [txg:2664842] vdev attach attach vdev=/dev/disk/by-id/wwn-0x3e54314833464435-part1 to vdev=/dev/disk/by-id/usb-Seagate_Expansion_HDD_00000000NT17DHQR-0:0-part1
+2026-01-12.06:11:49 zpool attach -w -s hddpool usb-Seagate_Expansion_HDD_00000000NT17DHQR-0:0 /dev/disk/by-id/wwn-0x3e54314833464435-part1
+2026-01-13.00:32:24 [txg:2668117] starting deferred resilver errors=0
+2026-01-13.00:32:26 [txg:2668119] vdev attach attach vdev=/dev/disk/by-id/wwn-0x3e54314833464435-part6 to vdev=/dev/sda4
+2026-01-13.00:32:26 zpool attach hddpool sda4 /dev/disk/by-id/wwn-0x3e54314833464435-part6
+2026-01-13.00:36:40 [txg:2668130] detach vdev=/dev/disk/by-id/wwn-0x3e54314833464435-part6
+2026-01-13.00:36:40 zpool detach hddpool /dev/disk/by-id/wwn-0x3e54314833464435-part6
+2026-01-26.19:29:08 [txg:2675586] detach vdev=/dev/disk/by-id/wwn-0x3e54314833464435-part1
+2026-01-26.19:29:08 zpool detach hddpool 15804153059957593833
+2026-01-26.19:29:08 [txg:2675593] detach vdev=/dev/disk/by-id/wwn-0x3e54314833464435-part2
+2026-01-26.19:29:08 zpool detach hddpool 8975435589811420789
+2026-01-26.19:29:08 [txg:2675600] detach vdev=/dev/disk/by-id/wwn-0x3e54314833464435-part3
+2026-01-26.19:29:08 zpool detach hddpool 3782320132545174016
+2026-01-26.19:29:08 [txg:2675607] detach vdev=/dev/disk/by-id/wwn-0x3e54314833464435-part4
+2026-01-26.19:29:08 zpool detach hddpool 349919681207657026
+2026-01-26.19:29:09 [txg:2675614] detach vdev=/dev/disk/by-id/wwn-0x3e54314833464435-part5
+2026-01-26.19:29:09 zpool detach hddpool 14749408423007555725
+2026-01-29.07:36:44 [txg:2689270] detach vdev=/dev/disk/by-id/wwn-0x50024e92006176e6-part1
+2026-01-29.07:36:44 zpool detach hddpool 4060908642400989107
