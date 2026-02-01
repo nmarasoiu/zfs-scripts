@@ -1,0 +1,172 @@
+
+root@linux:~/tools/zfs# mkdir zombie_resilver_no_target
+root@linux:~/tools/zfs# cd zombie_resilver_no_target/
+root@linux:~/tools/zfs/zombie_resilver_no_target#
+  # 1. Pool history - what operations happened around Jan 29
+  zpool history hddpool | tail -100 > /tmp/history.txt
+
+  # 2. Internal history (more detailed)
+  zpool history -i hddpool | grep -i "resilver\|attach\|detach\|replace\|remove\|offline\|online" > /tmp/history_internal.txt
+
+  # 3. DTL state for each device - which vdevs have DTL_MISSING?
+  zdb -ddddd hddpool 2>&1 | grep -i "dtl\|missing" > /tmp/dtl_state.txt
+
+  # 4. Or more targeted:
+  for i in 0 1 3 4 6 8 12; do
+    echo "=== vdev $i ==="
+    zdb -C hddpool 2>&1 | grep -A50 "children\[$i\]:" | head -20
+  done
+
+
+
+=== vdev 0 ===
+            children[0]:
+                type: 'draid'
+                id: 0
+                guid: 8303671383664171646
+                nparity: 1
+                draid_ndata: 3
+                draid_nspares: 0
+                draid_ngroups: 1
+                metaslab_array: 151
+                metaslab_shift: 34
+                ashift: 12
+                asize: 24004505108480
+                is_log: 0
+                create_txg: 4
+                com.delphix:vdev_zap_top: 130
+                children[0]:
+                    type: 'disk'
+                    id: 0
+                    guid: 16285235862648506705
+                    path: '/dev/disk/by-id/usb-Seagate_Expansion_HDD_00000000NT17FBP5-0:0-part1'
+=== vdev 1 ===
+                children[1]:
+                    type: 'disk'
+                    id: 1
+                    guid: 6029393174425793324
+                    path: '/dev/disk/by-id/usb-Seagate_Expansion_HDD_00000000NT17FBQC-0:0-part1'
+                    devid: 'scsi-35000000000000001-part1'
+                    phys_path: 'pci-0000:00:14.0-usb-0:4:1.0-scsi-0:0:0:0'
+                    whole_disk: 1
+                    DTL: 161
+                    create_txg: 4
+                    com.delphix:vdev_zap_leaf: 132
+                children[2]:
+                    type: 'disk'
+                    id: 2
+                    guid: 14357841299827329832
+                    path: '/dev/disk/by-id/usb-Seagate_Expansion_HDD_00000000NT17FC6F-0:0-part1'
+                    devid: 'scsi-35000000000000001-part1'
+                    phys_path: 'pci-0000:00:14.0-usb-0:3:1.0-scsi-0:0:0:0'
+                    whole_disk: 1
+                    DTL: 160
+=== vdev 3 ===
+                children[3]:
+                    type: 'disk'
+                    id: 3
+                    guid: 11730990955300601791
+                    path: '/dev/disk/by-id/usb-Seagate_Expansion_HDD_00000000NT17FC7Z-0:0-part1'
+                    devid: 'scsi-35000000000000001-part1'
+                    phys_path: 'pci-0000:00:14.0-usb-0:9:1.0-scsi-0:0:0:0'
+                    whole_disk: 1
+                    DTL: 159
+                    create_txg: 4
+                    com.delphix:vdev_zap_leaf: 134
+            children[1]:
+                type: 'disk'
+                id: 1
+                guid: 18138164486138392554
+                path: '/dev/disk/by-id/wwn-0x5002538da01ceedd-part6'
+                whole_disk: 0
+                metaslab_array: 137
+                metaslab_shift: 29
+                ashift: 9
+=== vdev 4 ===
+            children[4]:
+                type: 'disk'
+                id: 4
+                guid: 6451860337994160187
+                path: '/dev/disk/by-id/usb-Seagate_Expansion_HDD_00000000NT17DHQR-0:0-part1'
+                devid: 'scsi-1NT17DHQR-part1'
+                phys_path: 'pci-0000:00:14.0-usb-0:2:1.0-scsi-0:0:0:0'
+                whole_disk: 1
+                metaslab_array: 1059
+                metaslab_shift: 34
+                ashift: 12
+                asize: 4000771997696
+                is_log: 0
+                DTL: 1834
+                create_txg: 48549
+                com.delphix:vdev_zap_leaf: 1016
+                com.delphix:vdev_zap_top: 1056
+            children[5]:
+                type: 'hole'
+                id: 5
+=== vdev 6 ===
+            children[6]:
+                type: 'disk'
+                id: 6
+                guid: 15544977120634296955
+                path: '/dev/disk/by-id/wwn-0x5002538da01ceedd-part5'
+                whole_disk: 0
+                metaslab_array: 2192
+                metaslab_shift: 29
+                ashift: 9
+                asize: 22543859712
+                is_log: 0
+                DTL: 1706
+                create_txg: 103772
+                com.delphix:vdev_zap_leaf: 2186
+                com.delphix:vdev_zap_top: 2187
+            children[7]:
+                type: 'hole'
+                id: 7
+                guid: 0
+                whole_disk: 0
+=== vdev 8 ===
+            children[8]:
+                type: 'disk'
+                id: 8
+                guid: 14325558641794265388
+                path: '/dev/disk/by-id/nvme-WD_BLACK_SN770_2TB_245077404326-part1'
+                whole_disk: 0
+                metaslab_array: 1892
+                metaslab_shift: 29
+                ashift: 12
+                asize: 19993722880
+                is_log: 0
+                DTL: 1594
+                create_txg: 108181
+                com.delphix:vdev_zap_leaf: 1379
+                com.delphix:vdev_zap_top: 1887
+            children[9]:
+                type: 'hole'
+                id: 9
+                guid: 0
+                whole_disk: 0
+=== vdev 12 ===
+            children[12]:
+                type: 'disk'
+                id: 12
+                guid: 3013610410641606887
+                path: '/dev/disk/by-id/wwn-0x5002538da01ceedd-part4'
+                whole_disk: 0
+                metaslab_array: 2623
+                metaslab_shift: 29
+                ashift: 9
+                asize: 11806441472
+                is_log: 1
+                DTL: 741
+                create_txg: 114931
+                com.delphix:vdev_zap_leaf: 2693
+                com.delphix:vdev_zap_top: 2694
+        features_for_read:
+            com.delphix:hole_birth
+            com.delphix:embedded_data
+            org.openzfs:draid
+            com.klarasystems:vdev_zaps_v2
+root@linux:~/tools/zfs/zombie_resilver_no_target#
+root@linux:~/tools/zfs/zombie_resilver_no_target#
+root@linux:~/tools/zfs/zombie_resilver_no_target#
+root@linux:~/tools/zfs/zombie_resilver_no_target#
