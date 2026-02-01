@@ -169,6 +169,12 @@ This issue has occurred before on this system. In previous instances, the resilv
 - `dtl_state.txt` - DTL state from zdb
 - `log` - Session log with zdb output
 
+## Summary
+  Key Finding:
+  The zombie resilver is caused by vdev_resilver_needed() in vdev.c returning TRUE for hole vdevs with orphaned DTL_MISSING entries. The code doesn't check if the vdev is actually a valid target - it just checks if DTL_MISSING is non-empty and the vdev is "writeable"
+  (holes pass this check incorrectly).
+
+
 ---
 
 *Draft prepared: 2026-02-01*
