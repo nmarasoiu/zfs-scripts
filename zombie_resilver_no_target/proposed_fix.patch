@@ -1,0 +1,204 @@
+From: Nicola Remasoiu <nicola@example.com>
+Subject: [PATCH] Detect and heal orphaned DTL entries on hole/missing vdevs during import
+
+When a system crashes during vdev detach operations, the on-disk state
+can become inconsistent: the vdev tree shows the device as a "hole" or
+"missing", but DTL entries from the detached device remain on disk.
+
+On pool import, these orphaned DTL entries can trigger a phantom
+resilver that scans the entire pool with no valid target device,
+causing severe I/O load and system instability.
+
+This patch adds:
+1. Detection of orphaned DTL entries on non-concrete vdevs
+2. A new import option 'heal_orphaned_dtl' to explicitly recover
+3. Clear warning messages to inform the administrator
+
+Signed-off-by: Nicola Remasoiu <nicola@example.com>
+---
+
+diff --git a/include/sys/fs/zfs.h b/include/sys/fs/zfs.h
+index XXXXXXX..XXXXXXX 100644
+--- a/include/sys/fs/zfs.h
++++ b/include/sys/fs/zfs.h
+@@ -XXX,6 +XXX,7 @@ typedef enum {
+ #define	ZFS_IMPORT_CHECKPOINT		0x10
+ #define	ZFS_IMPORT_TEMP_NAME		0x20
+ #define	ZFS_IMPORT_SKIP_MMP		0x40
++#define	ZFS_IMPORT_HEAL_ORPHANED_DTL	0x80
+
+diff --git a/include/sys/vdev.h b/include/sys/vdev.h
+index XXXXXXX..XXXXXXX 100644
+--- a/include/sys/vdev.h
++++ b/include/sys/vdev.h
+@@ -XXX,6 +XXX,7 @@ extern boolean_t vdev_dtl_required(vdev_t *vd);
+ extern boolean_t vdev_resilver_needed(vdev_t *vd,
+     uint64_t *minp, uint64_t *maxp);
+ extern void vdev_dtl_reassess(vdev_t *vd, uint64_t txg, uint64_t scrub_txg,
+     boolean_t scrub_done, boolean_t rebuild_done);
++extern int vdev_dtl_check_orphaned(vdev_t *vd, boolean_t heal, int *count);
+
+diff --git a/module/zfs/vdev.c b/module/zfs/vdev.c
+index XXXXXXX..XXXXXXX 100644
+--- a/module/zfs/vdev.c
++++ b/module/zfs/vdev.c
+@@ -XXXX,6 +XXXX,78 @@ vdev_dtl_load(vdev_t *vd)
+ }
+
++/*
++ * Check for orphaned DTL entries on non-concrete vdevs (holes, missing).
++ * These can occur when the system crashes during a vdev detach operation,
++ * leaving the vdev tree updated (device becomes a hole) but DTL entries
++ * still referencing the old device.
++ *
++ * If heal is B_TRUE, clear the orphaned entries and log the action.
++ * Returns 0 on success, or error if orphaned entries found and heal is B_FALSE.
++ * Sets *count to number of vdevs with orphaned DTL entries.
++ */
++int
++vdev_dtl_check_orphaned(vdev_t *vd, boolean_t heal, int *count)
++{
++	spa_t *spa = vd->vdev_spa;
++	int error = 0;
++	int local_count = 0;
++
++	/*
++	 * Recurse into children first
++	 */
++	for (int c = 0; c < vd->vdev_children; c++) {
++		int child_count = 0;
++		int child_error;
++
++		child_error = vdev_dtl_check_orphaned(vd->vdev_child[c],
++		    heal, &child_count);
++		local_count += child_count;
++
++		if (child_error != 0 && error == 0)
++			error = child_error;
++	}
++
++	/*
++	 * Check if this is a hole or missing vdev with DTL entries
++	 */
++	if ((vd->vdev_ops == &vdev_hole_ops ||
++	    vd->vdev_ops == &vdev_missing_ops) &&
++	    vd->vdev_dtl_object != 0) {
++
++		local_count++;
++
++		zfs_dbgmsg("pool %s: orphaned DTL object %llu on %s vdev "
++		    "id %llu (guid %llu)",
++		    spa_name(spa),
++		    (u_longlong_t)vd->vdev_dtl_object,
++		    vd->vdev_ops->vdev_op_type,
++		    (u_longlong_t)vd->vdev_id,
++		    (u_longlong_t)vd->vdev_guid);
++
++		if (heal) {
++			cmn_err(CE_WARN, "pool '%s': clearing orphaned DTL "
++			    "entries on %s vdev (id=%llu), likely from "
++			    "crash during detach operation",
++			    spa_name(spa),
++			    vd->vdev_ops->vdev_op_type,
++			    (u_longlong_t)vd->vdev_id);
++
++			/*
++			 * Clear the DTL object reference. The actual space
++			 * map will be leaked but is harmless. A scrub will
++			 * reclaim it.
++			 */
++			vd->vdev_dtl_object = 0;
++			vdev_config_dirty(vd->vdev_top);
++		} else {
++			error = SET_ERROR(EINVAL);
++		}
++	}
++
++	if (count != NULL)
++		*count = local_count;
++
++	return (error);
++}
++
+ /*
+  * Determine if a resilvering vdev should remove any DTL entries from
+  * its range. If the vdev was resilvering for the entire duration of the
+
+diff --git a/module/zfs/spa.c b/module/zfs/spa.c
+index XXXXXXX..XXXXXXX 100644
+--- a/module/zfs/spa.c
++++ b/module/zfs/spa.c
+@@ -XXXX,6 +XXXX,40 @@ spa_load_impl(spa_t *spa, spa_import_type_t type,
+ 		...
+ 	}
+
++	/*
++	 * Check for orphaned DTL entries on hole/missing vdevs.
++	 * This can happen if the system crashed during a vdev detach
++	 * operation, leaving inconsistent on-disk state.
++	 */
++	if (type != SPA_IMPORT_ASSEMBLE) {
++		int orphaned_count = 0;
++		boolean_t heal = !!(spa->spa_import_flags &
++		    ZFS_IMPORT_HEAL_ORPHANED_DTL);
++
++		error = vdev_dtl_check_orphaned(spa->spa_root_vdev,
++		    heal, &orphaned_count);
++
++		if (orphaned_count > 0 && !heal) {
++			spa_load_failed(spa, "pool has %d vdev(s) with "
++			    "orphaned DTL entries, likely from crash during "
++			    "detach operation. This can cause phantom "
++			    "resilvers. Re-import with:\n"
++			    "  zpool import -o heal_orphaned_dtl=on %s\n"
++			    "to clear stale entries and recover.",
++			    orphaned_count, spa_name(spa));
++			return (SET_ERROR(EINVAL));
++		}
++
++		if (orphaned_count > 0 && heal) {
++			spa_history_log_internal(spa, "heal orphaned dtl",
++			    NULL, "cleared orphaned DTL entries from %d "
++			    "hole/missing vdevs after detected crash during "
++			    "topology change", orphaned_count);
++
++			cmn_err(CE_NOTE, "pool '%s': cleared orphaned DTL "
++			    "entries from %d vdevs", spa_name(spa),
++			    orphaned_count);
++		}
++	}
++
+ 	/*
+ 	 * Check if a rebuild was in progress and if so resume it.
+ 	 * Then check all DTLs to see if anything needs resilvering.
+
+diff --git a/lib/libzfs/libzfs_pool.c b/lib/libzfs/libzfs_pool.c
+index XXXXXXX..XXXXXXX 100644
+--- a/lib/libzfs/libzfs_pool.c
++++ b/lib/libzfs/libzfs_pool.c
+@@ -XXXX,6 +XXXX,10 @@ zpool_import_props(libzfs_handle_t *hdl, nvlist_t *config,
+ 		iflags |= ZFS_IMPORT_SKIP_MMP;
+ 	}
+
++	if (nvlist_exists(props, "heal_orphaned_dtl")) {
++		iflags |= ZFS_IMPORT_HEAL_ORPHANED_DTL;
++	}
++
+ 	...
+ }
+
+diff --git a/cmd/zpool/zpool_main.c b/cmd/zpool/zpool_main.c
+index XXXXXXX..XXXXXXX 100644
+--- a/cmd/zpool/zpool_main.c
++++ b/cmd/zpool/zpool_main.c
+@@ -XXXX,6 +XXXX,8 @@ zpool_do_import(int argc, char **argv)
+ 	 *   -T	Specify a starting txg to use for import. This option is
+ 	 *	intentionally undocumented option for testing purposes.
++	 *   -o heal_orphaned_dtl=on
++	 *      Clear orphaned DTL entries from hole/missing vdevs
+ 	 *
+ 	 * The import command scans for pools to import, and import
+ 	 * pools based on pool name and GUID. The pool can also be
+
+---
+End of patch
