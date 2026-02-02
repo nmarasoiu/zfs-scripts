@@ -310,14 +310,15 @@ func fetchLifetime(pool string) map[string]*DeviceHistogram {
 }
 
 type IntervalParser struct {
-	state     *State
+	current   *State // ongoing interval (accumulating)
+	previous  *State // last completed interval (stable snapshot)
 	seenFirst bool
 }
 
 func (p *IntervalParser) Parse(r io.Reader) {
 	scanner := bufio.NewScanner(r)
 	histograms := make(map[string]*DeviceHistogram)
-	var current *DeviceHistogram
+	var currentDev *DeviceHistogram
 
 	devPattern := regexp.MustCompile(`^(\S+)\s+total_wait`)
 	latPattern := regexp.MustCompile(`^\s*(\d+(?:ns|us|ms|s))\s+(.+)`)
@@ -327,23 +328,28 @@ func (p *IntervalParser) Parse(r io.Reader) {
 		if strings.Contains(line, "total_wait") {
 			if m := devPattern.FindStringSubmatch(line); m != nil {
 				if _, exists := histograms[m[1]]; exists {
+					// Interval complete - save to previous, start new current
 					if p.seenFirst {
-						p.state.Update(histograms)
+						p.previous.Update(histograms)
 					}
 					p.seenFirst = true
 					histograms = make(map[string]*DeviceHistogram)
 				}
-				current = &DeviceHistogram{Name: m[1]}
-				histograms[m[1]] = current
+				currentDev = &DeviceHistogram{Name: m[1]}
+				histograms[m[1]] = currentDev
 			}
 			continue
 		}
-		if current != nil {
+		if currentDev != nil {
 			if m := latPattern.FindStringSubmatch(line); m != nil {
 				if idx, ok := bucketLabelIndex[m[1]]; ok {
 					vals := strings.Fields(m[2])
 					for col := 0; col < numColumns && col < len(vals); col++ {
-						current.Buckets[idx][col] = parseCount(vals[col])
+						currentDev.Buckets[idx][col] = parseCount(vals[col])
+					}
+					// Update current state with ongoing data
+					if p.seenFirst {
+						p.current.Update(histograms)
 					}
 				}
 			}
@@ -351,14 +357,14 @@ func (p *IntervalParser) Parse(r io.Reader) {
 	}
 }
 
-func render(intervalH, lifetimeH map[string]*DeviceHistogram, intervalT, lifetimeT time.Time,
-	intervalCount uint64, startTime time.Time, intervalSec int) {
+func render(currentH, previousH, lifetimeH map[string]*DeviceHistogram,
+	currentT, previousT, lifetimeT time.Time, intervalCount uint64, startTime time.Time, intervalSec int) {
 	var buf strings.Builder
 	now := time.Now()
 
 	devList := sortedDevices(lifetimeH)
 	if len(devList) == 0 {
-		devList = sortedDevices(intervalH)
+		devList = sortedDevices(currentH)
 	}
 
 	fmt.Fprintf(&buf, "ZFS Pool Latency (disk_wait) - %s (uptime: %s, interval: %ds)\n",
@@ -367,24 +373,33 @@ func render(intervalH, lifetimeH map[string]*DeviceHistogram, intervalT, lifetim
 	const w = 145
 	buf.WriteString(strings.Repeat("=", w) + "\n")
 
-	// Header
-	fmt.Fprintf(&buf, "INTERVAL (%s ago)    │            READ                               │            WRITE                              │  samples\n",
-		formatDuration(now.Sub(intervalT)))
-	fmt.Fprintf(&buf, "%-20s │ %7s %7s %7s %7s %7s %7s │ %7s %7s %7s %7s %7s %7s │\n",
-		"", "avg", "p50", "p90", "p99", "p99.9", "max", "avg", "p50", "p90", "p99", "p99.9", "max")
-	buf.WriteString(strings.Repeat("-", w) + "\n")
-
-	for _, name := range devList {
-		renderDevice(&buf, name, intervalH[name])
+	// Section header helper
+	writeHeader := func(label string, age time.Duration) {
+		fmt.Fprintf(&buf, "%-20s │            READ                               │            WRITE                              │  samples\n",
+			fmt.Sprintf("%s (%s ago)", label, formatDuration(age)))
+		fmt.Fprintf(&buf, "%-20s │ %7s %7s %7s %7s %7s %7s │ %7s %7s %7s %7s %7s %7s │\n",
+			"", "avg", "p50", "p90", "p99", "p99.9", "max", "avg", "p50", "p90", "p99", "p99.9", "max")
+		buf.WriteString(strings.Repeat("-", w) + "\n")
 	}
 
-	buf.WriteString("\n")
-	fmt.Fprintf(&buf, "LIFETIME (%s ago)    │            READ                               │            WRITE                              │  samples\n",
-		formatDuration(now.Sub(lifetimeT)))
-	fmt.Fprintf(&buf, "%-20s │ %7s %7s %7s %7s %7s %7s │ %7s %7s %7s %7s %7s %7s │\n",
-		"", "avg", "p50", "p90", "p99", "p99.9", "max", "avg", "p50", "p90", "p99", "p99.9", "max")
-	buf.WriteString(strings.Repeat("-", w) + "\n")
+	// ONGOING INTERVAL
+	writeHeader("ONGOING", now.Sub(currentT))
+	for _, name := range devList {
+		renderDevice(&buf, name, currentH[name])
+	}
 
+	// LAST INTERVAL (only if we have data)
+	if len(previousH) > 0 {
+		buf.WriteString("\n")
+		writeHeader("LAST INTERVAL", now.Sub(previousT))
+		for _, name := range devList {
+			renderDevice(&buf, name, previousH[name])
+		}
+	}
+
+	// LIFETIME
+	buf.WriteString("\n")
+	writeHeader("LIFETIME", now.Sub(lifetimeT))
 	for _, name := range devList {
 		renderDevice(&buf, name, lifetimeH[name])
 	}
@@ -460,8 +475,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	intervalState, lifetimeState := newState(), newState()
-	parser := &IntervalParser{state: intervalState}
+	currentState, previousState, lifetimeState := newState(), newState(), newState()
+	parser := &IntervalParser{current: currentState, previous: previousState}
 	startTime := time.Now()
 
 	done := make(chan struct{})
@@ -506,10 +521,11 @@ func main() {
 			case <-done:
 				return
 			case <-displayTicker.C:
-				ih, it, ic := intervalState.Snapshot()
+				ch, ct, _ := currentState.Snapshot()
+				ph, pt, pc := previousState.Snapshot()
 				lh, lt, _ := lifetimeState.Snapshot()
 				if len(lh) > 0 {
-					render(ih, lh, it, lt, ic, startTime, *interval)
+					render(ch, ph, lh, ct, pt, lt, pc, startTime, *interval)
 				}
 			}
 		}
