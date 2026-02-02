@@ -74,3 +74,33 @@ echo "options zfs zfs_arc_max=25769803776" >> /etc/modprobe.d/zfs.conf
 ```
 
 This leaves guaranteed headroom so ARC never fights for the last bytes. Tradeoff: less cache benefit, but more predictability.
+
+## Nuclear Option: Disable OOM Killer
+
+For systems that prefer **consistency over availability**, you can make the kernel panic instead of OOM killing:
+
+| `vm.panic_on_oom` | Behavior |
+|-------------------|----------|
+| 0 | OOM killer runs (default) |
+| 1 | Kernel panics on OOM (except certain cgroup-constrained OOMs) |
+| 2 | Kernel panics on any OOM, unconditionally |
+
+**Why panic instead of kill?**
+- A panic is **deterministic** — you know exactly what happened
+- Reboot runs fsck, replays journals, starts from a clean state
+- Better than silently killing a database mid-transaction and continuing as if nothing happened
+
+**Typical use cases**:
+- Database servers where corruption is worse than downtime
+- Systems with watchdog timers that auto-reboot
+- Clustered systems where a dead node gets fenced and workload moves elsewhere
+
+```bash
+# Runtime
+sudo sysctl vm.panic_on_oom=2
+
+# Persistent
+echo 'vm.panic_on_oom=2' | sudo tee /etc/sysctl.d/99-panic-on-oom.conf
+```
+
+**Note**: With swap buffer in place, the chance of hitting OOM is already significantly reduced. Panic-on-OOM would be defense in depth.
