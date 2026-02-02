@@ -29,6 +29,25 @@ type stats struct {
 	shrinkerEnabled  bool // modern kernels (5.18+)
 }
 
+type minMax struct {
+	min, max int64
+	set      bool
+}
+
+func (m *minMax) update(v int64) {
+	if !m.set {
+		m.min, m.max = v, v
+		m.set = true
+	} else {
+		if v < m.min {
+			m.min = v
+		}
+		if v > m.max {
+			m.max = v
+		}
+	}
+}
+
 func readInt64(path string) int64 {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -106,6 +125,14 @@ func main() {
 	initial := readStats()
 	startTime := time.Now()
 
+	// Track min/max for each counter
+	var (
+		writtenBackMM minMax
+		sameFilledMM  minMax
+		rejectPoorMM  minMax
+		rejectReclMM  minMax
+	)
+
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
@@ -114,6 +141,12 @@ func main() {
 
 	render := func() {
 		s := readStats()
+
+		// Update min/max trackers
+		writtenBackMM.update(s.writtenBack)
+		sameFilledMM.update(s.sameFilled)
+		rejectPoorMM.update(s.rejectPoor)
+		rejectReclMM.update(s.rejectReclaim)
 		maxPool := s.totalRAM * s.maxPoolPct / 100
 		storedBytes := s.storedPages * 4096
 
@@ -132,7 +165,7 @@ func main() {
 		fmt.Print("\033[2J\033[H")
 
 		fmt.Printf("zswap stats (refresh 1s, running %v)\n", elapsed)
-		fmt.Println(strings.Repeat("─", 60))
+		fmt.Println(strings.Repeat("─", 84))
 
 		// Writeback/shrinker status (shrinker is modern replacement)
 		wbStatus := "disabled"
@@ -151,18 +184,22 @@ func main() {
 		fmt.Printf("%-28s %8.2fx\n", "Compression ratio:", ratio)
 		fmt.Println()
 
-		// Counters with lifetime and delta
-		fmt.Printf("%-28s %12s %12s\n", "", "Lifetime", "Δ Session")
-		fmt.Println(strings.Repeat("─", 60))
+		// Counters with lifetime, delta, min, max
+		fmt.Printf("%-28s %12s %12s %12s %12s\n", "", "Lifetime", "Δ Session", "Min", "Max")
+		fmt.Println(strings.Repeat("─", 84))
 
-		fmt.Printf("%-28s %12d %12s\n", "Written back (pages):",
-			s.writtenBack, fmtDelta(s.writtenBack-initial.writtenBack))
-		fmt.Printf("%-28s %12d %12s\n", "Same-filled pages:",
-			s.sameFilled, fmtDelta(s.sameFilled-initial.sameFilled))
-		fmt.Printf("%-28s %12d %12s\n", "Reject (poor compress):",
-			s.rejectPoor, fmtDelta(s.rejectPoor-initial.rejectPoor))
-		fmt.Printf("%-28s %12d %12s\n", "Reject (reclaim fail):",
-			s.rejectReclaim, fmtDelta(s.rejectReclaim-initial.rejectReclaim))
+		fmt.Printf("%-28s %12d %12s %12d %12d\n", "Written back (pages):",
+			s.writtenBack, fmtDelta(s.writtenBack-initial.writtenBack),
+			writtenBackMM.min, writtenBackMM.max)
+		fmt.Printf("%-28s %12d %12s %12d %12d\n", "Same-filled pages:",
+			s.sameFilled, fmtDelta(s.sameFilled-initial.sameFilled),
+			sameFilledMM.min, sameFilledMM.max)
+		fmt.Printf("%-28s %12d %12s %12d %12d\n", "Reject (poor compress):",
+			s.rejectPoor, fmtDelta(s.rejectPoor-initial.rejectPoor),
+			rejectPoorMM.min, rejectPoorMM.max)
+		fmt.Printf("%-28s %12d %12s %12d %12d\n", "Reject (reclaim fail):",
+			s.rejectReclaim, fmtDelta(s.rejectReclaim-initial.rejectReclaim),
+			rejectReclMM.min, rejectReclMM.max)
 
 		canWriteback := s.writebackEnabled || s.shrinkerEnabled
 		if !canWriteback && s.rejectReclaim > 0 {
