@@ -461,12 +461,30 @@ func renderDevice(buf *strings.Builder, name string, hist *DeviceHistogram) {
 
 func main() {
 	flag.Usage = func() {
-		fmt.Fprintln(os.Stderr, "Usage: zpool-latency <pool> [-i interval]")
+		fmt.Fprintln(os.Stderr, "Usage: zpool-latency [-i interval] <pool>")
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "Real-time per-device disk latency percentiles (physical layer)")
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "  -i N    zpool iostat interval in seconds (default: 1)")
 	}
+
+	// Reorder args so flags can appear after positional args
+	args := os.Args[1:]
+	var reordered []string
+	var positional []string
+	for i := 0; i < len(args); i++ {
+		if strings.HasPrefix(args[i], "-") {
+			reordered = append(reordered, args[i])
+			if args[i] == "-i" && i+1 < len(args) {
+				i++
+				reordered = append(reordered, args[i])
+			}
+		} else {
+			positional = append(positional, args[i])
+		}
+	}
+	os.Args = append([]string{os.Args[0]}, append(reordered, positional...)...)
+
 	flag.Parse()
 
 	pool := flag.Arg(0)
