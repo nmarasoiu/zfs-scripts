@@ -1,0 +1,28 @@
+#!/bin/bash
+  echo "=== Memory Fragmentation Stats ==="
+  date
+
+  echo -e "\n--- Buddyinfo (free chunks per order) ---"
+  echo "Zone        0     1     2     3     4     5     6     7     8     9    10"
+  awk '/Normal/ {printf "%-8s %5d %5d %5d %5d %5d %5d %5d %5d %5d %5d %5d\n", $4, $5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15}' /proc/buddyinfo
+
+  echo -e "\n--- Page Types (Normal zone, order 0-6 totals) ---"
+  awk '/Normal/ && !/type/ {
+    sum=0; for(i=6;i<=12;i++) sum+=$i
+    printf "%-12s %8d chunks\n", $5, sum
+  }' /proc/pagetypeinfo
+
+  echo -e "\n--- Block Ratio ---"
+  awk '/Number of blocks/,0 { if (/Normal/) {u=$5; m=$6; r=$7} }
+    END { t=u+m+r; if(t>0) printf "Unmovable: %5d (%2d%%)  Movable: %5d (%2d%%)  Reclaimable: %5d (%2d%%)\n", u, u*100/t, m, m*100/t, r, r*100/t }
+  ' /proc/pagetypeinfo
+  
+  echo -e "\n--- Compaction Stats ---"
+  awk '/compact_stall|compact_fail|compact_success/ {printf "%-16s %12d\n", $1, $2}' /proc/vmstat
+
+  echo -e "\n--- Pressure (PSI) ---"
+  echo -n "Memory: "; cat /proc/pressure/memory | head -1
+  echo -n "IO:     "; cat /proc/pressure/io | head -1
+
+  echo -e "\n--- ARC ---"
+  awk '/^size/ {printf "Size: %.2f GB\n", $3/1024/1024/1024}' /proc/spl/kstat/zfs/arcstats 2>/dev/null || echo "N/A"
