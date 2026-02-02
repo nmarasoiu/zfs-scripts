@@ -1,0 +1,40 @@
+cat << 'EOF' > /usr/local/bin/zswap-stats
+#!/bin/bash
+Z=/sys/kernel/debug/zswap
+P=/sys/module/zswap/parameters
+
+stored=$(cat $Z/stored_pages)
+pool=$(cat $Z/pool_total_size)
+written=$(cat $Z/written_back_pages)
+reject_poor=$(cat $Z/reject_compress_poor)
+reject_fail=$(cat $Z/reject_reclaim_fail)
+same=$(cat $Z/same_filled_pages)
+
+max_pct=$(cat $P/max_pool_percent)
+total_ram=$(grep MemTotal /proc/meminfo | awk '{print $2 * 1024}')
+max_pool=$((total_ram * max_pct / 100))
+
+stored_bytes=$((stored * 4096))
+ratio=$(echo "scale=2; $stored_bytes / $pool" | bc 2>/dev/null || echo "N/A")
+usage_pct=$(echo "scale=1; $pool * 100 / $max_pool" | bc 2>/dev/null || echo "N/A")
+
+printf "%-24s %10s / %s (%s%%)\n" "Pool RAM usage:" "$(numfmt --to=iec-i $pool)B" "$(numfmt --to=iec-i $max_pool)B" "$usage_pct"
+printf "%-24s %12s\n" "Stored (uncompressed):" "$(numfmt --to=iec-i $stored_bytes)B"
+printf "%-24s %12s\n" "Compression ratio:" "${ratio}x"
+printf "%-24s %12s\n" "Written to disk:" "$written pages"
+printf "%-24s %12s\n" "Same-filled pages:" "$same"
+printf "%-24s %12s\n" "Reject (poor compress):" "$reject_poor"
+printf "%-24s %12s\n" "Reject (reclaim fail):" "$reject_fail"
+EOF
+chmod +x /usr/local/bin/zswap-stats
+```
+
+Output now shows:
+```
+Pool RAM usage:              65MiB / 7.8GiB (0.8%)
+Stored (uncompressed):         105MiB
+Compression ratio:              1.61x
+Written to disk:          28783 pages
+Same-filled pages:                442
+Reject (poor compress):             0
+Reject (reclaim fail):          13329
