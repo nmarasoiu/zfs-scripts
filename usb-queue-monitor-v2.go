@@ -617,6 +617,7 @@ type CurrentValues struct {
 
 func main() {
 	batchMode := flag.Bool("batch", false, "Enable batch mode (no screen clearing, suitable for nohup)")
+	delay := flag.Duration("delay", 5*time.Millisecond, "Delay between polling iterations")
 	flag.Parse()
 
 	// Setup logging
@@ -699,12 +700,20 @@ func main() {
 	// Initial message
 	if !*batchMode {
 		fmt.Println("Block I/O Queue Monitor - Ctrl+C to stop")
-		fmt.Println("Starting sampler (dedicated CPU) and display (20 FPS)...")
+		if *delay > 0 {
+			fmt.Printf("Starting sampler (delay=%v) and display (20 FPS)...\n", *delay)
+		} else {
+			fmt.Println("Starting sampler (no delay, dedicated CPU) and display (20 FPS)...")
+		}
 	} else {
-		log.Println("Starting sampler (dedicated CPU) and display...")
+		if *delay > 0 {
+			log.Printf("Starting sampler (delay=%v) and display...", *delay)
+		} else {
+			log.Println("Starting sampler (no delay, dedicated CPU) and display...")
+		}
 	}
 
-	// SAMPLER GOROUTINE - runs flat out, no sleep, hogs one CPU core
+	// SAMPLER GOROUTINE - polls all devices per iteration with configurable delay
 	var sampleCount atomic.Uint64
 	go func() {
 		// Pre-allocate slice for batch updates
@@ -750,6 +759,11 @@ func main() {
 				state.mu.Unlock()
 
 				sampleCount.Add(1)
+
+				// Delay between iterations (reduces CPU usage)
+				if *delay > 0 {
+					time.Sleep(*delay)
+				}
 			}
 		}
 	}()
