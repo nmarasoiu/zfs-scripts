@@ -1,7 +1,8 @@
 // syscall-latency: Per-syscall latency percentile tracker using eBPF
 //
-// Traces syscall enter/exit to compute per-syscall latency,
-// maintains HDR histograms per syscall type, emits percentiles on interval.
+// Traces syscall enter/exit to compute per-syscall latency.
+// Uses DDSketch for percentiles (P25/P50/P75/P90/P99/P99.9) with explicit
+// min/max/avg tracking (sum+count). Emits stats on configurable interval.
 //
 // Usage: syscall-latency [-c comm] [-s syscalls] [-i interval]
 //
@@ -15,6 +16,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"os/signal"
 	"sort"
@@ -23,7 +25,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/HdrHistogram/hdrhistogram-go"
+	"github.com/DataDog/sketches-go/ddsketch"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/ringbuf"
 	"github.com/cilium/ebpf/rlimit"
@@ -31,9 +33,7 @@ import (
 
 const (
 	displayInterval = 100 * time.Millisecond // 10 FPS display refresh
-	histMin         = 1
-	histMax         = 60_000_000 // 60 seconds in µs
-	histSigFig      = 3
+	maxLatencyUs    = 60_000_000             // 60 seconds in µs - clamp values above this
 )
 
 var (
@@ -219,41 +219,96 @@ func (t *topN) Clone() *topN {
 	return clone
 }
 
-// syscallStats holds both interval and lifetime histograms for a syscall
+// simpleStats tracks min/max/sum/count explicitly (no sketch overhead)
+type simpleStats struct {
+	min   int64
+	max   int64
+	sum   uint64
+	count uint64
+}
+
+func newSimpleStats() *simpleStats {
+	return &simpleStats{min: math.MaxInt64, max: 0}
+}
+
+func (s *simpleStats) Record(v int64) {
+	if v < s.min {
+		s.min = v
+	}
+	if v > s.max {
+		s.max = v
+	}
+	s.sum += uint64(v)
+	s.count++
+}
+
+func (s *simpleStats) Reset() {
+	s.min = math.MaxInt64
+	s.max = 0
+	s.sum = 0
+	s.count = 0
+}
+
+func (s *simpleStats) Avg() int64 {
+	if s.count == 0 {
+		return 0
+	}
+	return int64(s.sum / s.count)
+}
+
+func (s *simpleStats) Clone() *simpleStats {
+	return &simpleStats{min: s.min, max: s.max, sum: s.sum, count: s.count}
+}
+
+// syscallStats holds both interval and lifetime stats for a syscall
+// Uses DDSketch for percentiles only, explicit tracking for min/max/avg
 type syscallStats struct {
-	interval    *hdrhistogram.Histogram
-	lifetime    *hdrhistogram.Histogram
-	intervalTop *topN
-	lifetimeTop *topN
+	intervalSketch *ddsketch.DDSketch
+	lifetimeSketch *ddsketch.DDSketch
+	intervalStats  *simpleStats
+	lifetimeStats  *simpleStats
+	intervalTop    *topN
+	lifetimeTop    *topN
 }
 
 func newSyscallStats() *syscallStats {
+	// DDSketch with 1% relative accuracy - good balance of precision and memory
+	intervalSketch, _ := ddsketch.NewDefaultDDSketch(0.01)
+	lifetimeSketch, _ := ddsketch.NewDefaultDDSketch(0.01)
 	return &syscallStats{
-		interval:    hdrhistogram.New(histMin, histMax, histSigFig),
-		lifetime:    hdrhistogram.New(histMin, histMax, histSigFig),
-		intervalTop: newTopN(5),
-		lifetimeTop: newTopN(5),
+		intervalSketch: intervalSketch,
+		lifetimeSketch: lifetimeSketch,
+		intervalStats:  newSimpleStats(),
+		lifetimeStats:  newSimpleStats(),
+		intervalTop:    newTopN(5),
+		lifetimeTop:    newTopN(5),
 	}
 }
 
 func (ss *syscallStats) Record(latencyUs int64) {
-	ss.interval.RecordValue(latencyUs)
-	ss.lifetime.RecordValue(latencyUs)
+	v := float64(latencyUs)
+	ss.intervalSketch.Add(v)
+	ss.lifetimeSketch.Add(v)
+	ss.intervalStats.Record(latencyUs)
+	ss.lifetimeStats.Record(latencyUs)
 	ss.intervalTop.Add(latencyUs)
 	ss.lifetimeTop.Add(latencyUs)
 }
 
 func (ss *syscallStats) ResetInterval() {
-	ss.interval.Reset()
+	ss.intervalSketch, _ = ddsketch.NewDefaultDDSketch(0.01)
+	ss.intervalStats.Reset()
 	ss.intervalTop.Reset()
 }
 
 func (ss *syscallStats) Snapshot() *syscallStats {
 	return &syscallStats{
-		interval:    hdrhistogram.Import(ss.interval.Export()),
-		lifetime:    hdrhistogram.Import(ss.lifetime.Export()),
-		intervalTop: ss.intervalTop.Clone(),
-		lifetimeTop: ss.lifetimeTop.Clone(),
+		intervalSketch: ss.intervalSketch.Copy(),
+		lifetimeSketch: ss.lifetimeSketch.Copy(),
+		intervalStats:  ss.intervalStats.Clone(),
+		lifetimeStats:  ss.lifetimeStats.Clone(),
+		intervalTop:    ss.intervalTop.Clone(),
+		lifetimeTop:    ss.lifetimeTop.Clone(),
 	}
 }
 
@@ -329,7 +384,7 @@ func formatTop5(top *topN) string {
 	return strings.Join(parts, " ")
 }
 
-const lineWidth = 160
+const lineWidth = 155
 
 func (d *Display) render(stats map[uint32]*syscallStats, startTime, lastReset time.Time, intervalDur time.Duration) {
 	var buf strings.Builder
@@ -366,8 +421,8 @@ func (d *Display) render(stats map[uint32]*syscallStats, startTime, lastReset ti
 	buf.WriteString("\n")
 
 	// Header
-	fmt.Fprintf(&buf, "%-12s │ %8s %8s %8s %8s %8s %8s │ %8s %8s %8s %8s %8s │ %9s\n",
-		"INTERVAL", "avg", "p50", "p90", "p99", "p99.9", "max",
+	fmt.Fprintf(&buf, "%-12s │ %8s %8s %8s %8s %8s %8s %8s %8s %8s │ %8s %8s %8s %8s %8s │ %9s\n",
+		"INTERVAL", "min", "avg", "p25", "p50", "p75", "p90", "p99", "p99.9", "max",
 		"max-4", "max-3", "max-2", "max-1", "max", "samples")
 	buf.WriteString(strings.Repeat("-", lineWidth))
 	buf.WriteString("\n")
@@ -379,59 +434,77 @@ func (d *Display) render(stats map[uint32]*syscallStats, startTime, lastReset ti
 		if name == "" {
 			name = fmt.Sprintf("sys_%d", id)
 		}
-		h := ss.interval
-		n := h.TotalCount()
+		st := ss.intervalStats
+		n := st.count
 		if n == 0 {
-			fmt.Fprintf(&buf, "%-12s │ %8s %8s %8s %8s %8s %8s │ %8s %8s %8s %8s %8s │ %9s\n",
-				name, "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "0")
+			fmt.Fprintf(&buf, "%-12s │ %8s %8s %8s %8s %8s %8s %8s %8s %8s │ %8s %8s %8s %8s %8s │ %9s\n",
+				name, "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "0")
 			continue
 		}
-		fmt.Fprintf(&buf, "%-12s │ %s %s %s %s %s %s │ %s │ %9s\n",
+		p25, _ := ss.intervalSketch.GetValueAtQuantile(0.25)
+		p50, _ := ss.intervalSketch.GetValueAtQuantile(0.50)
+		p75, _ := ss.intervalSketch.GetValueAtQuantile(0.75)
+		p90, _ := ss.intervalSketch.GetValueAtQuantile(0.90)
+		p99, _ := ss.intervalSketch.GetValueAtQuantile(0.99)
+		p999, _ := ss.intervalSketch.GetValueAtQuantile(0.999)
+		fmt.Fprintf(&buf, "%-12s │ %s %s %s %s %s %s %s %s %s │ %s │ %9s\n",
 			name,
-			formatLatencyPadded(int64(h.Mean())),
-			formatLatencyPadded(h.ValueAtQuantile(50)),
-			formatLatencyPadded(h.ValueAtQuantile(90)),
-			formatLatencyPadded(h.ValueAtQuantile(99)),
-			formatLatencyPadded(h.ValueAtQuantile(99.9)),
-			formatLatencyPadded(h.Max()),
+			formatLatencyPadded(st.min),
+			formatLatencyPadded(st.Avg()),
+			formatLatencyPadded(int64(p25)),
+			formatLatencyPadded(int64(p50)),
+			formatLatencyPadded(int64(p75)),
+			formatLatencyPadded(int64(p90)),
+			formatLatencyPadded(int64(p99)),
+			formatLatencyPadded(int64(p999)),
+			formatLatencyPadded(st.max),
 			formatTop5(ss.intervalTop),
-			formatCount(n),
+			formatCount(int64(n)),
 		)
 	}
 
 	buf.WriteString("\n")
-	fmt.Fprintf(&buf, "%-12s │ %8s %8s %8s %8s %8s %8s │ %8s %8s %8s %8s %8s │ %9s\n",
-		"LIFETIME", "avg", "p50", "p90", "p99", "p99.9", "max",
+	fmt.Fprintf(&buf, "%-12s │ %8s %8s %8s %8s %8s %8s %8s %8s %8s │ %8s %8s %8s %8s %8s │ %9s\n",
+		"LIFETIME", "min", "avg", "p25", "p50", "p75", "p90", "p99", "p99.9", "max",
 		"max-4", "max-3", "max-2", "max-1", "max", "samples")
 	buf.WriteString(strings.Repeat("-", lineWidth))
 	buf.WriteString("\n")
 
 	// Lifetime stats
-	var totalSamples int64
+	var totalSamples uint64
 	for _, id := range syscallList {
 		ss := stats[id]
 		name := syscallNames[id]
 		if name == "" {
 			name = fmt.Sprintf("sys_%d", id)
 		}
-		h := ss.lifetime
-		n := h.TotalCount()
+		st := ss.lifetimeStats
+		n := st.count
 		totalSamples += n
 		if n == 0 {
-			fmt.Fprintf(&buf, "%-12s │ %8s %8s %8s %8s %8s %8s │ %8s %8s %8s %8s %8s │ %9s\n",
-				name, "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "0")
+			fmt.Fprintf(&buf, "%-12s │ %8s %8s %8s %8s %8s %8s %8s %8s %8s │ %8s %8s %8s %8s %8s │ %9s\n",
+				name, "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "0")
 			continue
 		}
-		fmt.Fprintf(&buf, "%-12s │ %s %s %s %s %s %s │ %s │ %9s\n",
+		p25, _ := ss.lifetimeSketch.GetValueAtQuantile(0.25)
+		p50, _ := ss.lifetimeSketch.GetValueAtQuantile(0.50)
+		p75, _ := ss.lifetimeSketch.GetValueAtQuantile(0.75)
+		p90, _ := ss.lifetimeSketch.GetValueAtQuantile(0.90)
+		p99, _ := ss.lifetimeSketch.GetValueAtQuantile(0.99)
+		p999, _ := ss.lifetimeSketch.GetValueAtQuantile(0.999)
+		fmt.Fprintf(&buf, "%-12s │ %s %s %s %s %s %s %s %s %s │ %s │ %9s\n",
 			name,
-			formatLatencyPadded(int64(h.Mean())),
-			formatLatencyPadded(h.ValueAtQuantile(50)),
-			formatLatencyPadded(h.ValueAtQuantile(90)),
-			formatLatencyPadded(h.ValueAtQuantile(99)),
-			formatLatencyPadded(h.ValueAtQuantile(99.9)),
-			formatLatencyPadded(h.Max()),
+			formatLatencyPadded(st.min),
+			formatLatencyPadded(st.Avg()),
+			formatLatencyPadded(int64(p25)),
+			formatLatencyPadded(int64(p50)),
+			formatLatencyPadded(int64(p75)),
+			formatLatencyPadded(int64(p90)),
+			formatLatencyPadded(int64(p99)),
+			formatLatencyPadded(int64(p999)),
+			formatLatencyPadded(st.max),
 			formatTop5(ss.lifetimeTop),
-			formatCount(n),
+			formatCount(int64(n)),
 		)
 	}
 
@@ -442,8 +515,8 @@ func (d *Display) render(stats map[uint32]*syscallStats, startTime, lastReset ti
 	if elapsed.Seconds() > 0 {
 		rate = float64(totalSamples) / elapsed.Seconds()
 	}
-	fmt.Fprintf(&buf, "Total: %s syscalls | Rate: %s/s | HDR histograms: ~40KB/syscall\n",
-		formatCount(totalSamples), formatCount(int64(rate)))
+	fmt.Fprintf(&buf, "Total: %s syscalls | Rate: %s/s | DDSketch: ~2KB/syscall\n",
+		formatCount(int64(totalSamples)), formatCount(int64(rate)))
 
 	if d.batchMode {
 		buf.WriteString("\n")
@@ -602,8 +675,8 @@ func main() {
 		if latencyUs < 1 {
 			latencyUs = 1
 		}
-		if latencyUs > histMax {
-			latencyUs = histMax
+		if latencyUs > maxLatencyUs {
+			latencyUs = maxLatencyUs
 		}
 
 		state.Record(event.SyscallId, latencyUs)
