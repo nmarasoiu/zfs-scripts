@@ -22,3 +22,4 @@ slow_devices/slow-devices
 .claude/
 zfs-github-src
 top_txg
+ram_crowding/htop
