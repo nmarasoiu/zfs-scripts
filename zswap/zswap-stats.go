@@ -206,8 +206,8 @@ func main() {
 			fmt.Println()
 			fmt.Println("⚠ Writeback disabled - reclaim fails expected when pool fills")
 		} else if canWriteback && s.rejectReclaim > initial.rejectReclaim {
-			fmt.Println()
-			fmt.Println("⚠ Reclaim fails during session - pressure exceeding writeback speed")
+			//fmt.Println()
+			//fmt.Println("⚠ Reclaim fails during session - pressure exceeding writeback speed")
 		}
 	}
 
