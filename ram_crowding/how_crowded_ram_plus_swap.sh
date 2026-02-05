@@ -6,138 +6,134 @@
 #  - Zswapped:   swap slots stored compressed in RAM (zswap pool) → not on-disk
 #  - ZFS ARC:    MemAvailable ignores shrinkable ARC → real avail is higher
 #
+# Bottom line shows two scenarios side-by-side:
+#  - ARC→min (optimistic): ARC can shrink to c_min, freeing memory quickly
+#  - ARC→max (worst-case):  ARC treated as committing c_max — it grows toward
+#    c_max and releases slowly, which in practice can crowd out other consumers
+#
 # Matches htop's accounting (see htop/linux/LinuxMachine.c:215, Platform.c:467)
 
-awk '
-/^MemTotal:/      { mt=$2 }
-/^MemFree:/       { mf=$2 }
-/^MemAvailable:/  { ma=$2 }
-/^Buffers:/       { buf=$2 }
-/^Cached:/        { cached=$2 }
-/^SwapCached:/    { sc=$2 }
-/^Active\(file\):/  { af=$2 }
-/^Inactive\(file\):/ { iff=$2 }
-/^SwapTotal:/     { st=$2 }
-/^SwapFree:/      { sf=$2 }
-/^Zswap:/         { zr=$2 }
-/^Zswapped:/      { zd=$2 }
-/^AnonPages:/     { anon=$2 }
-/^Slab:/          { slab=$2 }
-/^SReclaimable:/  { slab_r=$2 }
-/^SUnreclaim:/    { slab_u=$2 }
-END {
-    G = 1024 * 1024  # kB → GiB
+files="/proc/meminfo"
+[ -f /proc/spl/kstat/zfs/arcstats ] && files="$files /proc/spl/kstat/zfs/arcstats"
 
-    # --- Swap: on-disk only (htop formula) ---
-    # htop: usedSwap = SwapTotal - SwapFree - SwapCached  (LinuxMachine.c:215)
-    # then:          -= Zswapped                          (Platform.c:487)
+awk '
+# --- parse /proc/meminfo and /proc/spl/kstat/zfs/arcstats ---
+/^MemTotal:/         { mt=$2 }
+/^MemFree:/          { mf=$2 }
+/^MemAvailable:/     { ma=$2 }
+/^SwapCached:/       { sc=$2 }
+/^Active\(file\):/   { af=$2 }
+/^Inactive\(file\):/ { iff=$2 }
+/^SwapTotal:/        { st=$2 }
+/^SwapFree:/         { sf=$2 }
+/^Zswap:/            { zr=$2 }
+/^Zswapped:/         { zd=$2 }
+/^AnonPages:/        { anon=$2 }
+/^Slab:/             { slab=$2 }
+/^SReclaimable:/     { slab_r=$2 }
+/^SUnreclaim:/       { slab_u=$2 }
+/^size /             { arc=$3 }
+/^c_min /            { cmin=$3 }
+/^c_max /            { cmax=$3 }
+
+# Compute hard-used RAM for a given ARC floor commitment.
+#   arc_floor = c_min → optimistic (ARC fully shrinkable)
+#   arc_floor = c_max → worst-case (ARC keeps / grows to c_max)
+# MemAvailable already does NOT count ARC as reclaimable, so:
+#   - if arc > floor: (arc - floor) is truly shrinkable → add to avail
+#   - if floor > arc: ARC may still grow by (floor - arc) → subtract from avail
+function calc(tag, arc_floor,    shrink, growth, avail) {
+    if (arc > 0) {
+        shrink = (arc > arc_floor) ? (arc - arc_floor) / 1024 : 0   # bytes→kB
+        growth = (arc_floor > arc) ? (arc_floor - arc) / 1024 : 0   # bytes→kB
+        avail  = ma + shrink - growth
+    } else {
+        avail = ma
+    }
+    r_ram[tag]  = mt - avail
+    r_swap[tag] = st - sf - sc - zd
+    if (r_swap[tag] < 0) r_swap[tag] = 0
+    r_dem[tag]  = r_ram[tag] + r_swap[tag]
+    r_cap[tag]  = mt + st
+    r_head[tag] = r_cap[tag] - r_dem[tag]
+}
+
+END {
+    kG = 1024 * 1024           # kB  → GiB
+    bG = 1024 * 1024 * 1024    # bytes → GiB
+
     swap_raw  = st - sf
     swap_disk = swap_raw - sc - zd
     if (swap_disk < 0) swap_disk = 0
-
-    # --- RAM used (naive, MemAvailable-based) ---
-    ram_used_naive = mt - ma
+    ram_naive = mt - ma
 
     printf "═══ Real Memory Utilization ══════════════════════\n\n"
 
     printf "RAM (MemAvailable): %5.1f / %4.1f GiB used  (%2.0f%%)\n",
-        ram_used_naive/G, mt/G, ram_used_naive*100/mt
+        ram_naive/kG, mt/kG, ram_naive*100/mt
     printf "  anon %-5.1fG  file-cache %-5.2fG  slab %-5.1fG (%-4.2fG unrecl)\n",
-        anon/G, (af+iff)/G, slab/G, slab_u/G
-    printf "  zswap-pool %-5.2fG  (swap data compressed in RAM)\n", zr/G
+        anon/kG, (af+iff)/kG, slab/kG, slab_u/kG
+    printf "  zswap-pool %-5.2fG  (swap data compressed in RAM)\n", zr/kG
 
     swap_pct = st > 0 ? swap_disk*100/st : 0
     printf "\nSwap on-disk:       %5.1f / %4.1f GiB used  (%2.0f%%)\n",
-        swap_disk/G, st/G, swap_pct
+        swap_disk/kG, st/kG, swap_pct
     printf "  raw slots %-4.1fG  − cached %-4.2fG (back in RAM)  − zswapped %-4.2fG (in zswap)\n",
-        swap_raw/G, sc/G, zd/G
-
+        swap_raw/kG, sc/kG, zd/kG
     if (zr > 0 && zd > 0)
         printf "  zswap ratio: %.1f:1  (%.0f MiB RAM → %.0f MiB data)\n",
             zd/zr, zr/1024, zd/1024
-}' /proc/meminfo
 
-# ZFS ARC: MemAvailable does NOT know ARC is shrinkable
-if [ -f /proc/spl/kstat/zfs/arcstats ]; then
-    awk '
-    /^size /  { size=$3 }
-    /^c_min / { cmin=$3 }
-    END {
-        G = 1024*1024*1024
-        shrink = (size > cmin) ? size - cmin : 0
+    if (arc > 0) {
+        arc_shrink = (arc > cmin) ? arc - cmin : 0
         printf "\nZFS ARC:            %5.1f GiB  (%.1fG shrinkable + %.1fG floor)\n",
-            size/G, shrink/G, cmin/G
+            arc/bG, arc_shrink/bG, cmin/bG
         printf "  MemAvailable undercounts by ~%.1fG (does not see shrinkable ARC)\n",
-            shrink/G
-    }' /proc/spl/kstat/zfs/arcstats
+            arc_shrink/bG
+        printf "  c_min=%.1fG  c_max=%.1fG\n", cmin/bG, cmax/bG
+    }
 
-    # Bottom line: combine meminfo + ARC for real picture
-    paste <(awk '
-        /^MemTotal:/     { mt=$2 }
-        /^MemAvailable:/ { ma=$2 }
-        /^SwapTotal:/    { st=$2 }
-        /^SwapFree:/     { sf=$2 }
-        /^SwapCached:/   { sc=$2 }
-        /^Zswapped:/     { zd=$2 }
-        END { printf "%d %d %d %d %d %d", mt, ma, st, sf, sc, zd }
-    ' /proc/meminfo) \
-    <(awk '/^size / {s=$3} /^c_min / {c=$3} END { printf "%d %d", s, c }' \
-        /proc/spl/kstat/zfs/arcstats) |
-    awk '{
-        G = 1024*1024
-        Gb = 1024*1024*1024
-        mt=$1; ma=$2; st=$3; sf=$4; sc=$5; zd=$6; arc=$7; cmin=$8
+    # ─── Bottom Line ───
+    printf "\n─── Bottom Line ──────────────────────────────────────────────────────\n"
 
-        arc_shrink = (arc > cmin) ? (arc - cmin) / 1024 : 0   # bytes → kB
-        real_avail = ma + arc_shrink
-        ram_hard   = mt - real_avail
+    if (arc > 0) {
+        calc("o", cmin)
+        calc("w", cmax)
 
-        swap_disk  = st - sf - sc - zd
-        if (swap_disk < 0) swap_disk = 0
+        printf "%-20s  %-26s  %s\n",   "", "ARC→min (optimistic)", "ARC→max (worst-case)"
+        printf "────────────────────────────────────────────────────────────────────\n"
 
-        total_cap  = mt + st
-        hard_total = ram_hard + swap_disk
-        headroom   = total_cap - hard_total
+        printf "%-20s  %5.1f / %4.1f GiB (%2.0f%%)     %5.1f / %4.1f GiB (%2.0f%%)\n",
+            "RAM hard-used:",
+            r_ram["o"]/kG, mt/kG, r_ram["o"]*100/mt,
+            r_ram["w"]/kG, mt/kG, r_ram["w"]*100/mt
 
-        printf "\n─── Bottom Line ──────────────────────────────────\n"
-        printf "RAM hard-used:  %5.1f / %4.1f GiB  (%2.0f%%)  ← after freeing shrinkable ARC\n",
-            ram_hard/G, mt/G, ram_hard*100/mt
-        swap_pct = st > 0 ? swap_disk*100/st : 0
-        printf "Swap on-disk:   %5.1f / %4.1f GiB  (%2.0f%%)  ← no SwapCached/zswap double-count\n",
-            swap_disk/G, st/G, swap_pct
-        printf "────────────────────────────────────────\n"
-        printf "Hard demand:    %5.1f GiB\n", hard_total/G
-        printf "Capacity:       %5.1f GiB  (%.1f RAM + %.1f swap)\n",
-            total_cap/G, mt/G, st/G
-        printf "Headroom:       %5.1f GiB  (%2.0f%%)\n",
-            headroom/G, headroom*100/total_cap
-        printf "────────────────────────────────────────\n"
-    }'
-else
-    # No ZFS: simpler bottom line
-    awk '
-    /^MemTotal:/     { mt=$2 }
-    /^MemAvailable:/ { ma=$2 }
-    /^SwapTotal:/    { st=$2 }
-    /^SwapFree:/     { sf=$2 }
-    /^SwapCached:/   { sc=$2 }
-    /^Zswapped:/     { zd=$2 }
-    END {
-        G = 1024*1024
-        ram_used  = mt - ma
-        swap_disk = st - sf - sc - zd
-        if (swap_disk < 0) swap_disk = 0
-        total_cap = mt + st
-        demand    = ram_used + swap_disk
-        headroom  = total_cap - demand
+        printf "%-20s  %5.1f / %4.1f GiB (%2.0f%%)\n",
+            "Swap on-disk:", r_swap["o"]/kG, st/kG, swap_pct
 
-        printf "\n─── Bottom Line ──────────────────────────────────\n"
-        printf "Demand:    %5.1f GiB  (%.1f RAM + %.1f swap on-disk)\n",
-            demand/G, ram_used/G, swap_disk/G
-        printf "Capacity:  %5.1f GiB  (%.1f RAM + %.1f swap)\n",
-            total_cap/G, mt/G, st/G
-        printf "Headroom:  %5.1f GiB  (%2.0f%%)\n",
-            headroom/G, headroom*100/total_cap
-        printf "────────────────────────────────────────\n"
-    }' /proc/meminfo
-fi
+        printf "────────────────────────────────────────────────────────────────────\n"
+
+        printf "%-20s  %5.1f GiB                  %5.1f GiB\n",
+            "Hard demand:", r_dem["o"]/kG, r_dem["w"]/kG
+
+        printf "%-20s  %5.1f GiB  (%.1f RAM + %.1f swap)\n",
+            "Capacity:", r_cap["o"]/kG, mt/kG, st/kG
+
+        printf "%-20s  %5.1f GiB (%2.0f%%)           %5.1f GiB (%2.0f%%)\n",
+            "Headroom:",
+            r_head["o"]/kG, r_head["o"]*100/r_cap["o"],
+            r_head["w"]/kG, r_head["w"]*100/r_cap["w"]
+
+        printf "────────────────────────────────────────────────────────────────────\n"
+    } else {
+        calc("n", 0)
+        printf "%-20s  %5.1f GiB  (%.1f RAM + %.1f swap on-disk)\n",
+            "Demand:", r_dem["n"]/kG, r_ram["n"]/kG, r_swap["n"]/kG
+        printf "%-20s  %5.1f GiB  (%.1f RAM + %.1f swap)\n",
+            "Capacity:", r_cap["n"]/kG, mt/kG, st/kG
+        printf "%-20s  %5.1f GiB  (%2.0f%%)\n",
+            "Headroom:", r_head["n"]/kG, r_head["n"]*100/r_cap["n"]
+        printf "────────────────────────────────────────────────────────────────────\n"
+    }
+}
+' $files
