@@ -42,7 +42,7 @@ const (
 var (
 	interval    = flag.Duration("i", 10*time.Second, "stats reset interval")
 	focusProcs  = flag.String("c", "storagenode", "focus processes for per-syscall detail (comma-separated, empty=none)")
-	topProcs    = flag.Int("n", 10, "top N processes to show in summary")
+	topProcs    = flag.Int("n", 25, "top N process/syscall rows to show in summary")
 	syscallList = flag.String("s", "pread64,pwrite64,fsync,fdatasync,read,write", "comma-separated syscalls to trace")
 	batch       = flag.Bool("batch", false, "batch mode (no screen clearing)")
 )
@@ -369,11 +369,9 @@ func (ss *syscallStats) MergeFrom(other *syscallStats) {
 type State struct {
 	mu sync.RWMutex
 
-	// Per-process aggregate stats (all processes)
-	processStats map[string]*syscallStats
+	// Per-(process, syscall) stats for all processes
+	procSyscallStats map[string]map[uint32]*syscallStats
 
-	// Per-(process, syscall) stats (only focus processes)
-	focusStats     map[string]map[uint32]*syscallStats
 	focusProcesses map[string]bool
 
 	startTime time.Time
@@ -383,11 +381,10 @@ type State struct {
 func newState(focus map[string]bool) *State {
 	now := time.Now()
 	return &State{
-		processStats:   make(map[string]*syscallStats),
-		focusStats:     make(map[string]map[uint32]*syscallStats),
-		focusProcesses: focus,
-		startTime:      now,
-		lastReset:      now,
+		procSyscallStats: make(map[string]map[uint32]*syscallStats),
+		focusProcesses:   focus,
+		startTime:        now,
+		lastReset:        now,
 	}
 }
 
@@ -395,38 +392,24 @@ func (s *State) Record(comm string, syscallID uint32, latencyUs int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Per-process aggregate
-	ps, ok := s.processStats[comm]
+	fm, ok := s.procSyscallStats[comm]
 	if !ok {
-		ps = newSyscallStats()
-		s.processStats[comm] = ps
+		fm = make(map[uint32]*syscallStats)
+		s.procSyscallStats[comm] = fm
 	}
-	ps.Record(latencyUs)
-
-	// Focus process: also track per-syscall
-	if s.focusProcesses[comm] {
-		fm, ok := s.focusStats[comm]
-		if !ok {
-			fm = make(map[uint32]*syscallStats)
-			s.focusStats[comm] = fm
-		}
-		ss, ok := fm[syscallID]
-		if !ok {
-			ss = newSyscallStats()
-			fm[syscallID] = ss
-		}
-		ss.Record(latencyUs)
+	ss, ok := fm[syscallID]
+	if !ok {
+		ss = newSyscallStats()
+		fm[syscallID] = ss
 	}
+	ss.Record(latencyUs)
 }
 
 func (s *State) ResetIntervals() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	for _, ps := range s.processStats {
-		ps.ResetInterval()
-	}
-	for _, fm := range s.focusStats {
+	for _, fm := range s.procSyscallStats {
 		for _, ss := range fm {
 			ss.ResetInterval()
 		}
@@ -435,10 +418,9 @@ func (s *State) ResetIntervals() {
 }
 
 type stateSnapshot struct {
-	processStats map[string]*syscallStats
-	focusStats   map[string]map[uint32]*syscallStats
-	startTime    time.Time
-	lastReset    time.Time
+	procSyscallStats map[string]map[uint32]*syscallStats
+	startTime        time.Time
+	lastReset        time.Time
 }
 
 func (s *State) Snapshot() *stateSnapshot {
@@ -446,19 +428,15 @@ func (s *State) Snapshot() *stateSnapshot {
 	defer s.mu.RUnlock()
 
 	snap := &stateSnapshot{
-		processStats: make(map[string]*syscallStats, len(s.processStats)),
-		focusStats:   make(map[string]map[uint32]*syscallStats, len(s.focusStats)),
-		startTime:    s.startTime,
-		lastReset:    s.lastReset,
+		procSyscallStats: make(map[string]map[uint32]*syscallStats, len(s.procSyscallStats)),
+		startTime:        s.startTime,
+		lastReset:        s.lastReset,
 	}
 
-	for name, ps := range s.processStats {
-		snap.processStats[name] = ps.Snapshot()
-	}
-	for name, fm := range s.focusStats {
-		snap.focusStats[name] = make(map[uint32]*syscallStats, len(fm))
+	for name, fm := range s.procSyscallStats {
+		snap.procSyscallStats[name] = make(map[uint32]*syscallStats, len(fm))
 		for id, ss := range fm {
-			snap.focusStats[name][id] = ss.Snapshot()
+			snap.procSyscallStats[name][id] = ss.Snapshot()
 		}
 	}
 
@@ -492,7 +470,7 @@ func formatTop5(top *topN) string {
 
 const (
 	focusLineWidth   = 155
-	summaryLineWidth = 84
+	summaryLineWidth = 93
 )
 
 func sectionHeader(buf *strings.Builder, title string, width int) {
@@ -522,27 +500,29 @@ func (d *Display) render(snap *stateSnapshot, intervalDur time.Duration) {
 
 	// Focus sections
 	for _, name := range d.focusProcesses {
-		fm := snap.focusStats[name]
+		fm := snap.procSyscallStats[name]
 		if fm == nil {
 			continue
 		}
 		d.renderFocusSection(&buf, name, fm)
 	}
 
-	// Process summary
-	d.renderProcessSummary(&buf, snap.processStats, intervalElapsed, elapsed)
+	// Process+syscall summary (lifetime only)
+	d.renderProcessSummary(&buf, snap.procSyscallStats, elapsed)
 
 	// Footer
 	var totalSamples uint64
-	for _, ps := range snap.processStats {
-		totalSamples += ps.lifetimeStats.count
+	for _, fm := range snap.procSyscallStats {
+		for _, ss := range fm {
+			totalSamples += ss.lifetimeStats.count
+		}
 	}
 	rate := float64(0)
 	if elapsed.Seconds() > 0 {
 		rate = float64(totalSamples) / elapsed.Seconds()
 	}
 	fmt.Fprintf(&buf, "Total: %s syscalls | Rate: %s/s | Processes: %d\n",
-		formatCount(int64(totalSamples)), formatCount(int64(rate)), len(snap.processStats))
+		formatCount(int64(totalSamples)), formatCount(int64(rate)), len(snap.procSyscallStats))
 
 	if d.batchMode {
 		buf.WriteString("\n")
@@ -638,72 +618,60 @@ func renderDetailRow(buf *strings.Builder, name string, st *simpleStats, sketch 
 	)
 }
 
-type procEntry struct {
-	name  string
+type procSyscallEntry struct {
+	label string
 	stats *syscallStats
 }
 
-func (d *Display) renderProcessSummary(buf *strings.Builder, processStats map[string]*syscallStats, intervalElapsed, totalElapsed time.Duration) {
-	var procs []procEntry
-	for name, ps := range processStats {
-		procs = append(procs, procEntry{name, ps})
+func (d *Display) renderProcessSummary(buf *strings.Builder, procSyscallStats map[string]map[uint32]*syscallStats, totalElapsed time.Duration) {
+	var entries []procSyscallEntry
+	for name, fm := range procSyscallStats {
+		for id, ss := range fm {
+			sname := syscallNames[id]
+			if sname == "" {
+				sname = fmt.Sprintf("sys_%d", id)
+			}
+			entries = append(entries, procSyscallEntry{
+				label: name + "/" + sname,
+				stats: ss,
+			})
+		}
 	}
+
+	// Sort by lifetime count desc, then alphabetically by label
+	sort.Slice(entries, func(i, j int) bool {
+		ci := entries[i].stats.lifetimeStats.count
+		cj := entries[j].stats.lifetimeStats.count
+		if ci != cj {
+			return ci > cj
+		}
+		return entries[i].label < entries[j].label
+	})
 
 	nTop := d.topN
-	if nTop > len(procs) {
-		nTop = len(procs)
+	if nTop > len(entries) {
+		nTop = len(entries)
 	}
 
-	sectionHeader(buf, fmt.Sprintf("Processes (top %d)", d.topN), summaryLineWidth)
-
-	// -- Interval --
-	intervalSecs := intervalElapsed.Seconds()
-
-	sort.Slice(procs, func(i, j int) bool {
-		return procs[i].stats.intervalStats.count > procs[j].stats.intervalStats.count
-	})
-	topSlice := procs[:nTop]
-	otherSlice := procs[nTop:]
-
-	fmt.Fprintf(buf, "%-15s │ %8s %8s %8s %8s %8s │ %9s %9s\n",
-		"INTERVAL", "avg", "p50", "p90", "p99", "max", "samples", "rate")
-	buf.WriteString(strings.Repeat("-", summaryLineWidth))
-	buf.WriteString("\n")
-
-	for _, p := range topSlice {
-		renderSummaryRow(buf, p.name, p.stats.intervalStats, p.stats.intervalSketch, intervalSecs)
-	}
-	if len(otherSlice) > 0 {
-		merged := newSyscallStats()
-		for _, p := range otherSlice {
-			merged.MergeFrom(p.stats)
-		}
-		renderSummaryRow(buf, fmt.Sprintf("[%d others]", len(otherSlice)), merged.intervalStats, merged.intervalSketch, intervalSecs)
-	}
-
-	buf.WriteString("\n")
-
-	// -- Lifetime --
 	totalSecs := totalElapsed.Seconds()
 
-	sort.Slice(procs, func(i, j int) bool {
-		return procs[i].stats.lifetimeStats.count > procs[j].stats.lifetimeStats.count
-	})
-	topSlice = procs[:nTop]
-	otherSlice = procs[nTop:]
+	sectionHeader(buf, fmt.Sprintf("Process × Syscall (top %d)", d.topN), summaryLineWidth)
 
-	fmt.Fprintf(buf, "%-15s │ %8s %8s %8s %8s %8s │ %9s %9s\n",
+	fmt.Fprintf(buf, "%-24s │ %8s %8s %8s %8s %8s │ %9s %9s\n",
 		"LIFETIME", "avg", "p50", "p90", "p99", "max", "samples", "rate")
 	buf.WriteString(strings.Repeat("-", summaryLineWidth))
 	buf.WriteString("\n")
 
-	for _, p := range topSlice {
-		renderSummaryRow(buf, p.name, p.stats.lifetimeStats, p.stats.lifetimeSketch, totalSecs)
+	topSlice := entries[:nTop]
+	otherSlice := entries[nTop:]
+
+	for _, e := range topSlice {
+		renderSummaryRow(buf, e.label, e.stats.lifetimeStats, e.stats.lifetimeSketch, totalSecs)
 	}
 	if len(otherSlice) > 0 {
 		merged := newSyscallStats()
-		for _, p := range otherSlice {
-			merged.MergeFrom(p.stats)
+		for _, e := range otherSlice {
+			merged.MergeFrom(e.stats)
 		}
 		renderSummaryRow(buf, fmt.Sprintf("[%d others]", len(otherSlice)), merged.lifetimeStats, merged.lifetimeSketch, totalSecs)
 	}
@@ -715,14 +683,14 @@ func (d *Display) renderProcessSummary(buf *strings.Builder, processStats map[st
 func renderSummaryRow(buf *strings.Builder, name string, st *simpleStats, sketch *ddsketch.DDSketch, secs float64) {
 	n := st.count
 	if n == 0 {
-		fmt.Fprintf(buf, "%-15s │ %8s %8s %8s %8s %8s │ %9s %9s\n",
+		fmt.Fprintf(buf, "%-24s │ %8s %8s %8s %8s %8s │ %9s %9s\n",
 			name, "-", "-", "-", "-", "-", "0", "-")
 		return
 	}
 	p50, _ := sketch.GetValueAtQuantile(0.50)
 	p90, _ := sketch.GetValueAtQuantile(0.90)
 	p99, _ := sketch.GetValueAtQuantile(0.99)
-	fmt.Fprintf(buf, "%-15s │ %s %s %s %s %s │ %9s %9s\n",
+	fmt.Fprintf(buf, "%-24s │ %s %s %s %s %s │ %9s %9s\n",
 		name,
 		formatLatencyPadded(st.Avg()),
 		formatLatencyPadded(int64(p50)),
@@ -837,7 +805,7 @@ func main() {
 				return
 			case <-displayTicker.C:
 				snap := state.Snapshot()
-				if len(snap.processStats) > 0 {
+				if len(snap.procSyscallStats) > 0 {
 					display.render(snap, *interval)
 				}
 			}
