@@ -42,7 +42,7 @@ const (
 var (
 	interval    = flag.Duration("i", 10*time.Second, "stats reset interval")
 	focusProcs  = flag.String("c", "storagenode", "focus processes for per-syscall detail (comma-separated, empty=none)")
-	topProcs    = flag.Int("n", 25, "top N process/syscall rows to show in summary")
+	topProcs    = flag.Int("n", 28, "top N process/syscall rows per column in summary")
 	syscallList = flag.String("s", "pread64,pwrite64,fsync,fdatasync,read,write", "comma-separated syscalls to trace")
 	batch       = flag.Bool("batch", false, "batch mode (no screen clearing)")
 )
@@ -648,49 +648,98 @@ func (d *Display) renderProcessSummary(buf *strings.Builder, procSyscallStats ma
 		return entries[i].label < entries[j].label
 	})
 
-	nTop := d.topN
-	if nTop > len(entries) {
-		nTop = len(entries)
+	totalSecs := totalElapsed.Seconds()
+	nPerCol := d.topN // rows per column
+	totalShown := nPerCol * 2
+	if totalShown > len(entries) {
+		totalShown = len(entries)
 	}
 
-	totalSecs := totalElapsed.Seconds()
+	// Two-column width: left column + " │ " + right column
+	dualWidth := summaryLineWidth + 3 + summaryLineWidth
 
-	sectionHeader(buf, fmt.Sprintf("Process × Syscall (top %d)", d.topN), summaryLineWidth)
+	sectionHeader(buf, fmt.Sprintf("Process × Syscall (top %d)", totalShown), dualWidth)
 
-	fmt.Fprintf(buf, "%-24s │ %8s %8s %8s %8s %8s │ %9s %9s\n",
+	// Header row (two columns)
+	hdr := fmt.Sprintf("%-24s │ %8s %8s %8s %8s %8s │ %9s %9s",
 		"LIFETIME", "avg", "p50", "p90", "p99", "max", "samples", "rate")
-	buf.WriteString(strings.Repeat("-", summaryLineWidth))
+	fmt.Fprintf(buf, "%s │ %s\n", hdr, hdr)
+	buf.WriteString(strings.Repeat("-", dualWidth))
 	buf.WriteString("\n")
 
-	topSlice := entries[:nTop]
-	otherSlice := entries[nTop:]
-
-	for _, e := range topSlice {
-		renderSummaryRow(buf, e.label, e.stats.lifetimeStats, e.stats.lifetimeSketch, totalSecs)
+	// Split entries into left and right columns
+	leftEnd := nPerCol
+	if leftEnd > len(entries) {
+		leftEnd = len(entries)
 	}
-	if len(otherSlice) > 0 {
-		merged := newSyscallStats()
-		for _, e := range otherSlice {
-			merged.MergeFrom(e.stats)
+	rightStart := nPerCol
+	rightEnd := nPerCol * 2
+	if rightEnd > len(entries) {
+		rightEnd = len(entries)
+	}
+
+	leftSlice := entries[:leftEnd]
+	var rightSlice []procSyscallEntry
+	if rightStart < len(entries) {
+		rightSlice = entries[rightStart:rightEnd]
+	}
+
+	// Determine "others" for entries beyond shown
+	var otherSlice []procSyscallEntry
+	if rightEnd < len(entries) {
+		otherSlice = entries[rightEnd:]
+	}
+
+	// Render rows side by side
+	maxRows := len(leftSlice)
+	if len(rightSlice) > maxRows {
+		maxRows = len(rightSlice)
+	}
+	// Add one row for "others" if needed
+	hasOthers := len(otherSlice) > 0
+	if hasOthers {
+		maxRows++ // extra row for [N others] on right side
+	}
+
+	for i := 0; i < maxRows; i++ {
+		var leftStr, rightStr string
+
+		if i < len(leftSlice) {
+			leftStr = formatSummaryRow(leftSlice[i].label, leftSlice[i].stats.lifetimeStats, leftSlice[i].stats.lifetimeSketch, totalSecs)
+		} else {
+			leftStr = strings.Repeat(" ", summaryLineWidth)
 		}
-		renderSummaryRow(buf, fmt.Sprintf("[%d others]", len(otherSlice)), merged.lifetimeStats, merged.lifetimeSketch, totalSecs)
+
+		if i < len(rightSlice) {
+			rightStr = formatSummaryRow(rightSlice[i].label, rightSlice[i].stats.lifetimeStats, rightSlice[i].stats.lifetimeSketch, totalSecs)
+		} else if i == len(rightSlice) && hasOthers {
+			// Show [N others] as last row on right
+			merged := newSyscallStats()
+			for _, e := range otherSlice {
+				merged.MergeFrom(e.stats)
+			}
+			rightStr = formatSummaryRow(fmt.Sprintf("[%d others]", len(otherSlice)), merged.lifetimeStats, merged.lifetimeSketch, totalSecs)
+		} else {
+			rightStr = strings.Repeat(" ", summaryLineWidth)
+		}
+
+		fmt.Fprintf(buf, "%s │ %s\n", leftStr, rightStr)
 	}
 
-	buf.WriteString(strings.Repeat("=", summaryLineWidth))
+	buf.WriteString(strings.Repeat("=", dualWidth))
 	buf.WriteString("\n")
 }
 
-func renderSummaryRow(buf *strings.Builder, name string, st *simpleStats, sketch *ddsketch.DDSketch, secs float64) {
+func formatSummaryRow(name string, st *simpleStats, sketch *ddsketch.DDSketch, secs float64) string {
 	n := st.count
 	if n == 0 {
-		fmt.Fprintf(buf, "%-24s │ %8s %8s %8s %8s %8s │ %9s %9s\n",
+		return fmt.Sprintf("%-24s │ %8s %8s %8s %8s %8s │ %9s %9s",
 			name, "-", "-", "-", "-", "-", "0", "-")
-		return
 	}
 	p50, _ := sketch.GetValueAtQuantile(0.50)
 	p90, _ := sketch.GetValueAtQuantile(0.90)
 	p99, _ := sketch.GetValueAtQuantile(0.99)
-	fmt.Fprintf(buf, "%-24s │ %s %s %s %s %s │ %9s %9s\n",
+	return fmt.Sprintf("%-24s │ %s %s %s %s %s │ %9s %9s",
 		name,
 		formatLatencyPadded(st.Avg()),
 		formatLatencyPadded(int64(p50)),
