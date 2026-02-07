@@ -129,18 +129,6 @@ var syscallNames = [451]string{
 	449: "futex_waitv", 450: "set_mempolicy_home_node",
 }
 
-// syscallNums is the reverse map (name → number), built from syscallNames.
-// Used for parsing the -s flag.
-var syscallNums map[string]uint32
-
-func init() {
-	syscallNums = make(map[string]uint32, 256)
-	for i, name := range syscallNames {
-		if name != "" {
-			syscallNums[name] = uint32(i)
-		}
-	}
-}
 
 func syscallName(id uint32) string {
 	if int(id) < len(syscallNames) && syscallNames[id] != "" {

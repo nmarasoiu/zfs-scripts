@@ -7,7 +7,7 @@
 // -c filters to specified processes (BPF-level). Without -c, traces all.
 // One unified table output, sorted by sample count.
 //
-// Usage: syscall-latency [-c procs] [-n top_n] [-s syscalls]
+// Usage: syscall-latency [-c procs] [-n top_n]
 //
 //go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -target bpfel -type latency_event bpf bpf/syscall_latency.c -- -I/usr/include -I.
 
@@ -39,13 +39,14 @@ import (
 const (
 	displayInterval = 100 * time.Millisecond // 10 FPS display refresh
 	maxLatencyUs    = 60_000_000             // 60 seconds in µs - clamp values above this
+	flushSize       = 1024
+	flushInterval   = 10 * time.Millisecond
 )
 
 var (
-	focusProcs  = flag.String("c", "", "only trace these processes (comma-separated, empty=all)")
-	topProcs    = flag.Int("n", 0, "top N rows to display (0=all)")
-	syscallList = flag.String("s", "all", "comma-separated syscalls to trace (or 'all')")
-	batch       = flag.Bool("batch", false, "batch mode (no screen clearing)")
+	focusProcs = flag.String("c", "", "only trace these processes (comma-separated, empty=all)")
+	topProcs   = flag.Int("n", 0, "top N rows to display (0=all)")
+	batch      = flag.Bool("batch", false, "batch mode (no screen clearing)")
 	pollSleep       = flag.Duration("poll-sleep", 50*time.Microsecond, "ring buffer poll sleep when empty")
 	cleanupInterval = flag.Duration("cleanup-interval", 5*time.Second, "how often to scan BPF hash map for stale entries")
 	staleAge        = flag.Duration("stale-age", 10*time.Second, "age threshold to count an in-flight entry as stale")
@@ -282,6 +283,14 @@ func (s *State) RecordBatch(batch []pendingEvent) {
 	s.mu.Unlock()
 }
 
+// runtimeMetrics groups atomic counters shared between goroutines.
+type runtimeMetrics struct {
+	drops    atomic.Uint64
+	evicted  atomic.Uint64
+	mapUsed  atomic.Int64
+	mapStale atomic.Int64
+}
+
 // Display handles rendering
 type Display struct {
 	batchMode      bool
@@ -321,7 +330,41 @@ func sectionHeader(buf *strings.Builder, title string, width int) {
 	buf.WriteString("\n")
 }
 
-func (d *Display) render(state *State, drops uint64, evicted uint64, mapUsed int64, mapStale int64, mapCap int64) {
+type tableEntry struct {
+	label string
+	ss    *syscallStats
+}
+
+// collectEntries builds a sorted list of table entries from per-process stats.
+// When alwaysPrefix is true, labels are always "proc/syscall"; otherwise the
+// proc prefix is omitted when there is exactly one process.
+func collectEntries(procStats map[string]map[uint32]*syscallStats, alwaysPrefix bool) []tableEntry {
+	singleProc := !alwaysPrefix && len(procStats) == 1
+
+	var entries []tableEntry
+	for proc, fm := range procStats {
+		for id, ss := range fm {
+			label := syscallName(id)
+			if !singleProc {
+				label = proc + "/" + label
+			}
+			entries = append(entries, tableEntry{label, ss})
+		}
+	}
+
+	sort.Slice(entries, func(i, j int) bool {
+		ci := entries[i].ss.stats.count
+		cj := entries[j].ss.stats.count
+		if ci != cj {
+			return ci > cj
+		}
+		return entries[i].label < entries[j].label
+	})
+
+	return entries
+}
+
+func (d *Display) render(state *State, metrics *runtimeMetrics, mapCap int64) {
 	var buf strings.Builder
 	now := time.Now()
 
@@ -351,7 +394,18 @@ func (d *Display) render(state *State, drops uint64, evicted uint64, mapUsed int
 
 	state.mu.Unlock()
 
-	// Footer (lock-free: computed values + ring stats via atomics)
+	d.renderFooter(&buf, elapsed, totalSamples, nProcs, metrics, mapCap)
+
+	d.resetCursor()
+	fmt.Print(buf.String())
+}
+
+func (d *Display) renderFooter(buf *strings.Builder, elapsed time.Duration, totalSamples uint64, nProcs int, metrics *runtimeMetrics, mapCap int64) {
+	drops := metrics.drops.Load()
+	evicted := metrics.evicted.Load()
+	mapUsed := metrics.mapUsed.Load()
+	mapStale := metrics.mapStale.Load()
+
 	rate := float64(0)
 	if elapsed.Seconds() > 0 {
 		rate = float64(totalSamples) / elapsed.Seconds()
@@ -384,50 +438,21 @@ func (d *Display) render(state *State, drops uint64, evicted uint64, mapUsed int
 			formatCount(mapUsed), formatCount(mapCap), pct,
 			formatCount(mapStale), formatCount(int64(evicted)))
 	}
-	fmt.Fprintf(&buf, "Total: %s syscalls | Rate: %s/s | Processes: %d | Drops: %s (%s/s)%s%s\n",
+	fmt.Fprintf(buf, "Total: %s syscalls | Rate: %s/s | Processes: %d | Drops: %s (%s/s)%s%s\n",
 		formatCount(int64(totalSamples)), formatCount(int64(rate)), nProcs,
 		formatCount(int64(drops)), formatCount(int64(dropRate)), mapInfo, ringInfo)
 
 	if d.batchMode {
 		buf.WriteString("\n")
 	}
-
-	d.resetCursor()
-	fmt.Print(buf.String())
-}
-
-type tableEntry struct {
-	label string
-	ss    *syscallStats
 }
 
 func (d *Display) renderTable(buf *strings.Builder, procStats map[string]map[uint32]*syscallStats) {
-	singleProc := len(procStats) == 1
-
-	var entries []tableEntry
-	for proc, fm := range procStats {
-		for id, ss := range fm {
-			label := syscallName(id)
-			if !singleProc {
-				label = proc + "/" + label
-			}
-			entries = append(entries, tableEntry{label, ss})
-		}
-	}
+	entries := collectEntries(procStats, false)
 
 	if len(entries) == 0 {
 		return
 	}
-
-	// Sort by samples desc, then label
-	sort.Slice(entries, func(i, j int) bool {
-		ci := entries[i].ss.stats.count
-		cj := entries[j].ss.stats.count
-		if ci != cj {
-			return ci > cj
-		}
-		return entries[i].label < entries[j].label
-	})
 
 	// Limit to top N (0 = all)
 	shown := len(entries)
@@ -505,25 +530,7 @@ func renderDetailRow(buf *strings.Builder, name string, st *simpleStats, sketch 
 const summaryLineWidth = 97
 
 func (d *Display) renderSummary(buf *strings.Builder, procStats map[string]map[uint32]*syscallStats, elapsed time.Duration) {
-	var entries []tableEntry
-	for name, fm := range procStats {
-		for id, ss := range fm {
-			entries = append(entries, tableEntry{
-				label: name + "/" + syscallName(id),
-				ss:    ss,
-			})
-		}
-	}
-
-	// Sort by samples desc, then label
-	sort.Slice(entries, func(i, j int) bool {
-		ci := entries[i].ss.stats.count
-		cj := entries[j].ss.stats.count
-		if ci != cj {
-			return ci > cj
-		}
-		return entries[i].label < entries[j].label
-	})
+	entries := collectEntries(procStats, true)
 
 	totalSecs := elapsed.Seconds()
 	nPerCol := d.topN // rows per column
@@ -609,92 +616,102 @@ func formatSummaryRow(name string, st *simpleStats, sketch *ddsketch.DDSketch, s
 	)
 }
 
+// parseFocusList parses the -c flag into a deduplicated list of process names,
+// truncated to 15 chars to match BPF TASK_COMM_LEN-1.
+func parseFocusList() []string {
+	if *focusProcs == "" {
+		return nil
+	}
+	seen := make(map[string]bool)
+	var list []string
+	for _, name := range strings.Split(*focusProcs, ",") {
+		name = strings.TrimSpace(name)
+		if len(name) > 15 {
+			name = name[:15]
+		}
+		if name != "" && !seen[name] {
+			seen[name] = true
+			list = append(list, name)
+		}
+	}
+	return list
+}
+
+func configureBPFFilters(objs *bpfObjects, focusList []string) {
+	for _, name := range focusList {
+		var comm [16]byte
+		copy(comm[:], name)
+		var val uint8 = 1
+		if err := objs.TargetComms.Put(comm, val); err != nil {
+			log.Fatalf("Failed to add comm filter %q: %v", name, err)
+		}
+	}
+}
+
+// runReader busy-polls the ring buffer, batches events, and flushes to state.
+func runReader(rd *RingPollReader, state *State) {
+	var rec PollRecord
+	eventSize := int(unsafe.Sizeof(bpfLatencyEvent{}))
+	batch := make([]pendingEvent, 0, flushSize)
+	lastFlush := time.Now()
+
+	for rd.ReadInto(&rec) {
+		if len(rec.RawSample) < eventSize {
+			continue
+		}
+		event := *(*bpfLatencyEvent)(unsafe.Pointer(&rec.RawSample[0]))
+		latencyUs := int64(event.LatencyNs / 1000)
+		if latencyUs < 1 {
+			latencyUs = 1
+		}
+		if latencyUs > maxLatencyUs {
+			latencyUs = maxLatencyUs
+		}
+		batch = append(batch, pendingEvent{commString(event.Comm), event.SyscallId, latencyUs})
+
+		if len(batch) >= flushSize || time.Since(lastFlush) >= flushInterval {
+			state.RecordBatch(batch)
+			rd.Commit()
+			batch = batch[:0]
+			lastFlush = time.Now()
+		}
+	}
+	if len(batch) > 0 {
+		state.RecordBatch(batch)
+		rd.Commit()
+	}
+}
+
 func main() {
 	flag.Parse()
-
-	// Parse focus processes (truncate to 15 chars to match BPF comm length)
-	focusSet := make(map[string]bool)
-	var focusList []string
-	if *focusProcs != "" {
-		for _, name := range strings.Split(*focusProcs, ",") {
-			name = strings.TrimSpace(name)
-			if len(name) > 15 {
-				name = name[:15]
-			}
-			if name != "" && !focusSet[name] {
-				focusSet[name] = true
-				focusList = append(focusList, name)
-			}
-		}
-	}
-
-	// Parse syscall list
-	traceAll := false
-	var traceSyscalls []uint32
-	trimmed := strings.TrimSpace(*syscallList)
-	if strings.EqualFold(trimmed, "all") {
-		traceAll = true
-	} else {
-		for _, name := range strings.Split(trimmed, ",") {
-			name = strings.TrimSpace(name)
-			if name == "" {
-				continue
-			}
-			if num, ok := syscallNums[name]; ok {
-				traceSyscalls = append(traceSyscalls, num)
-			} else {
-				log.Fatalf("Unknown syscall: %s", name)
-			}
-		}
-		if len(traceSyscalls) == 0 {
-			log.Fatal("No syscalls to trace")
-		}
-	}
+	focusList := parseFocusList()
 
 	// Remove memlock limit for eBPF
 	if err := rlimit.RemoveMemlock(); err != nil {
 		log.Fatalf("Failed to remove memlock limit: %v", err)
 	}
 
-	// Load eBPF objects
+	// Load eBPF spec and rewrite constants before loading into kernel.
+	// When use_comm_filter is 0 (default), the verifier dead-code-eliminates
+	// the comm filter branch — zero overhead in the hot path.
+	spec, err := loadBpf()
+	if err != nil {
+		log.Fatalf("Failed to load eBPF spec: %v", err)
+	}
+	if len(focusList) > 0 {
+		if err := spec.RewriteConstants(map[string]interface{}{
+			"use_comm_filter": uint8(1),
+		}); err != nil {
+			log.Fatalf("Failed to rewrite BPF constants: %v", err)
+		}
+	}
 	objs := bpfObjects{}
-	if err := loadBpfObjects(&objs, nil); err != nil {
+	if err := spec.LoadAndAssign(&objs, nil); err != nil {
 		log.Fatalf("Failed to load eBPF objects: %v", err)
 	}
 	defer objs.Close()
 
-	// Set up syscall filter
-	if traceAll {
-		var key uint32
-		var enabled uint8 = 1
-		if err := objs.TraceAll.Put(key, enabled); err != nil {
-			log.Fatalf("Failed to set trace_all flag: %v", err)
-		}
-	} else {
-		for _, num := range traceSyscalls {
-			var enabled uint8 = 1
-			if err := objs.SyscallFilter.Put(num, enabled); err != nil {
-				log.Fatalf("Failed to add syscall to filter: %v", err)
-			}
-		}
-	}
-
-	// Set up BPF comm filter when -c is specified
-	if len(focusList) > 0 {
-		var key uint32
-		var enabled uint8 = 1
-		if err := objs.CommFilterEnabled.Put(key, enabled); err != nil {
-			log.Fatalf("Failed to enable comm filter: %v", err)
-		}
-		for _, name := range focusList {
-			var comm [16]byte
-			copy(comm[:], name)
-			var val uint8 = 1
-			if err := objs.TargetComms.Put(comm, val); err != nil {
-				log.Fatalf("Failed to add comm filter %q: %v", name, err)
-			}
-		}
-	}
+	configureBPFFilters(&objs, focusList)
 
 	// Attach tracepoints
 	tpEnter, err := link.Tracepoint("raw_syscalls", "sys_enter", objs.TraceSyscallEnter, nil)
@@ -723,6 +740,8 @@ func main() {
 		topN:           *topProcs,
 		ring:           rd,
 	}
+	metrics := &runtimeMetrics{}
+	mapMaxVal := int64(objs.StartTimes.MaxEntries())
 
 	// Signal handling
 	done := make(chan struct{})
@@ -737,51 +756,12 @@ func main() {
 	}()
 
 	// Reader goroutine: busy-polls ring buffer, batches events, flushes under single Lock
-	const flushSize = 1024
-	const flushInterval = 10 * time.Millisecond
-
 	var readerDone sync.WaitGroup
 	readerDone.Add(1)
 	go func() {
 		defer readerDone.Done()
-		var rec PollRecord
-		eventSize := int(unsafe.Sizeof(bpfLatencyEvent{}))
-		batch := make([]pendingEvent, 0, flushSize)
-		lastFlush := time.Now()
-
-		for rd.ReadInto(&rec) {
-			if len(rec.RawSample) < eventSize {
-				continue
-			}
-			event := *(*bpfLatencyEvent)(unsafe.Pointer(&rec.RawSample[0]))
-			latencyUs := int64(event.LatencyNs / 1000)
-			if latencyUs < 1 {
-				latencyUs = 1
-			}
-			if latencyUs > maxLatencyUs {
-				latencyUs = maxLatencyUs
-			}
-			batch = append(batch, pendingEvent{commString(event.Comm), event.SyscallId, latencyUs})
-
-			if len(batch) >= flushSize || time.Since(lastFlush) >= flushInterval {
-				state.RecordBatch(batch)
-				rd.Commit()
-				batch = batch[:0]
-				lastFlush = time.Now()
-			}
-		}
-		if len(batch) > 0 {
-			state.RecordBatch(batch)
-			rd.Commit()
-		}
+		runReader(rd, state)
 	}()
-
-	// Drop counter: read from kernel map periodically by display goroutine
-	var totalDrops atomic.Uint64
-	var totalEvicted atomic.Uint64
-	var mapEntries atomic.Int64
-	var mapStale atomic.Int64
-	mapMaxVal := int64(objs.StartTimes.MaxEntries())
 
 	// Display goroutine (10 FPS)
 	displayTicker := time.NewTicker(displayInterval)
@@ -792,8 +772,8 @@ func main() {
 			case <-done:
 				return
 			case <-displayTicker.C:
-				readDropCount(objs.DropCount, &totalDrops)
-				display.render(state, totalDrops.Load(), totalEvicted.Load(), mapEntries.Load(), mapStale.Load(), mapMaxVal)
+				readDropCount(objs.DropCount, &metrics.drops)
+				display.render(state, metrics, mapMaxVal)
 			}
 		}
 	}()
@@ -808,39 +788,28 @@ func main() {
 				return
 			case <-cleanupTicker.C:
 				total, stale, evicted := cleanStaleEntries(objs.StartTimes, objs.SyscallIds, *staleAge, *evictAge)
-				mapEntries.Store(int64(total - evicted))
-				mapStale.Store(int64(stale - evicted))
+				metrics.mapUsed.Store(int64(total - evicted))
+				metrics.mapStale.Store(int64(stale - evicted))
 				if evicted > 0 {
-					totalEvicted.Add(uint64(evicted))
+					metrics.evicted.Add(uint64(evicted))
 				}
 			}
 		}
 	}()
 
-	var syscallLabel string
-	if traceAll {
-		syscallLabel = "ALL"
-	} else {
-		syscallStr := make([]string, len(traceSyscalls))
-		for i, num := range traceSyscalls {
-			syscallStr[i] = syscallName(num)
-		}
-		syscallLabel = strings.Join(syscallStr, ",")
-	}
 	if len(focusList) > 0 {
-		log.Printf("Tracing syscalls: %s | processes: %s (BPF-filtered) | top %d rows",
-			syscallLabel, strings.Join(focusList, ","), *topProcs)
+		log.Printf("Tracing all syscalls | processes: %s (BPF-filtered) | top %d rows",
+			strings.Join(focusList, ","), *topProcs)
 	} else {
-		log.Printf("Tracing syscalls: %s | all processes | top %d rows",
-			syscallLabel, *topProcs)
+		log.Printf("Tracing all syscalls | all processes | top %d rows", *topProcs)
 	}
 
 	// Wait for signal, then drain
 	<-done
 	readerDone.Wait()
 
-	readDropCount(objs.DropCount, &totalDrops)
-	display.render(state, totalDrops.Load(), totalEvicted.Load(), mapEntries.Load(), mapStale.Load(), mapMaxVal)
+	readDropCount(objs.DropCount, &metrics.drops)
+	display.render(state, metrics, mapMaxVal)
 }
 
 // ktimeNow returns the current CLOCK_MONOTONIC time in nanoseconds,

@@ -15,10 +15,7 @@ import (
 type bpfLatencyEvent struct {
 	LatencyNs uint64
 	SyscallId uint32
-	Pid       uint32
-	Tid       uint32
-	_         [4]byte
-	Ret       int64
+	Pad       uint32
 	Comm      [16]int8
 }
 
@@ -71,14 +68,11 @@ type bpfProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type bpfMapSpecs struct {
-	CommFilterEnabled *ebpf.MapSpec `ebpf:"comm_filter_enabled"`
-	DropCount         *ebpf.MapSpec `ebpf:"drop_count"`
-	Events            *ebpf.MapSpec `ebpf:"events"`
-	StartTimes        *ebpf.MapSpec `ebpf:"start_times"`
-	SyscallFilter     *ebpf.MapSpec `ebpf:"syscall_filter"`
-	SyscallIds        *ebpf.MapSpec `ebpf:"syscall_ids"`
-	TargetComms       *ebpf.MapSpec `ebpf:"target_comms"`
-	TraceAll          *ebpf.MapSpec `ebpf:"trace_all"`
+	DropCount   *ebpf.MapSpec `ebpf:"drop_count"`
+	Events      *ebpf.MapSpec `ebpf:"events"`
+	StartTimes  *ebpf.MapSpec `ebpf:"start_times"`
+	SyscallIds  *ebpf.MapSpec `ebpf:"syscall_ids"`
+	TargetComms *ebpf.MapSpec `ebpf:"target_comms"`
 }
 
 // bpfObjects contains all objects after they have been loaded into the kernel.
@@ -100,26 +94,20 @@ func (o *bpfObjects) Close() error {
 //
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type bpfMaps struct {
-	CommFilterEnabled *ebpf.Map `ebpf:"comm_filter_enabled"`
-	DropCount         *ebpf.Map `ebpf:"drop_count"`
-	Events            *ebpf.Map `ebpf:"events"`
-	StartTimes        *ebpf.Map `ebpf:"start_times"`
-	SyscallFilter     *ebpf.Map `ebpf:"syscall_filter"`
-	SyscallIds        *ebpf.Map `ebpf:"syscall_ids"`
-	TargetComms       *ebpf.Map `ebpf:"target_comms"`
-	TraceAll          *ebpf.Map `ebpf:"trace_all"`
+	DropCount   *ebpf.Map `ebpf:"drop_count"`
+	Events      *ebpf.Map `ebpf:"events"`
+	StartTimes  *ebpf.Map `ebpf:"start_times"`
+	SyscallIds  *ebpf.Map `ebpf:"syscall_ids"`
+	TargetComms *ebpf.Map `ebpf:"target_comms"`
 }
 
 func (m *bpfMaps) Close() error {
 	return _BpfClose(
-		m.CommFilterEnabled,
 		m.DropCount,
 		m.Events,
 		m.StartTimes,
-		m.SyscallFilter,
 		m.SyscallIds,
 		m.TargetComms,
-		m.TraceAll,
 	)
 }
 

@@ -13,13 +13,16 @@ char LICENSE[] SEC("license") = "GPL";
 #define TASK_COMM_LEN 16
 #define MAX_ENTRIES 65536
 
+// Compile-time constant rewritten by userspace before loading.
+// When 0 (default), the verifier dead-code-eliminates the comm filter
+// branch, giving zero overhead in the hot path.
+const volatile __u8 use_comm_filter = 0;
+
 // Event sent to userspace
 struct latency_event {
     __u64 latency_ns;
     __u32 syscall_id;
-    __u32 pid;
-    __u32 tid;
-    __s64 ret;
+    __u32 _pad;
     char comm[TASK_COMM_LEN];
 };
 
@@ -48,14 +51,6 @@ struct {
     __uint(max_entries, 8 * 1024 * 1024);
 } events SEC(".maps");
 
-// Comm filter: if [0]==1, only trace processes in target_comms
-struct {
-    __uint(type, BPF_MAP_TYPE_ARRAY);
-    __uint(max_entries, 1);
-    __type(key, __u32);
-    __type(value, __u8);
-} comm_filter_enabled SEC(".maps");
-
 // Target process names (hash lookup for O(1) matching)
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
@@ -63,14 +58,6 @@ struct {
     __type(key, char[TASK_COMM_LEN]);
     __type(value, __u8);
 } target_comms SEC(".maps");
-
-// Syscall filter: which syscalls to trace
-struct {
-    __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 64);
-    __type(key, __u32);  // syscall_id
-    __type(value, __u8); // enabled
-} syscall_filter SEC(".maps");
 
 // Drop counter: incremented when ring buffer is full
 struct {
@@ -80,35 +67,13 @@ struct {
     __type(value, __u64);
 } drop_count SEC(".maps");
 
-// Trace-all flag: if [0]==1, skip syscall_filter check
-struct {
-    __uint(type, BPF_MAP_TYPE_ARRAY);
-    __uint(max_entries, 1);
-    __type(key, __u32);
-    __type(value, __u8);
-} trace_all SEC(".maps");
-
-static __always_inline int should_trace(__u32 syscall_id) {
-    __u32 zero = 0;
-
-    // Check syscall filter
-    __u8 *all = bpf_map_lookup_elem(&trace_all, &zero);
-    if (!all || *all == 0) {
-        __u8 *enabled = bpf_map_lookup_elem(&syscall_filter, &syscall_id);
-        if (!enabled || *enabled == 0) {
-            return 0;
-        }
-    }
-
-    // Check process name filter
-    __u8 *filter_on = bpf_map_lookup_elem(&comm_filter_enabled, &zero);
-    if (filter_on && *filter_on) {
+static __always_inline int should_trace(void) {
+    if (use_comm_filter) {
         char comm[TASK_COMM_LEN];
         bpf_get_current_comm(&comm, sizeof(comm));
         __u8 *match = bpf_map_lookup_elem(&target_comms, comm);
         if (!match) return 0;
     }
-
     return 1;
 }
 
@@ -122,7 +87,7 @@ int trace_syscall_enter(struct trace_event_raw_sys_enter *ctx) {
     if (syscall_id == 60 || syscall_id == 231)
         return 0;
 
-    if (!should_trace(syscall_id)) {
+    if (!should_trace()) {
         return 0;
     }
 
@@ -165,9 +130,6 @@ int trace_syscall_exit(struct trace_event_raw_sys_exit *ctx) {
 
     event->latency_ns = latency;
     event->syscall_id = *syscall_id;
-    event->pid = bpf_get_current_pid_tgid() >> 32;
-    event->tid = tid;
-    event->ret = ctx->ret;
     bpf_get_current_comm(&event->comm, sizeof(event->comm));
 
     bpf_ringbuf_submit(event, BPF_RB_NO_WAKEUP);
