@@ -11,7 +11,7 @@
 char LICENSE[] SEC("license") = "GPL";
 
 #define TASK_COMM_LEN 16
-#define MAX_ENTRIES 10240
+#define MAX_ENTRIES 65536
 
 // Event sent to userspace
 struct latency_event {
@@ -118,6 +118,12 @@ static __always_inline int should_trace(__u32 syscall_id) {
 SEC("tracepoint/raw_syscalls/sys_enter")
 int trace_syscall_enter(struct trace_event_raw_sys_enter *ctx) {
     __u32 syscall_id = ctx->id;
+
+    // exit(60) and exit_group(231) never generate sys_exit (thread dies),
+    // so their entries leak in start_times/syscall_ids forever, eventually
+    // exhausting the hash map and silently blocking all new tracking.
+    if (syscall_id == 60 || syscall_id == 231)
+        return 0;
 
     if (!should_trace(syscall_id)) {
         return 0;

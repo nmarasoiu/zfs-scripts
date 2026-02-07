@@ -33,6 +33,7 @@ import (
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/rlimit"
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -504,7 +505,7 @@ func sectionHeader(buf *strings.Builder, title string, width int) {
 	buf.WriteString("\n")
 }
 
-func (d *Display) render(state *State, intervalDur time.Duration, drops uint64) {
+func (d *Display) render(state *State, intervalDur time.Duration, drops uint64, cleaned uint64) {
 	var buf strings.Builder
 	now := time.Now()
 
@@ -567,9 +568,13 @@ func (d *Display) render(state *State, intervalDur time.Duration, drops uint64) 
 			formatBytes(maxPend), formatBytes(int64(capBytes)), maxPct,
 			avg1, avg0, formatCount(last1), last0Str)
 	}
-	fmt.Fprintf(&buf, "Total: %s syscalls | Rate: %s/s | Processes: %d | Drops: %s (%s/s)%s\n",
+	cleanedInfo := ""
+	if cleaned > 0 {
+		cleanedInfo = fmt.Sprintf(" | Stale: %s", formatCount(int64(cleaned)))
+	}
+	fmt.Fprintf(&buf, "Total: %s syscalls | Rate: %s/s | Processes: %d | Drops: %s (%s/s)%s%s\n",
 		formatCount(int64(totalSamples)), formatCount(int64(rate)), nProcs,
-		formatCount(int64(drops)), formatCount(int64(dropRate)), ringInfo)
+		formatCount(int64(drops)), formatCount(int64(dropRate)), cleanedInfo, ringInfo)
 
 	if d.batchMode {
 		buf.WriteString("\n")
@@ -931,6 +936,7 @@ func main() {
 
 	// Drop counter: read from kernel map periodically by display goroutine
 	var totalDrops atomic.Uint64
+	var totalCleaned atomic.Uint64
 
 	// Display goroutine (10 FPS)
 	displayTicker := time.NewTicker(displayInterval)
@@ -943,7 +949,7 @@ func main() {
 			case <-displayTicker.C:
 				// Read drop counter from kernel
 				readDropCount(objs.DropCount, &totalDrops)
-				display.render(state, *interval, totalDrops.Load())
+				display.render(state, *interval, totalDrops.Load(), totalCleaned.Load())
 			}
 		}
 	}()
@@ -958,6 +964,25 @@ func main() {
 				return
 			case <-intervalTicker.C:
 				state.ResetIntervals()
+			}
+		}
+	}()
+
+	// Stale entry cleanup goroutine: purge start_times/syscall_ids entries
+	// older than 10s (handles threads killed without sys_exit, edge cases
+	// not covered by the exit/exit_group BPF filter).
+	cleanupTicker := time.NewTicker(5 * time.Second)
+	go func() {
+		defer cleanupTicker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-cleanupTicker.C:
+				cleaned := cleanStaleEntries(objs.StartTimes, objs.SyscallIds, 10*time.Second)
+				if cleaned > 0 {
+					totalCleaned.Add(uint64(cleaned))
+				}
 			}
 		}
 	}()
@@ -985,7 +1010,39 @@ func main() {
 	readerDone.Wait()
 
 	readDropCount(objs.DropCount, &totalDrops)
-	display.render(state, *interval, totalDrops.Load())
+	display.render(state, *interval, totalDrops.Load(), totalCleaned.Load())
+}
+
+// ktimeNow returns the current CLOCK_MONOTONIC time in nanoseconds,
+// matching bpf_ktime_get_ns() used by the BPF program.
+func ktimeNow() uint64 {
+	var ts unix.Timespec
+	unix.ClockGettime(unix.CLOCK_MONOTONIC, &ts)
+	return uint64(ts.Sec)*1_000_000_000 + uint64(ts.Nsec)
+}
+
+// cleanStaleEntries iterates start_times and deletes entries older than maxAge.
+// Also deletes corresponding entries from syscall_ids. Returns count cleaned.
+func cleanStaleEntries(startTimes, syscallIds *ebpf.Map, maxAge time.Duration) int {
+	now := ktimeNow()
+	threshold := now - uint64(maxAge.Nanoseconds())
+
+	var tid uint32
+	var startNs uint64
+	var toDelete []uint32
+
+	iter := startTimes.Iterate()
+	for iter.Next(&tid, &startNs) {
+		if startNs < threshold {
+			toDelete = append(toDelete, tid)
+		}
+	}
+
+	for _, tid := range toDelete {
+		startTimes.Delete(tid)
+		syscallIds.Delete(tid)
+	}
+	return len(toDelete)
 }
 
 func readDropCount(m *ebpf.Map, dst *atomic.Uint64) {
