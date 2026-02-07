@@ -596,6 +596,7 @@ func main() {
 
 	go func() {
 		<-sig
+		signal.Stop(sig) // restore default handler so second Ctrl+C force-kills
 		close(done)
 		rd.Close()
 	}()
@@ -613,7 +614,13 @@ func main() {
 				if err == ringbuf.ErrClosed {
 					return
 				}
-				continue
+				// After signal, any error means exit; don't spin
+				select {
+				case <-done:
+					return
+				default:
+					continue
+				}
 			}
 			if err := binary.Read(bytes.NewReader(record.RawSample), binary.LittleEndian, &event); err != nil {
 				continue
