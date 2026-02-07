@@ -1,7 +1,8 @@
 # Binaries
 zswap/zswap-stats
 zswap/zswap-stats-go
-usb-queue-monitor-v2
+usb-queue-monitor-v2/usb-queue-monitor-v2
+usb-queue-monitor-during-io/usb-queue-monitor-during-io
 usb-queue-monitor-stable
 zpool-latency/zpool-latency
 syscalls/syscall-latency
