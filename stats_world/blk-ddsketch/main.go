@@ -601,12 +601,11 @@ func main() {
 		rd.Close()
 	}()
 
-	// Event channel: drainer → consumer pipeline
-	eventCh := make(chan bpfLatencyEvent, 4096)
-
-	// Drainer goroutine: tight loop pulling from kernel ring buffer
+	// Reader goroutine: pulls from kernel ring buffer, processes events directly into State
+	var readerDone sync.WaitGroup
+	readerDone.Add(1)
 	go func() {
-		defer close(eventCh)
+		defer readerDone.Done()
 		var event bpfLatencyEvent
 		for {
 			record, err := rd.Read()
@@ -614,7 +613,6 @@ func main() {
 				if err == ringbuf.ErrClosed {
 					return
 				}
-				// After signal, any error means exit; don't spin
 				select {
 				case <-done:
 					return
@@ -625,20 +623,6 @@ func main() {
 			if err := binary.Read(bytes.NewReader(record.RawSample), binary.LittleEndian, &event); err != nil {
 				continue
 			}
-			select {
-			case eventCh <- event:
-			case <-done:
-				return
-			}
-		}
-	}()
-
-	// Consumer goroutine: processes events into State
-	var consumerDone sync.WaitGroup
-	consumerDone.Add(1)
-	go func() {
-		defer consumerDone.Done()
-		for event := range eventCh {
 			devName := lookupDevName(event.Dev)
 			if !isTrackedDevice(devName) {
 				continue
@@ -690,7 +674,7 @@ func main() {
 
 	// Wait for signal, then drain
 	<-done
-	consumerDone.Wait()
+	readerDone.Wait()
 
 	readDropCount(objs.DropCount, &totalDrops)
 	stats, startTime, lastReset := state.Snapshot()
