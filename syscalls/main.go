@@ -47,7 +47,10 @@ var (
 	topProcs    = flag.Int("n", 28, "top N process/syscall rows per column in summary")
 	syscallList = flag.String("s", "all", "comma-separated syscalls to trace (or 'all')")
 	batch       = flag.Bool("batch", false, "batch mode (no screen clearing)")
-	pollSleep   = flag.Duration("poll-sleep", 50*time.Microsecond, "ring buffer poll sleep when empty")
+	pollSleep       = flag.Duration("poll-sleep", 50*time.Microsecond, "ring buffer poll sleep when empty")
+	cleanupInterval = flag.Duration("cleanup-interval", 5*time.Second, "how often to scan BPF hash map for stale entries")
+	staleAge        = flag.Duration("stale-age", 10*time.Second, "age threshold to count an in-flight entry as stale")
+	evictAge        = flag.Duration("evict-age", 60*time.Second, "age threshold to evict (delete) a stale entry")
 )
 
 // x86_64 syscall numbers
@@ -505,7 +508,7 @@ func sectionHeader(buf *strings.Builder, title string, width int) {
 	buf.WriteString("\n")
 }
 
-func (d *Display) render(state *State, intervalDur time.Duration, drops uint64, cleaned uint64, mapUsed int64, mapCap int64) {
+func (d *Display) render(state *State, intervalDur time.Duration, drops uint64, evicted uint64, mapUsed int64, mapStale int64, mapCap int64) {
 	var buf strings.Builder
 	now := time.Now()
 
@@ -568,18 +571,16 @@ func (d *Display) render(state *State, intervalDur time.Duration, drops uint64, 
 			formatBytes(maxPend), formatBytes(int64(capBytes)), maxPct,
 			avg1, avg0, formatCount(last1), last0Str)
 	}
-	cleanedInfo := ""
-	if cleaned > 0 {
-		cleanedInfo = fmt.Sprintf(" | Stale: %s", formatCount(int64(cleaned)))
-	}
 	mapInfo := ""
 	if mapCap > 0 {
 		pct := float64(mapUsed) / float64(mapCap) * 100
-		mapInfo = fmt.Sprintf(" | Map: %s/%s (%4.1f%%)", formatCount(mapUsed), formatCount(mapCap), pct)
+		mapInfo = fmt.Sprintf(" | Map: %s/%s (%4.1f%%) stale:%s evict:%s",
+			formatCount(mapUsed), formatCount(mapCap), pct,
+			formatCount(mapStale), formatCount(int64(evicted)))
 	}
-	fmt.Fprintf(&buf, "Total: %s syscalls | Rate: %s/s | Processes: %d | Drops: %s (%s/s)%s%s%s\n",
+	fmt.Fprintf(&buf, "Total: %s syscalls | Rate: %s/s | Processes: %d | Drops: %s (%s/s)%s%s\n",
 		formatCount(int64(totalSamples)), formatCount(int64(rate)), nProcs,
-		formatCount(int64(drops)), formatCount(int64(dropRate)), cleanedInfo, mapInfo, ringInfo)
+		formatCount(int64(drops)), formatCount(int64(dropRate)), mapInfo, ringInfo)
 
 	if d.batchMode {
 		buf.WriteString("\n")
@@ -941,8 +942,9 @@ func main() {
 
 	// Drop counter: read from kernel map periodically by display goroutine
 	var totalDrops atomic.Uint64
-	var totalCleaned atomic.Uint64
+	var totalEvicted atomic.Uint64
 	var mapEntries atomic.Int64
+	var mapStale atomic.Int64
 	mapMaxVal := int64(objs.StartTimes.MaxEntries())
 
 	// Display goroutine (10 FPS)
@@ -956,7 +958,7 @@ func main() {
 			case <-displayTicker.C:
 				// Read drop counter from kernel
 				readDropCount(objs.DropCount, &totalDrops)
-				display.render(state, *interval, totalDrops.Load(), totalCleaned.Load(), mapEntries.Load(), mapMaxVal)
+				display.render(state, *interval, totalDrops.Load(), totalEvicted.Load(), mapEntries.Load(), mapStale.Load(), mapMaxVal)
 			}
 		}
 	}()
@@ -975,10 +977,9 @@ func main() {
 		}
 	}()
 
-	// Stale entry cleanup goroutine: purge start_times/syscall_ids entries
-	// older than 10s (handles threads killed without sys_exit, edge cases
-	// not covered by the exit/exit_group BPF filter).
-	cleanupTicker := time.NewTicker(5 * time.Second)
+	// Stale entry cleanup goroutine: scan start_times/syscall_ids, count
+	// entries older than staleAge, evict entries older than evictAge.
+	cleanupTicker := time.NewTicker(*cleanupInterval)
 	go func() {
 		defer cleanupTicker.Stop()
 		for {
@@ -986,10 +987,11 @@ func main() {
 			case <-done:
 				return
 			case <-cleanupTicker.C:
-				total, cleaned := cleanStaleEntries(objs.StartTimes, objs.SyscallIds, 10*time.Second)
-				mapEntries.Store(int64(total - cleaned))
-				if cleaned > 0 {
-					totalCleaned.Add(uint64(cleaned))
+				total, stale, evicted := cleanStaleEntries(objs.StartTimes, objs.SyscallIds, *staleAge, *evictAge)
+				mapEntries.Store(int64(total - evicted))
+				mapStale.Store(int64(stale - evicted))
+				if evicted > 0 {
+					totalEvicted.Add(uint64(evicted))
 				}
 			}
 		}
@@ -1018,7 +1020,7 @@ func main() {
 	readerDone.Wait()
 
 	readDropCount(objs.DropCount, &totalDrops)
-	display.render(state, *interval, totalDrops.Load(), totalCleaned.Load(), mapEntries.Load(), mapMaxVal)
+	display.render(state, *interval, totalDrops.Load(), totalEvicted.Load(), mapEntries.Load(), mapStale.Load(), mapMaxVal)
 }
 
 // ktimeNow returns the current CLOCK_MONOTONIC time in nanoseconds,
@@ -1029,22 +1031,27 @@ func ktimeNow() uint64 {
 	return uint64(ts.Sec)*1_000_000_000 + uint64(ts.Nsec)
 }
 
-// cleanStaleEntries iterates start_times and deletes entries older than maxAge.
-// Also deletes corresponding entries from syscall_ids.
-// Returns (total entries before cleanup, stale entries deleted).
-func cleanStaleEntries(startTimes, syscallIds *ebpf.Map, maxAge time.Duration) (int, int) {
+// cleanStaleEntries iterates start_times, counts entries older than staleAge,
+// and evicts entries older than evictAge.
+// Returns (total entries, stale count, evicted count).
+func cleanStaleEntries(startTimes, syscallIds *ebpf.Map, staleAge, evictAge time.Duration) (int, int, int) {
 	now := ktimeNow()
-	threshold := now - uint64(maxAge.Nanoseconds())
+	staleThresh := now - uint64(staleAge.Nanoseconds())
+	evictThresh := now - uint64(evictAge.Nanoseconds())
 
 	var tid uint32
 	var startNs uint64
 	var toDelete []uint32
 	total := 0
+	stale := 0
 
 	iter := startTimes.Iterate()
 	for iter.Next(&tid, &startNs) {
 		total++
-		if startNs < threshold {
+		if startNs < staleThresh {
+			stale++
+		}
+		if startNs < evictThresh {
 			toDelete = append(toDelete, tid)
 		}
 	}
@@ -1053,7 +1060,7 @@ func cleanStaleEntries(startTimes, syscallIds *ebpf.Map, maxAge time.Duration) (
 		startTimes.Delete(tid)
 		syscallIds.Delete(tid)
 	}
-	return total, len(toDelete)
+	return total, stale, len(toDelete)
 }
 
 func readDropCount(m *ebpf.Map, dst *atomic.Uint64) {
