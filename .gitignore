@@ -19,7 +19,7 @@ zpool_iostat/main
 zpool_iostat/per_dev/zpool-latency
 
 # Generated kernel headers (large)
-*/vmlinux.h
+**/vmlinux.h
 
 # Logs
 *.log
