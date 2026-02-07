@@ -190,15 +190,26 @@ func init() {
 	}
 }
 
+// commIntern interns process comm strings to avoid 80K allocations/s.
+// Only used by the reader goroutine — no sync needed.
+var commIntern = make(map[string]string)
+
 func commString(comm [16]int8) string {
 	var buf [16]byte
 	for i, c := range comm {
 		buf[i] = byte(c)
 	}
+	var raw string
 	if n := bytes.IndexByte(buf[:], 0); n >= 0 {
-		return string(buf[:n])
+		raw = string(buf[:n])
+	} else {
+		raw = string(buf[:])
 	}
-	return string(buf[:])
+	if s, ok := commIntern[raw]; ok {
+		return s
+	}
+	commIntern[raw] = raw
+	return raw
 }
 
 func formatLatency(us int64) string {
@@ -393,7 +404,7 @@ func (ss *syscallStats) ResetInterval() {
 
 // State holds all per-process and per-syscall stats
 type State struct {
-	mu sync.RWMutex
+	mu sync.Mutex
 
 	// Per-(process, syscall) stats for all processes
 	procSyscallStats map[string]map[uint32]*syscallStats
@@ -411,21 +422,29 @@ func newState() *State {
 	}
 }
 
-func (s *State) Record(comm string, syscallID uint32, latencyUs int64) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+type pendingEvent struct {
+	comm      string
+	syscallID uint32
+	latencyUs int64
+}
 
-	fm, ok := s.procSyscallStats[comm]
-	if !ok {
-		fm = make(map[uint32]*syscallStats)
-		s.procSyscallStats[comm] = fm
+func (s *State) RecordBatch(batch []pendingEvent) {
+	s.mu.Lock()
+	for i := range batch {
+		e := &batch[i]
+		fm, ok := s.procSyscallStats[e.comm]
+		if !ok {
+			fm = make(map[uint32]*syscallStats)
+			s.procSyscallStats[e.comm] = fm
+		}
+		ss, ok := fm[e.syscallID]
+		if !ok {
+			ss = newSyscallStats()
+			fm[e.syscallID] = ss
+		}
+		ss.Record(e.latencyUs)
 	}
-	ss, ok := fm[syscallID]
-	if !ok {
-		ss = newSyscallStats()
-		fm[syscallID] = ss
-	}
-	ss.Record(latencyUs)
+	s.mu.Unlock()
 }
 
 func (s *State) ResetIntervals() {
@@ -489,8 +508,8 @@ func (d *Display) render(state *State, intervalDur time.Duration, drops uint64) 
 	var buf strings.Builder
 	now := time.Now()
 
-	// Hold RLock only while reading state and formatting strings — no copies/clones.
-	state.mu.RLock()
+	// Hold lock while reading state and formatting strings — no copies/clones.
+	state.mu.Lock()
 
 	elapsed := now.Sub(state.startTime)
 	intervalElapsed := now.Sub(state.lastReset)
@@ -520,7 +539,7 @@ func (d *Display) render(state *State, intervalDur time.Duration, drops uint64) 
 	}
 	nProcs := len(state.procSyscallStats)
 
-	state.mu.RUnlock()
+	state.mu.Unlock()
 
 	// Everything below is lock-free: computed values + ring stats (atomic reads)
 	rate := float64(0)
@@ -870,13 +889,19 @@ func main() {
 		rd.Close()
 	}()
 
-	// Reader goroutine: busy-polls ring buffer, processes events directly into State
+	// Reader goroutine: busy-polls ring buffer, batches events, flushes under single Lock
+	const flushSize = 1024
+	const flushInterval = 10 * time.Millisecond
+
 	var readerDone sync.WaitGroup
 	readerDone.Add(1)
 	go func() {
 		defer readerDone.Done()
 		var rec PollRecord
 		eventSize := int(unsafe.Sizeof(bpfLatencyEvent{}))
+		batch := make([]pendingEvent, 0, flushSize)
+		lastFlush := time.Now()
+
 		for rd.ReadInto(&rec) {
 			if len(rec.RawSample) < eventSize {
 				continue
@@ -889,7 +914,18 @@ func main() {
 			if latencyUs > maxLatencyUs {
 				latencyUs = maxLatencyUs
 			}
-			state.Record(commString(event.Comm), event.SyscallId, latencyUs)
+			batch = append(batch, pendingEvent{commString(event.Comm), event.SyscallId, latencyUs})
+
+			if len(batch) >= flushSize || time.Since(lastFlush) >= flushInterval {
+				state.RecordBatch(batch)
+				rd.Commit()
+				batch = batch[:0]
+				lastFlush = time.Now()
+			}
+		}
+		if len(batch) > 0 {
+			state.RecordBatch(batch)
+			rd.Commit()
 		}
 	}()
 

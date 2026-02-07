@@ -152,9 +152,17 @@ func (r *RingPollReader) PollStats() (avg1, avg0 float64, last1 int64, last0 tim
 	return
 }
 
+// Commit publishes the current consumer position to the kernel, freeing
+// ring buffer space. Call after processing a batch of events.
+func (r *RingPollReader) Commit() {
+	atomic.StoreUint64(r.consPos, r.pos)
+}
+
 // ReadInto polls the ring buffer for the next committed record.
-// Sleeps briefly when the ring is empty. Returns true on success,
-// false when the reader has been closed.
+// Does NOT advance the kernel-visible consumer position — call Commit()
+// after processing a batch to free ring space.
+// Sleeps briefly when the ring is empty (commits before sleeping so the
+// kernel sees freed space). Returns true on success, false when closed.
 func (r *RingPollReader) ReadInto(rec *PollRecord) bool {
 	for {
 		if r.closed.Load() {
@@ -166,7 +174,9 @@ func (r *RingPollReader) ReadInto(rec *PollRecord) bool {
 			r.maxPending.Store(pending)
 		}
 		if r.pos == prod {
-			// Ring empty — record completed batch and poll stats
+			// Ring empty — commit before sleeping so kernel sees freed space
+			r.Commit()
+			// Record completed batch and poll stats
 			r.pollCount++
 			if r.batchCount > 0 {
 				r.nonEmptyCount++
@@ -200,7 +210,6 @@ func (r *RingPollReader) ReadInto(rec *PollRecord) bool {
 
 		if hdrLen&bpfRingbufDiscardBit != 0 {
 			r.pos += dataAligned
-			atomic.StoreUint64(r.consPos, r.pos)
 			continue
 		}
 
@@ -214,7 +223,6 @@ func (r *RingPollReader) ReadInto(rec *PollRecord) bool {
 		copy(rec.RawSample, r.ring[start:start+uint64(dataLen)])
 
 		r.pos += dataAligned
-		atomic.StoreUint64(r.consPos, r.pos)
 
 		r.batchCount++
 		return true
