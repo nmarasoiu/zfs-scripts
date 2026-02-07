@@ -32,7 +32,6 @@ import (
 	"github.com/DataDog/sketches-go/ddsketch"
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
-	"github.com/cilium/ebpf/ringbuf"
 	"github.com/cilium/ebpf/rlimit"
 )
 
@@ -889,12 +888,12 @@ func main() {
 	}
 	defer tpExit.Close()
 
-	// Open ring buffer
-	rd, err := ringbuf.NewReader(objs.Events)
+	// Open ring buffer (busy-poll reader — no epoll)
+	rd, err := NewRingPollReader(objs.Events)
 	if err != nil {
 		log.Fatalf("Failed to open ring buffer: %v", err)
 	}
-	defer rd.Close()
+	defer rd.Cleanup()
 
 	state := newState(focusSet)
 	display := &Display{
@@ -918,25 +917,13 @@ func main() {
 	// Event channel: drainer → consumer pipeline
 	eventCh := make(chan bpfLatencyEvent, 4096)
 
-	// Drainer goroutine: tight loop pulling from kernel ring buffer
+	// Drainer goroutine: busy-polls ring buffer, no epoll
 	go func() {
 		defer close(eventCh)
+		var rec PollRecord
 		var event bpfLatencyEvent
-		for {
-			record, err := rd.Read()
-			if err != nil {
-				if err == ringbuf.ErrClosed {
-					return
-				}
-				// After signal, any error means exit; don't spin
-				select {
-				case <-done:
-					return
-				default:
-					continue
-				}
-			}
-			if err := binary.Read(bytes.NewReader(record.RawSample), binary.LittleEndian, &event); err != nil {
+		for rd.ReadInto(&rec) {
+			if err := binary.Read(bytes.NewReader(rec.RawSample), binary.LittleEndian, &event); err != nil {
 				continue
 			}
 			select {

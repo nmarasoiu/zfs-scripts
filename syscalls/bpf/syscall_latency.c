@@ -167,7 +167,7 @@ int trace_syscall_exit(struct trace_event_raw_sys_exit *ctx) {
     event->ret = ctx->ret;
     bpf_get_current_comm(&event->comm, sizeof(event->comm));
 
-    bpf_ringbuf_submit(event, 0);
+    bpf_ringbuf_submit(event, BPF_RB_NO_WAKEUP);
 
     bpf_map_delete_elem(&start_times, &tid);
     bpf_map_delete_elem(&syscall_ids, &tid);
