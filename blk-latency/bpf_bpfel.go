@@ -68,6 +68,7 @@ type bpfProgramSpecs struct {
 // It can be passed ebpf.CollectionSpec.Assign.
 type bpfMapSpecs struct {
 	DevFilter *ebpf.MapSpec `ebpf:"dev_filter"`
+	DropCount *ebpf.MapSpec `ebpf:"drop_count"`
 	Events    *ebpf.MapSpec `ebpf:"events"`
 	LatConfig *ebpf.MapSpec `ebpf:"lat_config"`
 	ReqStart  *ebpf.MapSpec `ebpf:"req_start"`
@@ -93,6 +94,7 @@ func (o *bpfObjects) Close() error {
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type bpfMaps struct {
 	DevFilter *ebpf.Map `ebpf:"dev_filter"`
+	DropCount *ebpf.Map `ebpf:"drop_count"`
 	Events    *ebpf.Map `ebpf:"events"`
 	LatConfig *ebpf.Map `ebpf:"lat_config"`
 	ReqStart  *ebpf.Map `ebpf:"req_start"`
@@ -101,6 +103,7 @@ type bpfMaps struct {
 func (m *bpfMaps) Close() error {
 	return _BpfClose(
 		m.DevFilter,
+		m.DropCount,
 		m.Events,
 		m.LatConfig,
 		m.ReqStart,

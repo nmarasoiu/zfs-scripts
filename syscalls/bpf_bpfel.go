@@ -71,6 +71,7 @@ type bpfProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type bpfMapSpecs struct {
+	DropCount     *ebpf.MapSpec `ebpf:"drop_count"`
 	Events        *ebpf.MapSpec `ebpf:"events"`
 	StartTimes    *ebpf.MapSpec `ebpf:"start_times"`
 	SyscallFilter *ebpf.MapSpec `ebpf:"syscall_filter"`
@@ -97,6 +98,7 @@ func (o *bpfObjects) Close() error {
 //
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type bpfMaps struct {
+	DropCount     *ebpf.Map `ebpf:"drop_count"`
 	Events        *ebpf.Map `ebpf:"events"`
 	StartTimes    *ebpf.Map `ebpf:"start_times"`
 	SyscallFilter *ebpf.Map `ebpf:"syscall_filter"`
@@ -106,6 +108,7 @@ type bpfMaps struct {
 
 func (m *bpfMaps) Close() error {
 	return _BpfClose(
+		m.DropCount,
 		m.Events,
 		m.StartTimes,
 		m.SyscallFilter,

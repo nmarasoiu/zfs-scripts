@@ -19,10 +19,12 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/HdrHistogram/hdrhistogram-go"
+	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/ringbuf"
 	"github.com/cilium/ebpf/rlimit"
@@ -50,11 +52,11 @@ var (
 
 // formatLatency formats a latency value (in µs) to human-readable string
 func formatLatency(us int64) string {
-	if us < 1000 {
+	if us < 100_000 {
 		return fmt.Sprintf("%dµs", us)
 	}
 	if us < 1_000_000 {
-		ms := (us + 500) / 1000 // round to nearest ms
+		ms := (us + 500) / 1000
 		return fmt.Sprintf("%dms", ms)
 	}
 	s := float64(us) / 1_000_000
@@ -450,7 +452,7 @@ func formatBot5(bot *bottomN) string {
 
 const lineWidth = 258
 
-func (d *Display) render(stats map[uint32]*deviceStats, startTime, lastReset time.Time, intervalDur time.Duration) {
+func (d *Display) render(stats map[uint32]*deviceStats, startTime, lastReset time.Time, intervalDur time.Duration, drops uint64) {
 	var buf strings.Builder
 	now := time.Now()
 
@@ -556,8 +558,12 @@ func (d *Display) render(stats map[uint32]*deviceStats, startTime, lastReset tim
 	if elapsed.Seconds() > 0 {
 		rate = float64(totalSamples) / elapsed.Seconds()
 	}
-	fmt.Fprintf(&buf, "Total: %s samples | Rate: %s/s | HDR histograms: ~40KB/device\n",
-		formatCount(totalSamples), formatCount(int64(rate)))
+	dropRate := float64(0)
+	if elapsed.Seconds() > 0 {
+		dropRate = float64(drops) / elapsed.Seconds()
+	}
+	fmt.Fprintf(&buf, "Total: %s samples | Rate: %s/s | Drops: %s (%s/s) | HDR histograms: ~40KB/device\n",
+		formatCount(totalSamples), formatCount(int64(rate)), formatCount(int64(drops)), formatCount(int64(dropRate)))
 
 	if d.batchMode {
 		buf.WriteString("\n")
@@ -639,7 +645,58 @@ func main() {
 	go func() {
 		<-sig
 		close(done)
+		rd.Close()
 	}()
+
+	// Event channel: drainer → consumer pipeline
+	eventCh := make(chan bpfLatencyEvent, 4096)
+
+	// Drainer goroutine: tight loop pulling from kernel ring buffer
+	go func() {
+		defer close(eventCh)
+		var event bpfLatencyEvent
+		for {
+			record, err := rd.Read()
+			if err != nil {
+				if err == ringbuf.ErrClosed {
+					return
+				}
+				continue
+			}
+			if err := binary.Read(bytes.NewReader(record.RawSample), binary.LittleEndian, &event); err != nil {
+				continue
+			}
+			select {
+			case eventCh <- event:
+			case <-done:
+				return
+			}
+		}
+	}()
+
+	// Consumer goroutine: processes events into State
+	var consumerDone sync.WaitGroup
+	consumerDone.Add(1)
+	go func() {
+		defer consumerDone.Done()
+		for event := range eventCh {
+			devName := lookupDevName(event.Dev)
+			if !isTrackedDevice(devName) {
+				continue
+			}
+			latencyUs := int64(event.LatencyNs / 1000)
+			if latencyUs < 1 {
+				latencyUs = 1
+			}
+			if latencyUs > histMax {
+				latencyUs = histMax
+			}
+			state.Record(event.Dev, latencyUs)
+		}
+	}()
+
+	// Drop counter: read from kernel map periodically by display goroutine
+	var totalDrops atomic.Uint64
 
 	// Display goroutine (10 FPS)
 	displayTicker := time.NewTicker(displayInterval)
@@ -650,9 +707,10 @@ func main() {
 			case <-done:
 				return
 			case <-displayTicker.C:
+				readDropCount(objs.DropCount, &totalDrops)
 				stats, startTime, lastReset := state.Snapshot()
 				if len(stats) > 0 {
-					display.render(stats, startTime, lastReset, *interval)
+					display.render(stats, startTime, lastReset, *interval, totalDrops.Load())
 				}
 			}
 		}
@@ -674,44 +732,22 @@ func main() {
 
 	log.Printf("Tracing block I/O latency (interval=%v, display=10fps)...", *interval)
 
-	// Ring buffer consumer (main loop)
-	var event bpfLatencyEvent
-	for {
-		select {
-		case <-done:
-			// Final stats
-			stats, startTime, lastReset := state.Snapshot()
-			display.render(stats, startTime, lastReset, *interval)
-			return
-		default:
-		}
+	// Wait for signal, then drain
+	<-done
+	consumerDone.Wait()
 
-		record, err := rd.Read()
-		if err != nil {
-			if err == ringbuf.ErrClosed {
-				return
-			}
-			continue
-		}
+	readDropCount(objs.DropCount, &totalDrops)
+	stats, startTime, lastReset := state.Snapshot()
+	display.render(stats, startTime, lastReset, *interval, totalDrops.Load())
+}
 
-		if err := binary.Read(bytes.NewReader(record.RawSample), binary.LittleEndian, &event); err != nil {
-			continue
-		}
-
-		// Only track nvme* and sd* devices
-		devName := lookupDevName(event.Dev)
-		if !isTrackedDevice(devName) {
-			continue
-		}
-
-		latencyUs := int64(event.LatencyNs / 1000)
-		if latencyUs < 1 {
-			latencyUs = 1
-		}
-		if latencyUs > histMax {
-			latencyUs = histMax
-		}
-
-		state.Record(event.Dev, latencyUs)
+func readDropCount(m *ebpf.Map, dst *atomic.Uint64) {
+	if m == nil {
+		return
+	}
+	var key uint32
+	var val uint64
+	if err := m.Lookup(key, &val); err == nil {
+		dst.Store(val)
 	}
 }

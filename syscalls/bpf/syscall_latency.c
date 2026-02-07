@@ -64,6 +64,14 @@ struct {
     __type(value, __u8); // enabled
 } syscall_filter SEC(".maps");
 
+// Drop counter: incremented when ring buffer is full
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, __u64);
+} drop_count SEC(".maps");
+
 static __always_inline int should_trace(__u32 syscall_id) {
     // Check if this syscall is in our filter
     __u8 *enabled = bpf_map_lookup_elem(&syscall_filter, &syscall_id);
@@ -130,6 +138,10 @@ int trace_syscall_exit(struct trace_event_raw_sys_exit *ctx) {
 
     struct latency_event *event = bpf_ringbuf_reserve(&events, sizeof(*event), 0);
     if (!event) {
+        __u32 zero = 0;
+        __u64 *cnt = bpf_map_lookup_elem(&drop_count, &zero);
+        if (cnt)
+            __sync_fetch_and_add(cnt, 1);
         bpf_map_delete_elem(&start_times, &tid);
         bpf_map_delete_elem(&syscall_ids, &tid);
         return 0;

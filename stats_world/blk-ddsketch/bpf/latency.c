@@ -47,6 +47,14 @@ struct {
     __type(value, __u8);
 } lat_config SEC(".maps");
 
+// Drop counter: incremented when ring buffer is full
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, __u64);
+} drop_count SEC(".maps");
+
 static __always_inline __u32 get_dev(struct request *req)
 {
     struct gendisk *disk = BPF_CORE_READ(req, q, disk);
@@ -98,8 +106,13 @@ int BPF_PROG(block_rq_complete, struct request *rq, blk_status_t error, unsigned
         return 0;
 
     struct latency_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
-    if (!e)
-        return 0; // Ring buffer full, drop sample
+    if (!e) {
+        __u32 zero = 0;
+        __u64 *cnt = bpf_map_lookup_elem(&drop_count, &zero);
+        if (cnt)
+            __sync_fetch_and_add(cnt, 1);
+        return 0;
+    }
 
     e->dev = dev;
     e->latency_ns = latency_ns;

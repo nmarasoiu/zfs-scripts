@@ -25,10 +25,12 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/DataDog/sketches-go/ddsketch"
+	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/ringbuf"
 	"github.com/cilium/ebpf/rlimit"
@@ -151,7 +153,7 @@ func commString(comm [16]int8) string {
 }
 
 func formatLatency(us int64) string {
-	if us < 1000 {
+	if us < 100_000 {
 		return fmt.Sprintf("%dµs", us)
 	}
 	if us < 1_000_000 {
@@ -487,7 +489,7 @@ func sectionHeader(buf *strings.Builder, title string, width int) {
 	buf.WriteString("\n")
 }
 
-func (d *Display) render(snap *stateSnapshot, intervalDur time.Duration) {
+func (d *Display) render(snap *stateSnapshot, intervalDur time.Duration, drops uint64) {
 	var buf strings.Builder
 	now := time.Now()
 
@@ -521,8 +523,13 @@ func (d *Display) render(snap *stateSnapshot, intervalDur time.Duration) {
 	if elapsed.Seconds() > 0 {
 		rate = float64(totalSamples) / elapsed.Seconds()
 	}
-	fmt.Fprintf(&buf, "Total: %s syscalls | Rate: %s/s | Processes: %d\n",
-		formatCount(int64(totalSamples)), formatCount(int64(rate)), len(snap.procSyscallStats))
+	dropRate := float64(0)
+	if elapsed.Seconds() > 0 {
+		dropRate = float64(drops) / elapsed.Seconds()
+	}
+	fmt.Fprintf(&buf, "Total: %s syscalls | Rate: %s/s | Processes: %d | Drops: %s (%s/s)\n",
+		formatCount(int64(totalSamples)), formatCount(int64(rate)), len(snap.procSyscallStats),
+		formatCount(int64(drops)), formatCount(int64(dropRate)))
 
 	if d.batchMode {
 		buf.WriteString("\n")
@@ -842,7 +849,54 @@ func main() {
 	go func() {
 		<-sig
 		close(done)
+		rd.Close()
 	}()
+
+	// Event channel: drainer → consumer pipeline
+	eventCh := make(chan bpfLatencyEvent, 4096)
+
+	// Drainer goroutine: tight loop pulling from kernel ring buffer
+	go func() {
+		defer close(eventCh)
+		var event bpfLatencyEvent
+		for {
+			record, err := rd.Read()
+			if err != nil {
+				if err == ringbuf.ErrClosed {
+					return
+				}
+				continue
+			}
+			if err := binary.Read(bytes.NewReader(record.RawSample), binary.LittleEndian, &event); err != nil {
+				continue
+			}
+			select {
+			case eventCh <- event:
+			case <-done:
+				return
+			}
+		}
+	}()
+
+	// Consumer goroutine: processes events into State
+	var consumerDone sync.WaitGroup
+	consumerDone.Add(1)
+	go func() {
+		defer consumerDone.Done()
+		for event := range eventCh {
+			latencyUs := int64(event.LatencyNs / 1000)
+			if latencyUs < 1 {
+				latencyUs = 1
+			}
+			if latencyUs > maxLatencyUs {
+				latencyUs = maxLatencyUs
+			}
+			state.Record(commString(event.Comm), event.SyscallId, latencyUs)
+		}
+	}()
+
+	// Drop counter: read from kernel map periodically by display goroutine
+	var totalDrops atomic.Uint64
 
 	// Display goroutine (10 FPS)
 	displayTicker := time.NewTicker(displayInterval)
@@ -853,9 +907,11 @@ func main() {
 			case <-done:
 				return
 			case <-displayTicker.C:
+				// Read drop counter from kernel
+				readDropCount(objs.DropCount, &totalDrops)
 				snap := state.Snapshot()
 				if len(snap.procSyscallStats) > 0 {
-					display.render(snap, *interval)
+					display.render(snap, *interval, totalDrops.Load())
 				}
 			}
 		}
@@ -887,37 +943,22 @@ func main() {
 			strings.Join(syscallStr, ","), *topProcs, *interval)
 	}
 
-	// Ring buffer consumer (main loop)
-	var event bpfLatencyEvent
-	for {
-		select {
-		case <-done:
-			snap := state.Snapshot()
-			display.render(snap, *interval)
-			return
-		default:
-		}
+	// Wait for signal, then drain
+	<-done
+	consumerDone.Wait()
 
-		record, err := rd.Read()
-		if err != nil {
-			if err == ringbuf.ErrClosed {
-				return
-			}
-			continue
-		}
+	readDropCount(objs.DropCount, &totalDrops)
+	snap := state.Snapshot()
+	display.render(snap, *interval, totalDrops.Load())
+}
 
-		if err := binary.Read(bytes.NewReader(record.RawSample), binary.LittleEndian, &event); err != nil {
-			continue
-		}
-
-		latencyUs := int64(event.LatencyNs / 1000)
-		if latencyUs < 1 {
-			latencyUs = 1
-		}
-		if latencyUs > maxLatencyUs {
-			latencyUs = maxLatencyUs
-		}
-
-		state.Record(commString(event.Comm), event.SyscallId, latencyUs)
+func readDropCount(m *ebpf.Map, dst *atomic.Uint64) {
+	if m == nil {
+		return
+	}
+	var key uint32
+	var val uint64
+	if err := m.Lookup(key, &val); err == nil {
+		dst.Store(val)
 	}
 }

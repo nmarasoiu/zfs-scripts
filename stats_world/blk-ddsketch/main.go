@@ -24,12 +24,14 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/DataDog/sketches-go/ddsketch"
 	"github.com/DataDog/sketches-go/ddsketch/mapping"
 	"github.com/DataDog/sketches-go/ddsketch/store"
+	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/ringbuf"
 	"github.com/cilium/ebpf/rlimit"
@@ -56,7 +58,7 @@ var (
 
 // formatLatency formats a latency value (in µs) to human-readable string
 func formatLatency(us float64) string {
-	if us < 1000 {
+	if us < 100_000 {
 		return fmt.Sprintf("%.0fµs", us)
 	}
 	if us < 1_000_000 {
@@ -357,7 +359,7 @@ func getQuantileSafe(s *ddsketch.DDSketch, q float64) (float64, bool) {
 
 const lineWidth = 196
 
-func (d *Display) render(stats map[uint32]*deviceStats, startTime, lastReset time.Time, intervalDur time.Duration, alpha float64) {
+func (d *Display) render(stats map[uint32]*deviceStats, startTime, lastReset time.Time, intervalDur time.Duration, alpha float64, drops uint64) {
 	var buf strings.Builder
 	now := time.Now()
 
@@ -503,8 +505,12 @@ func (d *Display) render(stats map[uint32]*deviceStats, startTime, lastReset tim
 	if elapsed.Seconds() > 0 {
 		rate = float64(totalSamples) / elapsed.Seconds()
 	}
-	fmt.Fprintf(&buf, "Total: %s samples | Rate: %s/s | DDSketch: ~2-10KB/device (α=%.2f%% relative error)\n",
-		formatCount(totalSamples), formatCount(uint64(rate)), alpha*100)
+	dropRate := float64(0)
+	if elapsed.Seconds() > 0 {
+		dropRate = float64(drops) / elapsed.Seconds()
+	}
+	fmt.Fprintf(&buf, "Total: %s samples | Rate: %s/s | Drops: %s (%s/s) | DDSketch: ~2-10KB/device (α=%.2f%% relative error)\n",
+		formatCount(totalSamples), formatCount(uint64(rate)), formatCount(drops), formatCount(uint64(dropRate)), alpha*100)
 
 	if d.batchMode {
 		buf.WriteString("\n")
@@ -591,7 +597,55 @@ func main() {
 	go func() {
 		<-sig
 		close(done)
+		rd.Close()
 	}()
+
+	// Event channel: drainer → consumer pipeline
+	eventCh := make(chan bpfLatencyEvent, 4096)
+
+	// Drainer goroutine: tight loop pulling from kernel ring buffer
+	go func() {
+		defer close(eventCh)
+		var event bpfLatencyEvent
+		for {
+			record, err := rd.Read()
+			if err != nil {
+				if err == ringbuf.ErrClosed {
+					return
+				}
+				continue
+			}
+			if err := binary.Read(bytes.NewReader(record.RawSample), binary.LittleEndian, &event); err != nil {
+				continue
+			}
+			select {
+			case eventCh <- event:
+			case <-done:
+				return
+			}
+		}
+	}()
+
+	// Consumer goroutine: processes events into State
+	var consumerDone sync.WaitGroup
+	consumerDone.Add(1)
+	go func() {
+		defer consumerDone.Done()
+		for event := range eventCh {
+			devName := lookupDevName(event.Dev)
+			if !isTrackedDevice(devName) {
+				continue
+			}
+			latencyUs := float64(event.LatencyNs) / 1000.0
+			if latencyUs < 1 {
+				latencyUs = 1
+			}
+			state.Record(event.Dev, latencyUs)
+		}
+	}()
+
+	// Drop counter: read from kernel map periodically by display goroutine
+	var totalDrops atomic.Uint64
 
 	// Display goroutine (10 FPS)
 	displayTicker := time.NewTicker(displayInterval)
@@ -602,9 +656,10 @@ func main() {
 			case <-done:
 				return
 			case <-displayTicker.C:
+				readDropCount(objs.DropCount, &totalDrops)
 				stats, startTime, lastReset := state.Snapshot()
 				if len(stats) > 0 {
-					display.render(stats, startTime, lastReset, *interval, *alpha)
+					display.render(stats, startTime, lastReset, *interval, *alpha, totalDrops.Load())
 				}
 			}
 		}
@@ -626,41 +681,22 @@ func main() {
 
 	log.Printf("Tracing block I/O latency with DDSketch (α=%.2f%%, interval=%v)...", *alpha*100, *interval)
 
-	// Ring buffer consumer (main loop)
-	var event bpfLatencyEvent
-	for {
-		select {
-		case <-done:
-			// Final stats
-			stats, startTime, lastReset := state.Snapshot()
-			display.render(stats, startTime, lastReset, *interval, *alpha)
-			return
-		default:
-		}
+	// Wait for signal, then drain
+	<-done
+	consumerDone.Wait()
 
-		record, err := rd.Read()
-		if err != nil {
-			if err == ringbuf.ErrClosed {
-				return
-			}
-			continue
-		}
+	readDropCount(objs.DropCount, &totalDrops)
+	stats, startTime, lastReset := state.Snapshot()
+	display.render(stats, startTime, lastReset, *interval, *alpha, totalDrops.Load())
+}
 
-		if err := binary.Read(bytes.NewReader(record.RawSample), binary.LittleEndian, &event); err != nil {
-			continue
-		}
-
-		// Only track nvme* and sd* devices
-		devName := lookupDevName(event.Dev)
-		if !isTrackedDevice(devName) {
-			continue
-		}
-
-		latencyUs := float64(event.LatencyNs) / 1000.0
-		if latencyUs < 1 {
-			latencyUs = 1
-		}
-
-		state.Record(event.Dev, latencyUs)
+func readDropCount(m *ebpf.Map, dst *atomic.Uint64) {
+	if m == nil {
+		return
+	}
+	var key uint32
+	var val uint64
+	if err := m.Lookup(key, &val); err == nil {
+		dst.Store(val)
 	}
 }

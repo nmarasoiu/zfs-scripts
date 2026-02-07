@@ -7,6 +7,15 @@ zpool-latency/zpool-latency
 syscalls/syscall-latency
 backups/usb-queue-monitor-v1
 slow_devices/slow-devices
+blk-latency/blk-latency
+stats_world/blk-ddsketch/blk-ddsketch
+softnet/softnet
+psi/psi
+duty_cycle_limiter/dutycycle
+zpool_iostat/zpool_iostat
+zpool_iostat/zpool_iostat_wv
+zpool_iostat/main
+zpool_iostat/per_dev/zpool-latency
 
 # Generated kernel headers (large)
 */vmlinux.h
