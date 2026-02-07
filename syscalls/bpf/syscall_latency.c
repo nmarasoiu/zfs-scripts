@@ -48,13 +48,21 @@ struct {
     __uint(max_entries, 8 * 1024 * 1024);
 } events SEC(".maps");
 
-// Target process name filter (if set)
+// Comm filter: if [0]==1, only trace processes in target_comms
 struct {
     __uint(type, BPF_MAP_TYPE_ARRAY);
     __uint(max_entries, 1);
     __type(key, __u32);
-    __type(value, char[TASK_COMM_LEN]);
-} target_comm SEC(".maps");
+    __type(value, __u8);
+} comm_filter_enabled SEC(".maps");
+
+// Target process names (hash lookup for O(1) matching)
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 16);
+    __type(key, char[TASK_COMM_LEN]);
+    __type(value, __u8);
+} target_comms SEC(".maps");
 
 // Syscall filter: which syscalls to trace
 struct {
@@ -81,11 +89,11 @@ struct {
 } trace_all SEC(".maps");
 
 static __always_inline int should_trace(__u32 syscall_id) {
-    // If trace_all flag is set, skip syscall filter
     __u32 zero = 0;
+
+    // Check syscall filter
     __u8 *all = bpf_map_lookup_elem(&trace_all, &zero);
     if (!all || *all == 0) {
-        // Check if this syscall is in our filter
         __u8 *enabled = bpf_map_lookup_elem(&syscall_filter, &syscall_id);
         if (!enabled || *enabled == 0) {
             return 0;
@@ -93,26 +101,15 @@ static __always_inline int should_trace(__u32 syscall_id) {
     }
 
     // Check process name filter
-    __u32 key = 0;
-    char *target = bpf_map_lookup_elem(&target_comm, &key);
-    if (target && target[0] != '\0') {
+    __u8 *filter_on = bpf_map_lookup_elem(&comm_filter_enabled, &zero);
+    if (filter_on && *filter_on) {
         char comm[TASK_COMM_LEN];
         bpf_get_current_comm(&comm, sizeof(comm));
-
-        // Compare first 15 chars (comm is limited)
-        #pragma unroll
-        for (int i = 0; i < TASK_COMM_LEN - 1; i++) {
-            if (target[i] == '\0' && comm[i] == '\0') {
-                return 1;  // Match
-            }
-            if (target[i] != comm[i]) {
-                return 0;  // No match
-            }
-        }
-        return 1;
+        __u8 *match = bpf_map_lookup_elem(&target_comms, comm);
+        if (!match) return 0;
     }
 
-    return 1;  // No filter, trace all
+    return 1;
 }
 
 SEC("tracepoint/raw_syscalls/sys_enter")

@@ -2,12 +2,12 @@
 //
 // Traces syscall enter/exit to compute per-syscall latency, grouped by process.
 // Uses DDSketch for percentiles (P25/P50/P75/P90/P99/P99.9) with explicit
-// min/max/avg tracking (sum+count). Emits stats on configurable interval.
+// min/max/avg tracking (sum+count). Lifetime stats only.
 //
-// Focus processes (-c) get full per-syscall breakdown.
-// All processes are shown in a summary table (top N by sample count).
+// -c filters to specified processes (BPF-level). Without -c, traces all.
+// One unified table output, sorted by sample count.
 //
-// Usage: syscall-latency [-c focus_procs] [-n top_n] [-s syscalls] [-i interval]
+// Usage: syscall-latency [-c procs] [-n top_n] [-s syscalls]
 //
 //go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -target bpfel -type latency_event bpf bpf/syscall_latency.c -- -I/usr/include -I.
 
@@ -42,9 +42,8 @@ const (
 )
 
 var (
-	interval    = flag.Duration("i", 10*time.Second, "stats reset interval")
-	focusProcs  = flag.String("c", "", "focus processes for per-syscall detail (comma-separated, empty=none)")
-	topProcs    = flag.Int("n", 28, "top N process/syscall rows per column in summary")
+	focusProcs  = flag.String("c", "", "only trace these processes (comma-separated, empty=all)")
+	topProcs    = flag.Int("n", 0, "top N rows to display (0=all)")
 	syscallList = flag.String("s", "all", "comma-separated syscalls to trace (or 'all')")
 	batch       = flag.Bool("batch", false, "batch mode (no screen clearing)")
 	pollSleep       = flag.Duration("poll-sleep", 50*time.Microsecond, "ring buffer poll sleep when empty")
@@ -52,147 +51,6 @@ var (
 	staleAge        = flag.Duration("stale-age", 10*time.Second, "age threshold to count an in-flight entry as stale")
 	evictAge        = flag.Duration("evict-age", 60*time.Second, "age threshold to evict (delete) a stale entry")
 )
-
-// x86_64 syscall numbers
-var syscallNums = map[string]uint32{
-	"read":         0,
-	"write":        1,
-	"open":         2,
-	"close":        3,
-	"stat":         4,
-	"fstat":        5,
-	"lstat":        6,
-	"poll":         7,
-	"lseek":        8,
-	"mmap":         9,
-	"mprotect":     10,
-	"munmap":       11,
-	"brk":          12,
-	"pread64":      17,
-	"pwrite64":     18,
-	"readv":        19,
-	"writev":       20,
-	"access":       21,
-	"pipe":         22,
-	"select":       23,
-	"dup":          32,
-	"dup2":         33,
-	"socket":       41,
-	"connect":      42,
-	"accept":       43,
-	"sendto":       44,
-	"recvfrom":     45,
-	"sendmsg":      46,
-	"recvmsg":      47,
-	"shutdown":     48,
-	"bind":         49,
-	"listen":       50,
-	"clone":        56,
-	"fork":         57,
-	"vfork":        58,
-	"execve":       59,
-	"exit":         60,
-	"wait4":        61,
-	"kill":         62,
-	"fcntl":        72,
-	"flock":        73,
-	"fsync":        74,
-	"fdatasync":    75,
-	"truncate":     76,
-	"ftruncate":    77,
-	"getdents":     78,
-	"getcwd":       79,
-	"chdir":        80,
-	"rename":       82,
-	"mkdir":        83,
-	"rmdir":        84,
-	"creat":        85,
-	"link":         86,
-	"unlink":       87,
-	"symlink":      88,
-	"readlink":     89,
-	"chmod":        90,
-	"fchmod":       91,
-	"chown":        92,
-	"fchown":       93,
-	"lchown":       94,
-	"umask":        95,
-	"openat":       257,
-	"mkdirat":      258,
-	"fstatat":      262,
-	"unlinkat":     263,
-	"renameat":     264,
-	"faccessat":    269,
-	"splice":       275,
-	"sync":         162,
-	"syncfs":       306,
-	"fallocate":    285,
-	"epoll_wait":   232,
-	"epoll_pwait":  281,
-	"futex":        202,
-	"nanosleep":    35,
-	"accept4":      288,
-	"recvmmsg":     299,
-	"sendmmsg":     307,
-	"getdents64":   217,
-	"ioctl":        16,
-	"madvise":      28,
-	"sched_yield":  24,
-	"clock_gettime": 228,
-	"gettimeofday": 96,
-	"getpid":       39,
-	"gettid":       186,
-	"getuid":       102,
-	"getgid":       104,
-	"rt_sigaction": 13,
-	"rt_sigprocmask": 14,
-	"rt_sigreturn": 15,
-	"pselect6":     270,
-	"ppoll":        271,
-	"eventfd2":     290,
-	"timerfd_create": 283,
-	"timerfd_settime": 286,
-	"signalfd4":    289,
-	"epoll_create1": 291,
-	"epoll_ctl":    233,
-	"pipe2":        293,
-	"inotify_init1": 294,
-	"inotify_add_watch": 254,
-	"inotify_rm_watch": 255,
-	"statfs":       137,
-	"fstatfs":      138,
-	"prctl":        157,
-	"arch_prctl":   158,
-	"set_tid_address": 218,
-	"set_robust_list": 273,
-	"getrandom":    318,
-	"memfd_create": 319,
-	"statx":        332,
-	"io_uring_setup": 425,
-	"io_uring_enter": 426,
-	"io_uring_register": 427,
-	"copy_file_range": 326,
-	"preadv2":      327,
-	"pwritev2":     328,
-	"setsockopt":   54,
-	"getsockopt":   55,
-	"getsockname":  51,
-	"getpeername":  52,
-	"socketpair":   53,
-	"exit_group":   231,
-	"waitid":       247,
-	"tgkill":       234,
-	"clock_nanosleep": 230,
-}
-
-// Reverse map for display
-var syscallNames = make(map[uint32]string)
-
-func init() {
-	for name, num := range syscallNums {
-		syscallNames[num] = name
-	}
-}
 
 // commIntern interns process comm strings to avoid 80K allocations/s.
 // Only used by the reader goroutine — no sync needed.
@@ -352,13 +210,6 @@ func (s *simpleStats) Record(v int64) {
 	s.count++
 }
 
-func (s *simpleStats) Reset() {
-	s.min = math.MaxInt64
-	s.max = 0
-	s.sum = 0
-	s.count = 0
-}
-
 func (s *simpleStats) Avg() int64 {
 	if s.count == 0 {
 		return 0
@@ -366,44 +217,27 @@ func (s *simpleStats) Avg() int64 {
 	return int64(s.sum / s.count)
 }
 
-// syscallStats holds both interval and lifetime stats for a syscall
-// Uses DDSketch for percentiles only, explicit tracking for min/max/avg
+// syscallStats holds lifetime stats for a syscall.
+// Uses DDSketch for percentiles, explicit tracking for min/max/avg.
 type syscallStats struct {
-	intervalSketch *ddsketch.DDSketch
-	lifetimeSketch *ddsketch.DDSketch
-	intervalStats  *simpleStats
-	lifetimeStats  *simpleStats
-	intervalTop    *topN
-	lifetimeTop    *topN
+	sketch *ddsketch.DDSketch
+	stats  *simpleStats
+	top    *topN
 }
 
 func newSyscallStats() *syscallStats {
-	intervalSketch, _ := ddsketch.NewDefaultDDSketch(0.01)
-	lifetimeSketch, _ := ddsketch.NewDefaultDDSketch(0.01)
+	sketch, _ := ddsketch.NewDefaultDDSketch(0.01)
 	return &syscallStats{
-		intervalSketch: intervalSketch,
-		lifetimeSketch: lifetimeSketch,
-		intervalStats:  newSimpleStats(),
-		lifetimeStats:  newSimpleStats(),
-		intervalTop:    newTopN(5),
-		lifetimeTop:    newTopN(5),
+		sketch: sketch,
+		stats:  newSimpleStats(),
+		top:    newTopN(5),
 	}
 }
 
 func (ss *syscallStats) Record(latencyUs int64) {
-	v := float64(latencyUs)
-	ss.intervalSketch.Add(v)
-	ss.lifetimeSketch.Add(v)
-	ss.intervalStats.Record(latencyUs)
-	ss.lifetimeStats.Record(latencyUs)
-	ss.intervalTop.Add(latencyUs)
-	ss.lifetimeTop.Add(latencyUs)
-}
-
-func (ss *syscallStats) ResetInterval() {
-	ss.intervalSketch, _ = ddsketch.NewDefaultDDSketch(0.01)
-	ss.intervalStats.Reset()
-	ss.intervalTop.Reset()
+	ss.sketch.Add(float64(latencyUs))
+	ss.stats.Record(latencyUs)
+	ss.top.Add(latencyUs)
 }
 
 // State holds all per-process and per-syscall stats
@@ -414,15 +248,12 @@ type State struct {
 	procSyscallStats map[string]map[uint32]*syscallStats
 
 	startTime time.Time
-	lastReset time.Time
 }
 
 func newState() *State {
-	now := time.Now()
 	return &State{
 		procSyscallStats: make(map[string]map[uint32]*syscallStats),
-		startTime:        now,
-		lastReset:        now,
+		startTime:        time.Now(),
 	}
 }
 
@@ -451,18 +282,6 @@ func (s *State) RecordBatch(batch []pendingEvent) {
 	s.mu.Unlock()
 }
 
-func (s *State) ResetIntervals() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	for _, fm := range s.procSyscallStats {
-		for _, ss := range fm {
-			ss.ResetInterval()
-		}
-	}
-	s.lastReset = time.Now()
-}
-
 // Display handles rendering
 type Display struct {
 	batchMode      bool
@@ -489,14 +308,8 @@ func formatTop5(top *topN) string {
 	return strings.Join(parts, " ")
 }
 
-const (
-	focusLineWidth   = 155
-	summaryLineWidth = 97
-)
-
 func sectionHeader(buf *strings.Builder, title string, width int) {
-	// "── title ───..."
-	displayWidth := 3 + len(title) + 1 // "── " + title + " "
+	displayWidth := 3 + len(title) + 1
 	remaining := width - displayWidth
 	if remaining < 0 {
 		remaining = 0
@@ -508,44 +321,37 @@ func sectionHeader(buf *strings.Builder, title string, width int) {
 	buf.WriteString("\n")
 }
 
-func (d *Display) render(state *State, intervalDur time.Duration, drops uint64, evicted uint64, mapUsed int64, mapStale int64, mapCap int64) {
+func (d *Display) render(state *State, drops uint64, evicted uint64, mapUsed int64, mapStale int64, mapCap int64) {
 	var buf strings.Builder
 	now := time.Now()
 
-	// Hold lock while reading state and formatting strings — no copies/clones.
 	state.mu.Lock()
 
 	elapsed := now.Sub(state.startTime)
-	intervalElapsed := now.Sub(state.lastReset)
 
-	fmt.Fprintf(&buf, "Syscall Latency Monitor - %s (uptime: %s, interval: %s/%s)\n",
-		now.Format("15:04:05"), formatDuration(elapsed),
-		formatDuration(intervalElapsed), formatDuration(intervalDur))
+	fmt.Fprintf(&buf, "Syscall Latency Monitor - %s (uptime: %s)\n",
+		now.Format("15:04:05"), formatDuration(elapsed))
 
-	// Focus sections
-	for _, name := range d.focusProcesses {
-		fm := state.procSyscallStats[name]
-		if fm == nil {
-			continue
-		}
-		d.renderFocusSection(&buf, name, fm)
+	// Focus mode: detailed single-column table
+	// Summary mode: compact two-column table
+	if len(d.focusProcesses) > 0 {
+		d.renderTable(&buf, state.procSyscallStats)
+	} else {
+		d.renderSummary(&buf, state.procSyscallStats, elapsed)
 	}
 
-	// Process+syscall summary (lifetime only)
-	d.renderProcessSummary(&buf, state.procSyscallStats, elapsed)
-
-	// Footer
+	// Totals for footer
 	var totalSamples uint64
 	for _, fm := range state.procSyscallStats {
 		for _, ss := range fm {
-			totalSamples += ss.lifetimeStats.count
+			totalSamples += ss.stats.count
 		}
 	}
 	nProcs := len(state.procSyscallStats)
 
 	state.mu.Unlock()
 
-	// Everything below is lock-free: computed values + ring stats (atomic reads)
+	// Footer (lock-free: computed values + ring stats via atomics)
 	rate := float64(0)
 	if elapsed.Seconds() > 0 {
 		rate = float64(totalSamples) / elapsed.Seconds()
@@ -590,58 +396,78 @@ func (d *Display) render(state *State, intervalDur time.Duration, drops uint64, 
 	fmt.Print(buf.String())
 }
 
-func (d *Display) renderFocusSection(buf *strings.Builder, name string, stats map[uint32]*syscallStats) {
-	sectionHeader(buf, name, focusLineWidth)
+type tableEntry struct {
+	label string
+	ss    *syscallStats
+}
 
-	// Sort syscalls by name
-	var ids []uint32
-	for id := range stats {
-		ids = append(ids, id)
+func (d *Display) renderTable(buf *strings.Builder, procStats map[string]map[uint32]*syscallStats) {
+	singleProc := len(procStats) == 1
+
+	var entries []tableEntry
+	for proc, fm := range procStats {
+		for id, ss := range fm {
+			label := syscallName(id)
+			if !singleProc {
+				label = proc + "/" + label
+			}
+			entries = append(entries, tableEntry{label, ss})
+		}
 	}
-	sort.Slice(ids, func(i, j int) bool {
-		ni := syscallNames[ids[i]]
-		nj := syscallNames[ids[j]]
-		if ni == "" {
-			ni = fmt.Sprintf("syscall_%d", ids[i])
+
+	if len(entries) == 0 {
+		return
+	}
+
+	// Sort by samples desc, then label
+	sort.Slice(entries, func(i, j int) bool {
+		ci := entries[i].ss.stats.count
+		cj := entries[j].ss.stats.count
+		if ci != cj {
+			return ci > cj
 		}
-		if nj == "" {
-			nj = fmt.Sprintf("syscall_%d", ids[j])
-		}
-		return ni < nj
+		return entries[i].label < entries[j].label
 	})
 
-	// Interval
-	fmt.Fprintf(buf, "%-12s │ %8s %8s %8s %8s %8s %8s %8s %8s %8s │ %8s %8s %8s %8s %8s │ %9s\n",
-		"INTERVAL", "min", "avg", "p25", "p50", "p75", "p90", "p99", "p99.9", "max",
-		"max-4", "max-3", "max-2", "max-1", "max", "samples")
-	buf.WriteString(strings.Repeat("-", focusLineWidth))
-	buf.WriteString("\n")
-
-	for _, id := range ids {
-		ss := stats[id]
-		sname := syscallNames[id]
-		if sname == "" {
-			sname = fmt.Sprintf("sys_%d", id)
-		}
-		renderDetailRow(buf, sname, ss.intervalStats, ss.intervalSketch, ss.intervalTop)
+	// Limit to top N (0 = all)
+	shown := len(entries)
+	if d.topN > 0 && shown > d.topN {
+		shown = d.topN
 	}
 
-	buf.WriteString("\n")
-
-	// Lifetime
-	fmt.Fprintf(buf, "%-12s │ %8s %8s %8s %8s %8s %8s %8s %8s %8s │ %8s %8s %8s %8s %8s │ %9s\n",
-		"LIFETIME", "min", "avg", "p25", "p50", "p75", "p90", "p99", "p99.9", "max",
-		"max-4", "max-3", "max-2", "max-1", "max", "samples")
-	buf.WriteString(strings.Repeat("-", focusLineWidth))
-	buf.WriteString("\n")
-
-	for _, id := range ids {
-		ss := stats[id]
-		sname := syscallNames[id]
-		if sname == "" {
-			sname = fmt.Sprintf("sys_%d", id)
+	// Compute label column width from visible entries
+	labelWidth := 12
+	for i := 0; i < shown; i++ {
+		if n := len(entries[i].label); n > labelWidth {
+			labelWidth = n
 		}
-		renderDetailRow(buf, sname, ss.lifetimeStats, ss.lifetimeSketch, ss.lifetimeTop)
+	}
+	labelWidth++ // padding
+
+	// Section title
+	var title string
+	if len(d.focusProcesses) > 0 {
+		title = strings.Join(d.focusProcesses, ",")
+	} else {
+		title = "All Processes"
+	}
+	lineWidth := labelWidth + 142
+	sectionHeader(buf, fmt.Sprintf("%s (%d)", title, shown), lineWidth)
+
+	// Column headers
+	nameFmt := fmt.Sprintf("%%-%ds", labelWidth)
+	fmt.Fprintf(buf, "%s │ %8s %8s %8s %8s %8s %8s %8s %8s %8s │ %8s %8s %8s %8s %8s │ %9s\n",
+		fmt.Sprintf(nameFmt, "LIFETIME"),
+		"min", "avg", "p25", "p50", "p75", "p90", "p99", "p99.9", "max",
+		"max-4", "max-3", "max-2", "max-1", "max", "samples")
+	buf.WriteString(strings.Repeat("-", lineWidth))
+	buf.WriteString("\n")
+
+	// Data rows
+	for i := 0; i < shown; i++ {
+		e := entries[i]
+		name := fmt.Sprintf(nameFmt, e.label)
+		renderDetailRow(buf, name, e.ss.stats, e.ss.sketch, e.ss.top)
 	}
 
 	buf.WriteString("\n")
@@ -650,7 +476,7 @@ func (d *Display) renderFocusSection(buf *strings.Builder, name string, stats ma
 func renderDetailRow(buf *strings.Builder, name string, st *simpleStats, sketch *ddsketch.DDSketch, top *topN) {
 	n := st.count
 	if n == 0 {
-		fmt.Fprintf(buf, "%-12s │ %8s %8s %8s %8s %8s %8s %8s %8s %8s │ %8s %8s %8s %8s %8s │ %9s\n",
+		fmt.Fprintf(buf, "%s │ %8s %8s %8s %8s %8s %8s %8s %8s %8s │ %8s %8s %8s %8s %8s │ %9s\n",
 			name, "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "0")
 		return
 	}
@@ -660,7 +486,7 @@ func renderDetailRow(buf *strings.Builder, name string, st *simpleStats, sketch 
 	p90, _ := sketch.GetValueAtQuantile(0.90)
 	p99, _ := sketch.GetValueAtQuantile(0.99)
 	p999, _ := sketch.GetValueAtQuantile(0.999)
-	fmt.Fprintf(buf, "%-12s │ %s %s %s %s %s %s %s %s %s │ %s │ %9s\n",
+	fmt.Fprintf(buf, "%s │ %s %s %s %s %s %s %s %s %s │ %s │ %9s\n",
 		name,
 		formatLatencyPadded(st.min),
 		formatLatencyPadded(st.Avg()),
@@ -676,56 +502,49 @@ func renderDetailRow(buf *strings.Builder, name string, st *simpleStats, sketch 
 	)
 }
 
-type procSyscallEntry struct {
-	label string
-	stats *syscallStats
-}
+const summaryLineWidth = 97
 
-func (d *Display) renderProcessSummary(buf *strings.Builder, procSyscallStats map[string]map[uint32]*syscallStats, totalElapsed time.Duration) {
-	var entries []procSyscallEntry
-	for name, fm := range procSyscallStats {
+func (d *Display) renderSummary(buf *strings.Builder, procStats map[string]map[uint32]*syscallStats, elapsed time.Duration) {
+	var entries []tableEntry
+	for name, fm := range procStats {
 		for id, ss := range fm {
-			sname := syscallNames[id]
-			if sname == "" {
-				sname = fmt.Sprintf("sys_%d", id)
-			}
-			entries = append(entries, procSyscallEntry{
-				label: name + "/" + sname,
-				stats: ss,
+			entries = append(entries, tableEntry{
+				label: name + "/" + syscallName(id),
+				ss:    ss,
 			})
 		}
 	}
 
-	// Sort by lifetime count desc, then alphabetically by label
+	// Sort by samples desc, then label
 	sort.Slice(entries, func(i, j int) bool {
-		ci := entries[i].stats.lifetimeStats.count
-		cj := entries[j].stats.lifetimeStats.count
+		ci := entries[i].ss.stats.count
+		cj := entries[j].ss.stats.count
 		if ci != cj {
 			return ci > cj
 		}
 		return entries[i].label < entries[j].label
 	})
 
-	totalSecs := totalElapsed.Seconds()
+	totalSecs := elapsed.Seconds()
 	nPerCol := d.topN // rows per column
+	if nPerCol <= 0 {
+		nPerCol = (len(entries) + 1) / 2
+	}
 	totalShown := nPerCol * 2
 	if totalShown > len(entries) {
 		totalShown = len(entries)
 	}
 
-	// Two-column width: left column + " │ " + right column
 	dualWidth := summaryLineWidth + 3 + summaryLineWidth
 
 	sectionHeader(buf, fmt.Sprintf("Process × Syscall (top %d)", totalShown), dualWidth)
 
-	// Header row (two columns)
 	hdr := fmt.Sprintf("%-28s │ %8s %8s %8s %8s %8s │ %9s %9s",
 		"LIFETIME", "avg", "p50", "p90", "p99", "max", "samples", "rate")
 	fmt.Fprintf(buf, "%s │ %s\n", hdr, hdr)
 	buf.WriteString(strings.Repeat("-", dualWidth))
 	buf.WriteString("\n")
 
-	// Split entries into left and right columns
 	leftEnd := nPerCol
 	if leftEnd > len(entries) {
 		leftEnd = len(entries)
@@ -737,12 +556,11 @@ func (d *Display) renderProcessSummary(buf *strings.Builder, procSyscallStats ma
 	}
 
 	leftSlice := entries[:leftEnd]
-	var rightSlice []procSyscallEntry
+	var rightSlice []tableEntry
 	if rightStart < len(entries) {
 		rightSlice = entries[rightStart:rightEnd]
 	}
 
-	// Render rows side by side
 	maxRows := len(leftSlice)
 	if len(rightSlice) > maxRows {
 		maxRows = len(rightSlice)
@@ -752,13 +570,13 @@ func (d *Display) renderProcessSummary(buf *strings.Builder, procSyscallStats ma
 		var leftStr, rightStr string
 
 		if i < len(leftSlice) {
-			leftStr = formatSummaryRow(leftSlice[i].label, leftSlice[i].stats.lifetimeStats, leftSlice[i].stats.lifetimeSketch, totalSecs)
+			leftStr = formatSummaryRow(leftSlice[i].label, leftSlice[i].ss.stats, leftSlice[i].ss.sketch, totalSecs)
 		} else {
 			leftStr = strings.Repeat(" ", summaryLineWidth)
 		}
 
 		if i < len(rightSlice) {
-			rightStr = formatSummaryRow(rightSlice[i].label, rightSlice[i].stats.lifetimeStats, rightSlice[i].stats.lifetimeSketch, totalSecs)
+			rightStr = formatSummaryRow(rightSlice[i].label, rightSlice[i].ss.stats, rightSlice[i].ss.sketch, totalSecs)
 		} else {
 			rightStr = strings.Repeat(" ", summaryLineWidth)
 		}
@@ -794,12 +612,15 @@ func formatSummaryRow(name string, st *simpleStats, sketch *ddsketch.DDSketch, s
 func main() {
 	flag.Parse()
 
-	// Parse focus processes
+	// Parse focus processes (truncate to 15 chars to match BPF comm length)
 	focusSet := make(map[string]bool)
 	var focusList []string
 	if *focusProcs != "" {
 		for _, name := range strings.Split(*focusProcs, ",") {
 			name = strings.TrimSpace(name)
+			if len(name) > 15 {
+				name = name[:15]
+			}
 			if name != "" && !focusSet[name] {
 				focusSet[name] = true
 				focusList = append(focusList, name)
@@ -858,7 +679,22 @@ func main() {
 		}
 	}
 
-	// No BPF comm filter - we trace all processes and group in userspace
+	// Set up BPF comm filter when -c is specified
+	if len(focusList) > 0 {
+		var key uint32
+		var enabled uint8 = 1
+		if err := objs.CommFilterEnabled.Put(key, enabled); err != nil {
+			log.Fatalf("Failed to enable comm filter: %v", err)
+		}
+		for _, name := range focusList {
+			var comm [16]byte
+			copy(comm[:], name)
+			var val uint8 = 1
+			if err := objs.TargetComms.Put(comm, val); err != nil {
+				log.Fatalf("Failed to add comm filter %q: %v", name, err)
+			}
+		}
+	}
 
 	// Attach tracepoints
 	tpEnter, err := link.Tracepoint("raw_syscalls", "sys_enter", objs.TraceSyscallEnter, nil)
@@ -956,29 +792,13 @@ func main() {
 			case <-done:
 				return
 			case <-displayTicker.C:
-				// Read drop counter from kernel
 				readDropCount(objs.DropCount, &totalDrops)
-				display.render(state, *interval, totalDrops.Load(), totalEvicted.Load(), mapEntries.Load(), mapStale.Load(), mapMaxVal)
+				display.render(state, totalDrops.Load(), totalEvicted.Load(), mapEntries.Load(), mapStale.Load(), mapMaxVal)
 			}
 		}
 	}()
 
-	// Interval reset goroutine
-	intervalTicker := time.NewTicker(*interval)
-	go func() {
-		defer intervalTicker.Stop()
-		for {
-			select {
-			case <-done:
-				return
-			case <-intervalTicker.C:
-				state.ResetIntervals()
-			}
-		}
-	}()
-
-	// Stale entry cleanup goroutine: scan start_times/syscall_ids, count
-	// entries older than staleAge, evict entries older than evictAge.
+	// Stale entry cleanup goroutine
 	cleanupTicker := time.NewTicker(*cleanupInterval)
 	go func() {
 		defer cleanupTicker.Stop()
@@ -1003,16 +823,16 @@ func main() {
 	} else {
 		syscallStr := make([]string, len(traceSyscalls))
 		for i, num := range traceSyscalls {
-			syscallStr[i] = syscallNames[num]
+			syscallStr[i] = syscallName(num)
 		}
 		syscallLabel = strings.Join(syscallStr, ",")
 	}
 	if len(focusList) > 0 {
-		log.Printf("Tracing syscalls: %s | focus: %s | top %d processes (interval=%v)",
-			syscallLabel, strings.Join(focusList, ","), *topProcs, *interval)
+		log.Printf("Tracing syscalls: %s | processes: %s (BPF-filtered) | top %d rows",
+			syscallLabel, strings.Join(focusList, ","), *topProcs)
 	} else {
-		log.Printf("Tracing syscalls: %s | top %d processes (interval=%v)",
-			syscallLabel, *topProcs, *interval)
+		log.Printf("Tracing syscalls: %s | all processes | top %d rows",
+			syscallLabel, *topProcs)
 	}
 
 	// Wait for signal, then drain
@@ -1020,7 +840,7 @@ func main() {
 	readerDone.Wait()
 
 	readDropCount(objs.DropCount, &totalDrops)
-	display.render(state, *interval, totalDrops.Load(), totalEvicted.Load(), mapEntries.Load(), mapStale.Load(), mapMaxVal)
+	display.render(state, totalDrops.Load(), totalEvicted.Load(), mapEntries.Load(), mapStale.Load(), mapMaxVal)
 }
 
 // ktimeNow returns the current CLOCK_MONOTONIC time in nanoseconds,
