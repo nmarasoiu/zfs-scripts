@@ -40,6 +40,18 @@ type RingPollReader struct {
 	batchCount int64       // events in current batch (reader goroutine only)
 	lastBatch  atomic.Int64 // events drained in last completed batch
 	bufSize    int          // ring capacity in bytes
+
+	// Poll stats (written by reader goroutine at ring-empty boundaries)
+	eventSum      int64 // running sum of events across non-empty batches
+	nonEmptyCount int64 // number of non-empty batches observed
+	pollCount     int64 // total ring-empty observations (empty + non-empty endings)
+
+	// Atomic copies for display goroutine
+	atomicEventSum      atomic.Int64
+	atomicNonEmptyCount atomic.Int64
+	atomicPollCount     atomic.Int64
+	lastNonEmpty        atomic.Int64 // batch size of most recent non-empty poll (last1)
+	lastEmptyNano       atomic.Int64 // UnixNano of most recent empty poll (last0)
 }
 
 // NewRingPollReader creates a busy-polling ring buffer reader for the given map.
@@ -110,6 +122,30 @@ func (r *RingPollReader) BufSize() int {
 	return r.bufSize
 }
 
+// PollStats returns ring poll statistics for display.
+//   - avg1: average batch size of non-empty polls
+//   - avg0: average batch size of all polls (including empty)
+//   - last1: batch size of most recent non-empty poll
+//   - last0: time since last empty poll
+func (r *RingPollReader) PollStats() (avg1, avg0 float64, last1 int64, last0 time.Duration) {
+	eSum := r.atomicEventSum.Load()
+	neCount := r.atomicNonEmptyCount.Load()
+	pCount := r.atomicPollCount.Load()
+	last1 = r.lastNonEmpty.Load()
+	lastNano := r.lastEmptyNano.Load()
+
+	if neCount > 0 {
+		avg1 = float64(eSum) / float64(neCount)
+	}
+	if pCount > 0 {
+		avg0 = float64(eSum) / float64(pCount)
+	}
+	if lastNano > 0 {
+		last0 = time.Since(time.Unix(0, lastNano))
+	}
+	return
+}
+
 // ReadInto polls the ring buffer for the next committed record.
 // Sleeps briefly when the ring is empty. Returns true on success,
 // false when the reader has been closed.
@@ -121,11 +157,19 @@ func (r *RingPollReader) ReadInto(rec *PollRecord) bool {
 
 		prod := atomic.LoadUint64(r.prodPos)
 		if r.pos == prod {
-			// Ring empty — record completed batch, sleep
+			// Ring empty — record completed batch and poll stats
+			r.pollCount++
 			if r.batchCount > 0 {
+				r.nonEmptyCount++
+				r.eventSum += r.batchCount
+				r.lastNonEmpty.Store(r.batchCount)
 				r.lastBatch.Store(r.batchCount)
 				r.batchCount = 0
+				r.atomicEventSum.Store(r.eventSum)
+				r.atomicNonEmptyCount.Store(r.nonEmptyCount)
 			}
+			r.atomicPollCount.Store(r.pollCount)
+			r.lastEmptyNano.Store(time.Now().UnixNano())
 			time.Sleep(r.pollSleep)
 			continue
 		}
