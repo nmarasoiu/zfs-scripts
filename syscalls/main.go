@@ -505,7 +505,7 @@ func sectionHeader(buf *strings.Builder, title string, width int) {
 	buf.WriteString("\n")
 }
 
-func (d *Display) render(state *State, intervalDur time.Duration, drops uint64, cleaned uint64) {
+func (d *Display) render(state *State, intervalDur time.Duration, drops uint64, cleaned uint64, mapUsed int64, mapCap int64) {
 	var buf strings.Builder
 	now := time.Now()
 
@@ -572,9 +572,14 @@ func (d *Display) render(state *State, intervalDur time.Duration, drops uint64, 
 	if cleaned > 0 {
 		cleanedInfo = fmt.Sprintf(" | Stale: %s", formatCount(int64(cleaned)))
 	}
-	fmt.Fprintf(&buf, "Total: %s syscalls | Rate: %s/s | Processes: %d | Drops: %s (%s/s)%s%s\n",
+	mapInfo := ""
+	if mapCap > 0 {
+		pct := float64(mapUsed) / float64(mapCap) * 100
+		mapInfo = fmt.Sprintf(" | Map: %s/%s (%4.1f%%)", formatCount(mapUsed), formatCount(mapCap), pct)
+	}
+	fmt.Fprintf(&buf, "Total: %s syscalls | Rate: %s/s | Processes: %d | Drops: %s (%s/s)%s%s%s\n",
 		formatCount(int64(totalSamples)), formatCount(int64(rate)), nProcs,
-		formatCount(int64(drops)), formatCount(int64(dropRate)), cleanedInfo, ringInfo)
+		formatCount(int64(drops)), formatCount(int64(dropRate)), cleanedInfo, mapInfo, ringInfo)
 
 	if d.batchMode {
 		buf.WriteString("\n")
@@ -937,6 +942,8 @@ func main() {
 	// Drop counter: read from kernel map periodically by display goroutine
 	var totalDrops atomic.Uint64
 	var totalCleaned atomic.Uint64
+	var mapEntries atomic.Int64
+	mapMaxVal := int64(objs.StartTimes.MaxEntries())
 
 	// Display goroutine (10 FPS)
 	displayTicker := time.NewTicker(displayInterval)
@@ -949,7 +956,7 @@ func main() {
 			case <-displayTicker.C:
 				// Read drop counter from kernel
 				readDropCount(objs.DropCount, &totalDrops)
-				display.render(state, *interval, totalDrops.Load(), totalCleaned.Load())
+				display.render(state, *interval, totalDrops.Load(), totalCleaned.Load(), mapEntries.Load(), mapMaxVal)
 			}
 		}
 	}()
@@ -979,7 +986,8 @@ func main() {
 			case <-done:
 				return
 			case <-cleanupTicker.C:
-				cleaned := cleanStaleEntries(objs.StartTimes, objs.SyscallIds, 10*time.Second)
+				total, cleaned := cleanStaleEntries(objs.StartTimes, objs.SyscallIds, 10*time.Second)
+				mapEntries.Store(int64(total - cleaned))
 				if cleaned > 0 {
 					totalCleaned.Add(uint64(cleaned))
 				}
@@ -1010,7 +1018,7 @@ func main() {
 	readerDone.Wait()
 
 	readDropCount(objs.DropCount, &totalDrops)
-	display.render(state, *interval, totalDrops.Load(), totalCleaned.Load())
+	display.render(state, *interval, totalDrops.Load(), totalCleaned.Load(), mapEntries.Load(), mapMaxVal)
 }
 
 // ktimeNow returns the current CLOCK_MONOTONIC time in nanoseconds,
@@ -1022,17 +1030,20 @@ func ktimeNow() uint64 {
 }
 
 // cleanStaleEntries iterates start_times and deletes entries older than maxAge.
-// Also deletes corresponding entries from syscall_ids. Returns count cleaned.
-func cleanStaleEntries(startTimes, syscallIds *ebpf.Map, maxAge time.Duration) int {
+// Also deletes corresponding entries from syscall_ids.
+// Returns (total entries before cleanup, stale entries deleted).
+func cleanStaleEntries(startTimes, syscallIds *ebpf.Map, maxAge time.Duration) (int, int) {
 	now := ktimeNow()
 	threshold := now - uint64(maxAge.Nanoseconds())
 
 	var tid uint32
 	var startNs uint64
 	var toDelete []uint32
+	total := 0
 
 	iter := startTimes.Iterate()
 	for iter.Next(&tid, &startNs) {
+		total++
 		if startNs < threshold {
 			toDelete = append(toDelete, tid)
 		}
@@ -1042,7 +1053,7 @@ func cleanStaleEntries(startTimes, syscallIds *ebpf.Map, maxAge time.Duration) i
 		startTimes.Delete(tid)
 		syscallIds.Delete(tid)
 	}
-	return len(toDelete)
+	return total, len(toDelete)
 }
 
 func readDropCount(m *ebpf.Map, dst *atomic.Uint64) {
