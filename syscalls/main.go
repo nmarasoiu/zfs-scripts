@@ -521,7 +521,7 @@ func formatTop5(top *topN) string {
 
 const (
 	focusLineWidth   = 155
-	summaryLineWidth = 93
+	summaryLineWidth = 97
 )
 
 func sectionHeader(buf *strings.Builder, title string, width int) {
@@ -717,7 +717,7 @@ func (d *Display) renderProcessSummary(buf *strings.Builder, procSyscallStats ma
 	sectionHeader(buf, fmt.Sprintf("Process × Syscall (top %d)", totalShown), dualWidth)
 
 	// Header row (two columns)
-	hdr := fmt.Sprintf("%-24s │ %8s %8s %8s %8s %8s │ %9s %9s",
+	hdr := fmt.Sprintf("%-28s │ %8s %8s %8s %8s %8s │ %9s %9s",
 		"LIFETIME", "avg", "p50", "p90", "p99", "max", "samples", "rate")
 	fmt.Fprintf(buf, "%s │ %s\n", hdr, hdr)
 	buf.WriteString(strings.Repeat("-", dualWidth))
@@ -789,13 +789,13 @@ func (d *Display) renderProcessSummary(buf *strings.Builder, procSyscallStats ma
 func formatSummaryRow(name string, st *simpleStats, sketch *ddsketch.DDSketch, secs float64) string {
 	n := st.count
 	if n == 0 {
-		return fmt.Sprintf("%-24s │ %8s %8s %8s %8s %8s │ %9s %9s",
+		return fmt.Sprintf("%-28s │ %8s %8s %8s %8s %8s │ %9s %9s",
 			name, "-", "-", "-", "-", "-", "0", "-")
 	}
 	p50, _ := sketch.GetValueAtQuantile(0.50)
 	p90, _ := sketch.GetValueAtQuantile(0.90)
 	p99, _ := sketch.GetValueAtQuantile(0.99)
-	return fmt.Sprintf("%-24s │ %s %s %s %s %s │ %9s %9s",
+	return fmt.Sprintf("%-28s │ %s %s %s %s %s │ %9s %9s",
 		name,
 		formatLatencyPadded(st.Avg()),
 		formatLatencyPadded(int64(p50)),
