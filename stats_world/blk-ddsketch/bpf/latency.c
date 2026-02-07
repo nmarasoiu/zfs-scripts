@@ -116,6 +116,6 @@ int BPF_PROG(block_rq_complete, struct request *rq, blk_status_t error, unsigned
 
     e->dev = dev;
     e->latency_ns = latency_ns;
-    bpf_ringbuf_submit(e, 0);
+    bpf_ringbuf_submit(e, BPF_RB_NO_WAKEUP);
     return 0;
 }

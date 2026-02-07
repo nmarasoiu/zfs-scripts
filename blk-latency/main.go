@@ -8,8 +8,6 @@
 package main
 
 import (
-	"bytes"
-	"encoding/binary"
 	"flag"
 	"fmt"
 	"log"
@@ -22,26 +20,27 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"github.com/HdrHistogram/hdrhistogram-go"
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
-	"github.com/cilium/ebpf/ringbuf"
 	"github.com/cilium/ebpf/rlimit"
 )
 
 const (
 	displayInterval = 100 * time.Millisecond // 10 FPS display refresh
-	// HDR histogram range: 1µs to 60s, 3 significant figures
+	// HDR histogram range: 1us to 60s, 3 significant figures
 	histMin    = 1
 	histMax    = 60_000_000
 	histSigFig = 3
 )
 
 var (
-	interval   = flag.Duration("i", 10*time.Second, "stats interval for interval view")
-	devices    = flag.String("d", "", "comma-separated device filter (e.g., sdc,sdd or 8:32,8:48)")
-	batch      = flag.Bool("batch", false, "batch mode (no screen clearing)")
+	interval  = flag.Duration("i", 10*time.Second, "stats interval for interval view")
+	devices   = flag.String("d", "", "comma-separated device filter (e.g., sdc,sdd or 8:32,8:48)")
+	batch     = flag.Bool("batch", false, "batch mode (no screen clearing)")
+	pollSleep = flag.Duration("poll-sleep", 50*time.Microsecond, "ring buffer poll sleep when empty")
 )
 
 // Device names cache: dev -> name
@@ -50,10 +49,10 @@ var (
 	devNamesMu sync.RWMutex
 )
 
-// formatLatency formats a latency value (in µs) to human-readable string
+// formatLatency formats a latency value (in us) to human-readable string
 func formatLatency(us int64) string {
 	if us < 100_000 {
-		return fmt.Sprintf("%dµs", us)
+		return fmt.Sprintf("%dus", us)
 	}
 	if us < 1_000_000 {
 		ms := (us + 500) / 1000
@@ -95,6 +94,27 @@ func formatDuration(d time.Duration) string {
 	h := int(d.Hours())
 	m := int(d.Minutes()) % 60
 	return fmt.Sprintf("%dh%dm", h, m)
+}
+
+func formatBytes(n int64) string {
+	if n >= 1<<20 {
+		return fmt.Sprintf("%.1fM", float64(n)/(1<<20))
+	}
+	if n >= 1<<10 {
+		return fmt.Sprintf("%.1fK", float64(n)/(1<<10))
+	}
+	return fmt.Sprintf("%dB", n)
+}
+
+func formatMicro(d time.Duration) string {
+	us := d.Microseconds()
+	if us < 1000 {
+		return fmt.Sprintf("%dus", us)
+	}
+	if us < 1000000 {
+		return fmt.Sprintf("%.1fms", float64(us)/1000)
+	}
+	return fmt.Sprintf("%.1fs", d.Seconds())
 }
 
 func devToMajorMinor(dev uint32) (uint32, uint32) {
@@ -239,16 +259,6 @@ func (t *topN) Reset() {
 	t.values = t.values[:0]
 }
 
-// Clone creates a deep copy
-func (t *topN) Clone() *topN {
-	clone := &topN{
-		values: make([]int64, len(t.values)),
-		n:      t.n,
-	}
-	copy(clone.values, t.values)
-	return clone
-}
-
 // bottomN tracks the bottom N minimum values
 type bottomN struct {
 	values []int64
@@ -297,16 +307,6 @@ func (b *bottomN) Reset() {
 	b.values = b.values[:0]
 }
 
-// Clone creates a deep copy
-func (b *bottomN) Clone() *bottomN {
-	clone := &bottomN{
-		values: make([]int64, len(b.values)),
-		n:      b.n,
-	}
-	copy(clone.values, b.values)
-	return clone
-}
-
 // deviceStats holds both interval and lifetime histograms for a device
 type deviceStats struct {
 	interval    *hdrhistogram.Histogram // Current interval (reset each period)
@@ -345,21 +345,15 @@ func (ds *deviceStats) ResetInterval() {
 	ds.intervalBot.Reset()
 }
 
-// Snapshot creates deep copies of both histograms for lock-free display
-func (ds *deviceStats) Snapshot() *deviceStats {
-	return &deviceStats{
-		interval:    hdrhistogram.Import(ds.interval.Export()),
-		lifetime:    hdrhistogram.Import(ds.lifetime.Export()),
-		intervalTop: ds.intervalTop.Clone(),
-		lifetimeTop: ds.lifetimeTop.Clone(),
-		intervalBot: ds.intervalBot.Clone(),
-		lifetimeBot: ds.lifetimeBot.Clone(),
-	}
+// pendingEvent holds a decoded event for batch processing
+type pendingEvent struct {
+	dev       uint32
+	latencyUs int64
 }
 
 // State holds all device stats with mutex protection
 type State struct {
-	mu        sync.RWMutex
+	mu        sync.Mutex
 	stats     map[uint32]*deviceStats
 	startTime time.Time
 	lastReset time.Time
@@ -374,14 +368,17 @@ func newState() *State {
 	}
 }
 
-func (s *State) Record(dev uint32, latencyUs int64) {
+func (s *State) RecordBatch(batch []pendingEvent) {
 	s.mu.Lock()
-	ds, ok := s.stats[dev]
-	if !ok {
-		ds = newDeviceStats()
-		s.stats[dev] = ds
+	for i := range batch {
+		e := &batch[i]
+		ds, ok := s.stats[e.dev]
+		if !ok {
+			ds = newDeviceStats()
+			s.stats[e.dev] = ds
+		}
+		ds.Record(e.latencyUs)
 	}
-	ds.Record(latencyUs)
 	s.mu.Unlock()
 }
 
@@ -394,20 +391,10 @@ func (s *State) ResetIntervals() {
 	s.mu.Unlock()
 }
 
-func (s *State) Snapshot() (map[uint32]*deviceStats, time.Time, time.Time) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	snap := make(map[uint32]*deviceStats)
-	for dev, ds := range s.stats {
-		snap[dev] = ds.Snapshot()
-	}
-	return snap, s.startTime, s.lastReset
-}
-
 // Display handles rendering
 type Display struct {
 	batchMode bool
+	ring      *RingPollReader
 }
 
 func (d *Display) resetCursor() {
@@ -452,30 +439,37 @@ func formatBot5(bot *bottomN) string {
 
 const lineWidth = 258
 
-func (d *Display) render(stats map[uint32]*deviceStats, startTime, lastReset time.Time, intervalDur time.Duration, drops uint64) {
+func (d *Display) render(state *State, intervalDur time.Duration, drops uint64) {
 	var buf strings.Builder
 	now := time.Now()
 
+	// Hold lock while reading state and formatting strings -- no copies/clones.
+	state.mu.Lock()
+
+	if len(state.stats) == 0 {
+		state.mu.Unlock()
+		return
+	}
+
 	// Sort devices by name
 	var devList []uint32
-	for dev := range stats {
+	for dev := range state.stats {
 		devList = append(devList, dev)
 	}
 	sort.Slice(devList, func(i, j int) bool {
 		return lookupDevName(devList[i]) < lookupDevName(devList[j])
 	})
 
-	timestamp := now.Format("15:04:05")
-	elapsed := now.Sub(startTime)
-	intervalElapsed := now.Sub(lastReset)
+	elapsed := now.Sub(state.startTime)
+	intervalElapsed := now.Sub(state.lastReset)
 
 	fmt.Fprintf(&buf, "Block I/O Latency Monitor - %s (uptime: %s, interval: %s/%s)\n",
-		timestamp, formatDuration(elapsed), formatDuration(intervalElapsed), formatDuration(intervalDur))
+		now.Format("15:04:05"), formatDuration(elapsed), formatDuration(intervalElapsed), formatDuration(intervalDur))
 	buf.WriteString(strings.Repeat("=", lineWidth))
 	buf.WriteString("\n")
 
 	// Header - fixed columns: percentiles, bottom 5 min, top 10 max
-	fmt.Fprintf(&buf, "%-10s │ %8s %8s %8s %8s %8s %8s %8s %8s │ %8s %8s %8s %8s %8s │ %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s │ %9s\n",
+	fmt.Fprintf(&buf, "%-10s | %8s %8s %8s %8s %8s %8s %8s %8s | %8s %8s %8s %8s %8s | %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s | %9s\n",
 		"INTERVAL", "avg", "p50", "p90", "p95", "p99", "p99.9", "p99.99", "p99.999",
 		"min", "min+1", "min+2", "min+3", "min+4",
 		"max-9", "max-8", "max-7", "max-6", "max-5", "max-4", "max-3", "max-2", "max-1", "max", "samples")
@@ -484,18 +478,18 @@ func (d *Display) render(stats map[uint32]*deviceStats, startTime, lastReset tim
 
 	// Interval stats
 	for _, dev := range devList {
-		ds := stats[dev]
+		ds := state.stats[dev]
 		name := lookupDevName(dev)
 		h := ds.interval
 		n := h.TotalCount()
 		if n == 0 {
-			fmt.Fprintf(&buf, "%-10s │ %8s %8s %8s %8s %8s %8s %8s %8s │ %8s %8s %8s %8s %8s │ %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s │ %9s\n",
+			fmt.Fprintf(&buf, "%-10s | %8s %8s %8s %8s %8s %8s %8s %8s | %8s %8s %8s %8s %8s | %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s | %9s\n",
 				name, "-", "-", "-", "-", "-", "-", "-", "-",
 				"-", "-", "-", "-", "-",
 				"-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "0")
 			continue
 		}
-		fmt.Fprintf(&buf, "%-10s │ %s %s %s %s %s %s %s %s │ %s │ %s │ %9s\n",
+		fmt.Fprintf(&buf, "%-10s | %s %s %s %s %s %s %s %s | %s | %s | %9s\n",
 			name,
 			formatLatencyPadded(int64(h.Mean())),
 			formatLatencyPadded(h.ValueAtQuantile(50)),
@@ -512,7 +506,7 @@ func (d *Display) render(stats map[uint32]*deviceStats, startTime, lastReset tim
 	}
 
 	buf.WriteString("\n")
-	fmt.Fprintf(&buf, "%-10s │ %8s %8s %8s %8s %8s %8s %8s %8s │ %8s %8s %8s %8s %8s │ %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s │ %9s\n",
+	fmt.Fprintf(&buf, "%-10s | %8s %8s %8s %8s %8s %8s %8s %8s | %8s %8s %8s %8s %8s | %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s | %9s\n",
 		"LIFETIME", "avg", "p50", "p90", "p95", "p99", "p99.9", "p99.99", "p99.999",
 		"min", "min+1", "min+2", "min+3", "min+4",
 		"max-9", "max-8", "max-7", "max-6", "max-5", "max-4", "max-3", "max-2", "max-1", "max", "samples")
@@ -522,19 +516,19 @@ func (d *Display) render(stats map[uint32]*deviceStats, startTime, lastReset tim
 	// Lifetime stats
 	var totalSamples int64
 	for _, dev := range devList {
-		ds := stats[dev]
+		ds := state.stats[dev]
 		name := lookupDevName(dev)
 		h := ds.lifetime
 		n := h.TotalCount()
 		totalSamples += n
 		if n == 0 {
-			fmt.Fprintf(&buf, "%-10s │ %8s %8s %8s %8s %8s %8s %8s %8s │ %8s %8s %8s %8s %8s │ %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s │ %9s\n",
+			fmt.Fprintf(&buf, "%-10s | %8s %8s %8s %8s %8s %8s %8s %8s | %8s %8s %8s %8s %8s | %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s | %9s\n",
 				name, "-", "-", "-", "-", "-", "-", "-", "-",
 				"-", "-", "-", "-", "-",
 				"-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "0")
 			continue
 		}
-		fmt.Fprintf(&buf, "%-10s │ %s %s %s %s %s %s %s %s │ %s │ %s │ %9s\n",
+		fmt.Fprintf(&buf, "%-10s | %s %s %s %s %s %s %s %s | %s | %s | %9s\n",
 			name,
 			formatLatencyPadded(int64(h.Mean())),
 			formatLatencyPadded(h.ValueAtQuantile(50)),
@@ -553,7 +547,11 @@ func (d *Display) render(stats map[uint32]*deviceStats, startTime, lastReset tim
 	buf.WriteString(strings.Repeat("=", lineWidth))
 	buf.WriteString("\n")
 
-	// Stats summary
+	nDevices := len(state.stats)
+
+	state.mu.Unlock()
+
+	// Everything below is lock-free: computed values + ring stats (atomic reads)
 	rate := float64(0)
 	if elapsed.Seconds() > 0 {
 		rate = float64(totalSamples) / elapsed.Seconds()
@@ -562,8 +560,28 @@ func (d *Display) render(stats map[uint32]*deviceStats, startTime, lastReset tim
 	if elapsed.Seconds() > 0 {
 		dropRate = float64(drops) / elapsed.Seconds()
 	}
-	fmt.Fprintf(&buf, "Total: %s samples | Rate: %s/s | Drops: %s (%s/s) | HDR histograms: ~40KB/device\n",
-		formatCount(totalSamples), formatCount(int64(rate)), formatCount(int64(drops)), formatCount(int64(dropRate)))
+
+	ringInfo := ""
+	if d.ring != nil {
+		pending := d.ring.Pending()
+		capBytes := d.ring.BufSize()
+		maxPend := d.ring.MaxPending()
+		pctFull := float64(pending) / float64(capBytes) * 100
+		maxPct := float64(maxPend) / float64(capBytes) * 100
+		avg1, avg0, last1, last0 := d.ring.PollStats()
+		last0Str := "-"
+		if last0 > 0 {
+			last0Str = formatMicro(last0)
+		}
+		ringInfo = fmt.Sprintf(" | Ring: %s/%s (%.1f%%) max: %s/%s (%.1f%%) avg1:%.0f avg0:%.1f last1:%s last0:%s",
+			formatBytes(int64(pending)), formatBytes(int64(capBytes)), pctFull,
+			formatBytes(maxPend), formatBytes(int64(capBytes)), maxPct,
+			avg1, avg0, formatCount(last1), last0Str)
+	}
+
+	fmt.Fprintf(&buf, "Total: %s samples | Rate: %s/s | Devices: %d | Drops: %s (%s/s) | HDR: ~40KB/dev%s\n",
+		formatCount(totalSamples), formatCount(int64(rate)), nDevices,
+		formatCount(int64(drops)), formatCount(int64(dropRate)), ringInfo)
 
 	if d.batchMode {
 		buf.WriteString("\n")
@@ -627,15 +645,15 @@ func main() {
 	}
 	defer tpComplete.Close()
 
-	// Open ring buffer
-	rd, err := ringbuf.NewReader(objs.Events)
+	// Open ring buffer (busy-poll reader -- no epoll)
+	rd, err := NewRingPollReader(objs.Events, *pollSleep)
 	if err != nil {
 		log.Fatalf("Failed to open ring buffer: %v", err)
 	}
-	defer rd.Close()
+	defer rd.Cleanup()
 
 	state := newState()
-	display := &Display{batchMode: *batch}
+	display := &Display{batchMode: *batch, ring: rd}
 
 	// Signal handling
 	done := make(chan struct{})
@@ -649,28 +667,24 @@ func main() {
 		rd.Close()
 	}()
 
-	// Reader goroutine: pulls from kernel ring buffer, processes events directly into State
+	// Reader goroutine: busy-polls ring buffer, batches events, flushes under single Lock
+	const flushSize = 1024
+	const flushInterval = 10 * time.Millisecond
+
 	var readerDone sync.WaitGroup
 	readerDone.Add(1)
 	go func() {
 		defer readerDone.Done()
-		var event bpfLatencyEvent
-		for {
-			record, err := rd.Read()
-			if err != nil {
-				if err == ringbuf.ErrClosed {
-					return
-				}
-				select {
-				case <-done:
-					return
-				default:
-					continue
-				}
-			}
-			if err := binary.Read(bytes.NewReader(record.RawSample), binary.LittleEndian, &event); err != nil {
+		var rec PollRecord
+		eventSize := int(unsafe.Sizeof(bpfLatencyEvent{}))
+		pending := make([]pendingEvent, 0, flushSize)
+		lastFlush := time.Now()
+
+		for rd.ReadInto(&rec) {
+			if len(rec.RawSample) < eventSize {
 				continue
 			}
+			event := *(*bpfLatencyEvent)(unsafe.Pointer(&rec.RawSample[0]))
 			devName := lookupDevName(event.Dev)
 			if !isTrackedDevice(devName) {
 				continue
@@ -682,7 +696,18 @@ func main() {
 			if latencyUs > histMax {
 				latencyUs = histMax
 			}
-			state.Record(event.Dev, latencyUs)
+			pending = append(pending, pendingEvent{event.Dev, latencyUs})
+
+			if len(pending) >= flushSize || time.Since(lastFlush) >= flushInterval {
+				state.RecordBatch(pending)
+				rd.Commit()
+				pending = pending[:0]
+				lastFlush = time.Now()
+			}
+		}
+		if len(pending) > 0 {
+			state.RecordBatch(pending)
+			rd.Commit()
 		}
 	}()
 
@@ -699,10 +724,7 @@ func main() {
 				return
 			case <-displayTicker.C:
 				readDropCount(objs.DropCount, &totalDrops)
-				stats, startTime, lastReset := state.Snapshot()
-				if len(stats) > 0 {
-					display.render(stats, startTime, lastReset, *interval, totalDrops.Load())
-				}
+				display.render(state, *interval, totalDrops.Load())
 			}
 		}
 	}()
@@ -721,15 +743,14 @@ func main() {
 		}
 	}()
 
-	log.Printf("Tracing block I/O latency (interval=%v, display=10fps)...", *interval)
+	log.Printf("Tracing block I/O latency (interval=%v, display=10fps, poll-sleep=%v)...", *interval, *pollSleep)
 
 	// Wait for signal, then drain
 	<-done
 	readerDone.Wait()
 
 	readDropCount(objs.DropCount, &totalDrops)
-	stats, startTime, lastReset := state.Snapshot()
-	display.render(stats, startTime, lastReset, *interval, totalDrops.Load())
+	display.render(state, *interval, totalDrops.Load())
 }
 
 func readDropCount(m *ebpf.Map, dst *atomic.Uint64) {

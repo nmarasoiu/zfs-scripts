@@ -12,8 +12,6 @@
 package main
 
 import (
-	"bytes"
-	"encoding/binary"
 	"flag"
 	"fmt"
 	"log"
@@ -26,6 +24,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
@@ -40,7 +39,7 @@ const (
 )
 
 // Device groups: SSD/NVMe first, then USB drives
-var devices = []string{"sda", "nvme0n1", "nvme1n1", "", "sdc", "sdd", "sde", "sdf", "sdg"}
+var deviceList = []string{"sda", "nvme0n1", "nvme1n1", "", "sdc", "sdd", "sde", "sdf", "sdg"}
 var usbDevices = []string{"sdc", "sdd", "sde", "sdf", "sdg"}
 
 // Configurable percentiles to display (P0 replaced by Util column)
@@ -122,17 +121,6 @@ func (h *Histogram) Percentile(p float64) float64 {
 		}
 	}
 	return float64(lowerValue)
-}
-
-func (h *Histogram) Snapshot() *Histogram {
-	snap := &Histogram{
-		total:   h.total,
-		sum:     h.sum,
-		nonZero: h.nonZero,
-		max:     h.max,
-	}
-	copy(snap.buckets[:], h.buckets[:])
-	return snap
 }
 
 // ---------- Device helpers ----------
@@ -306,9 +294,9 @@ func makeBar(current, p90, width int) string {
 	var bar strings.Builder
 	for i := 1; i <= width; i++ {
 		if i <= current {
-			bar.WriteString("█")
+			bar.WriteString("\xe2\x96\x88") // full block
 		} else if i <= p90 {
-			bar.WriteString("░")
+			bar.WriteString("\xe2\x96\x91") // light shade
 		} else {
 			bar.WriteString("-")
 		}
@@ -333,7 +321,7 @@ func renderBucketBar(pct float64, barWidth int) string {
 	var bar strings.Builder
 	for i := 0; i < barWidth; i++ {
 		if i < filled {
-			bar.WriteString("░")
+			bar.WriteString("\xe2\x96\x91") // light shade
 		} else {
 			bar.WriteString("-")
 		}
@@ -442,17 +430,24 @@ func renderAllHistograms(buf *strings.Builder, histograms map[string]*Histogram,
 	}
 }
 
+// ---------- pendingEvent for batch processing ----------
+
+type pendingEvent struct {
+	devName string
+	depth   int
+}
+
 // ---------- State (shared between reader and display goroutines) ----------
 
 type State struct {
-	mu           sync.RWMutex
+	mu           sync.Mutex
 	histograms   map[string]*Histogram
 	usbAggregate *Histogram
 }
 
 func newState() *State {
 	hists := make(map[string]*Histogram)
-	for _, dev := range devices {
+	for _, dev := range deviceList {
 		if dev == "" {
 			continue
 		}
@@ -464,34 +459,26 @@ func newState() *State {
 	}
 }
 
-func (s *State) Record(devName string, depth int) {
+func (s *State) RecordBatch(batch []pendingEvent) {
 	s.mu.Lock()
-	h, ok := s.histograms[devName]
-	if !ok {
-		h = NewHistogram()
-		s.histograms[devName] = h
-	}
-	h.Add(depth)
+	for i := range batch {
+		e := &batch[i]
+		h, ok := s.histograms[e.devName]
+		if !ok {
+			h = NewHistogram()
+			s.histograms[e.devName] = h
+		}
+		h.Add(e.depth)
 
-	// Update USB aggregate if this is a USB device
-	for _, usbDev := range usbDevices {
-		if devName == usbDev {
-			s.usbAggregate.Add(depth)
-			break
+		// Update USB aggregate if this is a USB device
+		for _, usbDev := range usbDevices {
+			if e.devName == usbDev {
+				s.usbAggregate.Add(e.depth)
+				break
+			}
 		}
 	}
 	s.mu.Unlock()
-}
-
-func (s *State) Snapshot() (map[string]*Histogram, *Histogram) {
-	s.mu.RLock()
-	hists := make(map[string]*Histogram, len(s.histograms))
-	for dev, h := range s.histograms {
-		hists[dev] = h.Snapshot()
-	}
-	usbAggr := s.usbAggregate.Snapshot()
-	s.mu.RUnlock()
-	return hists, usbAggr
 }
 
 // ---------- Current depth tracking (atomics for lock-free display) ----------
@@ -505,7 +492,7 @@ func newCurrentDepths() *CurrentDepths {
 	cd := &CurrentDepths{
 		values: make(map[string]*atomic.Int32),
 	}
-	for _, dev := range devices {
+	for _, dev := range deviceList {
 		if dev == "" {
 			continue
 		}
@@ -531,7 +518,7 @@ func (d *Display) resetCursor() {
 	}
 }
 
-func (d *Display) render(histograms map[string]*Histogram, usbAggregate *Histogram, currents map[string]int, usbAggrCurrent int, totalEvents uint64, totalDrops uint64) {
+func (d *Display) render(state *State, currents map[string]int, usbAggrCurrent int, totalEvents uint64, totalDrops uint64) {
 	d.displayCount++
 	var buf strings.Builder
 
@@ -557,13 +544,16 @@ func (d *Display) render(histograms map[string]*Histogram, usbAggregate *Histogr
 	buf.WriteString(strings.Repeat("-", lineWidth))
 	buf.WriteString("\n")
 
-	for _, dev := range devices {
+	// Hold lock while reading histograms and formatting
+	state.mu.Lock()
+
+	for _, dev := range deviceList {
 		if dev == "" {
 			buf.WriteString("\n")
 			continue
 		}
 
-		hist := histograms[dev]
+		hist := state.histograms[dev]
 		if hist == nil {
 			hist = NewHistogram()
 		}
@@ -593,10 +583,10 @@ func (d *Display) render(histograms map[string]*Histogram, usbAggregate *Histogr
 
 		// After last USB device, show aggregate USB stats
 		if dev == "sdg" {
-			aggrPcts := calcPercentiles(usbAggregate)
-			aggrPcts[len(aggrPcts)-1] = float64(usbAggregate.GetMax())
-			aggrAvg := usbAggregate.GetAverage()
-			aggrUtil := usbAggregate.GetUtilization()
+			aggrPcts := calcPercentiles(state.usbAggregate)
+			aggrPcts[len(aggrPcts)-1] = float64(state.usbAggregate.GetMax())
+			aggrAvg := state.usbAggregate.GetAverage()
+			aggrUtil := state.usbAggregate.GetUtilization()
 
 			fmt.Fprintf(&buf, "%-8s %4d/%-3d %7.1f%%", "USB", usbAggrCurrent, maxQueueUSBAggr, aggrUtil)
 			for i, val := range aggrPcts {
@@ -622,12 +612,19 @@ func (d *Display) render(histograms map[string]*Histogram, usbAggregate *Histogr
 
 	buf.WriteString("\n")
 	if d.batchMode {
-		buf.WriteString("Legend: █ = current  ░ = p99 (long-term)  - = unused\n")
+		buf.WriteString("Legend: \xe2\x96\x88 = current  \xe2\x96\x91 = p99 (long-term)  - = unused\n")
 	} else {
-		buf.WriteString("Legend: █= current  ░= p99 (long-term)  -= unused\n")
+		buf.WriteString("Legend: \xe2\x96\x88= current  \xe2\x96\x91= p99 (long-term)  -= unused\n")
 	}
 
-	// Footer: event stats + ring buffer stats
+	// Histogram distribution display
+	buf.WriteString("\n")
+	renderAllHistograms(&buf, state.histograms, state.usbAggregate, 5)
+	buf.WriteString("Log scale: \xe2\x96\x91\xe2\x96\x91\xe2\x96\x91\xe2\x96\x91\xe2\x96\x91=100%  \xe2\x96\x91\xe2\x96\x91\xe2\x96\x91--=1%  \xe2\x96\x91\xe2\x96\x91---=0.1%  \xe2\x96\x91----=0.01%\n")
+
+	state.mu.Unlock()
+
+	// Footer: event stats + ring buffer stats (lock-free)
 	elapsed := time.Since(d.startTime)
 	elapsedSec := elapsed.Seconds()
 	eventRate := 0.0
@@ -652,11 +649,6 @@ func (d *Display) render(histograms map[string]*Histogram, usbAggregate *Histogr
 			formatBytes(maxPend), formatBytes(int64(bufSize)))
 	}
 
-	// Histogram distribution display
-	buf.WriteString("\n")
-	renderAllHistograms(&buf, histograms, usbAggregate, 5)
-	buf.WriteString("Log scale: ░░░░░=100%  ░░░--=1%  ░░---=0.1%  ░----=0.01%\n")
-
 	if d.batchMode {
 		buf.WriteString("\n")
 	}
@@ -670,7 +662,7 @@ func formatRingDuration(d time.Duration) string {
 		return "-"
 	}
 	if d < time.Millisecond {
-		return fmt.Sprintf("%dµs", d.Microseconds())
+		return fmt.Sprintf("%dus", d.Microseconds())
 	}
 	if d < time.Second {
 		return fmt.Sprintf("%dms", d.Milliseconds())
@@ -735,7 +727,7 @@ func readCurrentDepths(m *ebpf.Map, currents *CurrentDepths) {
 // ---------- main ----------
 
 func main() {
-	batch := flag.Bool("batch", false, "batch mode (no screen clearing)")
+	batchFlag := flag.Bool("batch", false, "batch mode (no screen clearing)")
 	devFilter := flag.String("d", "", "comma-separated device filter (e.g., sdc,sdd or 8:32,8:48)")
 	pollSleep := flag.Duration("poll-sleep", 50*time.Microsecond, "busy-poll sleep when ring empty")
 	flag.Parse()
@@ -805,7 +797,7 @@ func main() {
 
 	// Get device sizes at startup
 	deviceSizes := make(map[string]string)
-	for _, dev := range devices {
+	for _, dev := range deviceList {
 		if dev == "" {
 			continue
 		}
@@ -815,7 +807,7 @@ func main() {
 	state := newState()
 	currents := newCurrentDepths()
 	display := &Display{
-		batchMode:   *batch,
+		batchMode:   *batchFlag,
 		p50Index:    p50Index,
 		deviceSizes: deviceSizes,
 		startTime:   time.Now(),
@@ -834,25 +826,43 @@ func main() {
 		rd.Close()
 	}()
 
-	// Reader goroutine: busy-polls ring buffer, processes events into State
+	// Reader goroutine: busy-polls ring buffer, batches events, flushes under single Lock
+	const flushSize = 1024
+	const flushInterval = 10 * time.Millisecond
+
 	var totalEvents atomic.Uint64
 	var readerDone sync.WaitGroup
 	readerDone.Add(1)
 	go func() {
 		defer readerDone.Done()
 		var rec PollRecord
-		var event bpfQueueEvent
+		eventSize := int(unsafe.Sizeof(bpfQueueEvent{}))
+		pending := make([]pendingEvent, 0, flushSize)
+		lastFlush := time.Now()
+
 		for rd.ReadInto(&rec) {
-			if err := binary.Read(bytes.NewReader(rec.RawSample), binary.LittleEndian, &event); err != nil {
+			if len(rec.RawSample) < eventSize {
 				continue
 			}
+			event := *(*bpfQueueEvent)(unsafe.Pointer(&rec.RawSample[0]))
 			devName := lookupDevName(event.Dev)
 			if !isTrackedDevice(devName) {
 				continue
 			}
-			depth := int(event.Depth)
-			state.Record(devName, depth)
-			totalEvents.Add(1)
+			pending = append(pending, pendingEvent{devName, int(event.Depth)})
+
+			if len(pending) >= flushSize || time.Since(lastFlush) >= flushInterval {
+				state.RecordBatch(pending)
+				totalEvents.Add(uint64(len(pending)))
+				rd.Commit()
+				pending = pending[:0]
+				lastFlush = time.Now()
+			}
+		}
+		if len(pending) > 0 {
+			state.RecordBatch(pending)
+			totalEvents.Add(uint64(len(pending)))
+			rd.Commit()
 		}
 	}()
 
@@ -872,7 +882,7 @@ func main() {
 				readCurrentDepths(objs.QueueDepth, currents)
 
 				currentMap := make(map[string]int)
-				for _, dev := range devices {
+				for _, dev := range deviceList {
 					if dev == "" {
 						continue
 					}
@@ -880,8 +890,7 @@ func main() {
 				}
 				usbAggrCurrent := int(currents.usbAggrCurr.Load())
 
-				hists, usbAggr := state.Snapshot()
-				display.render(hists, usbAggr, currentMap, usbAggrCurrent, totalEvents.Load(), totalDrops.Load())
+				display.render(state, currentMap, usbAggrCurrent, totalEvents.Load(), totalDrops.Load())
 			}
 		}
 	}()
@@ -893,13 +902,12 @@ func main() {
 	readerDone.Wait()
 
 	readDropCount(objs.DropCount, &totalDrops)
-	hists, usbAggr := state.Snapshot()
 	currentMap := make(map[string]int)
-	for _, dev := range devices {
+	for _, dev := range deviceList {
 		if dev == "" {
 			continue
 		}
 		currentMap[dev] = 0
 	}
-	display.render(hists, usbAggr, currentMap, 0, totalEvents.Load(), totalDrops.Load())
+	display.render(state, currentMap, 0, totalEvents.Load(), totalDrops.Load())
 }
