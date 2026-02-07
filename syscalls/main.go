@@ -46,6 +46,7 @@ var (
 	topProcs    = flag.Int("n", 28, "top N process/syscall rows per column in summary")
 	syscallList = flag.String("s", "all", "comma-separated syscalls to trace (or 'all')")
 	batch       = flag.Bool("batch", false, "batch mode (no screen clearing)")
+	pollSleep   = flag.Duration("poll-sleep", 50*time.Microsecond, "ring buffer poll sleep when empty")
 )
 
 // x86_64 syscall numbers
@@ -227,6 +228,19 @@ func formatCount(n int64) string {
 		return fmt.Sprintf("%.1fK", float64(n)/1_000)
 	}
 	return fmt.Sprintf("%d", n)
+}
+
+func formatBytes(n int64) string {
+	if n >= 1<<30 {
+		return fmt.Sprintf("%.1fG", float64(n)/(1<<30))
+	}
+	if n >= 1<<20 {
+		return fmt.Sprintf("%.1fM", float64(n)/(1<<20))
+	}
+	if n >= 1<<10 {
+		return fmt.Sprintf("%.1fK", float64(n)/(1<<10))
+	}
+	return fmt.Sprintf("%dB", n)
 }
 
 func formatDuration(d time.Duration) string {
@@ -498,6 +512,7 @@ type Display struct {
 	batchMode      bool
 	focusProcesses []string // ordered list of focus process names
 	topN           int
+	ring           *RingPollReader
 }
 
 func (d *Display) resetCursor() {
@@ -575,9 +590,19 @@ func (d *Display) render(snap *stateSnapshot, intervalDur time.Duration, drops u
 	if elapsed.Seconds() > 0 {
 		dropRate = float64(drops) / elapsed.Seconds()
 	}
-	fmt.Fprintf(&buf, "Total: %s syscalls | Rate: %s/s | Processes: %d | Drops: %s (%s/s)\n",
+	ringInfo := ""
+	if d.ring != nil {
+		pending := d.ring.Pending()
+		capBytes := d.ring.BufSize()
+		batch := d.ring.LastBatch()
+		pctFull := float64(pending) / float64(capBytes) * 100
+		ringInfo = fmt.Sprintf(" | Ring: %s/%s (%.1f%%) batch %s",
+			formatBytes(int64(pending)), formatBytes(int64(capBytes)), pctFull,
+			formatCount(batch))
+	}
+	fmt.Fprintf(&buf, "Total: %s syscalls | Rate: %s/s | Processes: %d | Drops: %s (%s/s)%s\n",
 		formatCount(int64(totalSamples)), formatCount(int64(rate)), len(snap.procSyscallStats),
-		formatCount(int64(drops)), formatCount(int64(dropRate)))
+		formatCount(int64(drops)), formatCount(int64(dropRate)), ringInfo)
 
 	if d.batchMode {
 		buf.WriteString("\n")
@@ -889,7 +914,7 @@ func main() {
 	defer tpExit.Close()
 
 	// Open ring buffer (busy-poll reader — no epoll)
-	rd, err := NewRingPollReader(objs.Events)
+	rd, err := NewRingPollReader(objs.Events, *pollSleep)
 	if err != nil {
 		log.Fatalf("Failed to open ring buffer: %v", err)
 	}
@@ -900,6 +925,7 @@ func main() {
 		batchMode:      *batch,
 		focusProcesses: focusList,
 		topN:           *topProcs,
+		ring:           rd,
 	}
 
 	// Signal handling

@@ -4,9 +4,9 @@ import (
 	"encoding/binary"
 	"fmt"
 	"os"
-	"runtime"
 	"sync/atomic"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"github.com/cilium/ebpf"
@@ -26,18 +26,24 @@ type PollRecord struct {
 // RingPollReader reads from a BPF ring buffer by busy-polling the mmap'd
 // producer/consumer positions directly, avoiding epoll entirely.
 type RingPollReader struct {
-	consMmap []byte  // mmap'd consumer page
-	prodMmap []byte  // mmap'd producer + data pages
-	consPos  *uint64 // pointer into consMmap
-	prodPos  *uint64 // pointer into prodMmap
-	ring     []byte  // data region (double-mapped, so no wrap logic needed)
-	mask     uint64
-	pos      uint64 // current consumer position (local copy)
-	closed   atomic.Bool
+	consMmap  []byte  // mmap'd consumer page
+	prodMmap  []byte  // mmap'd producer + data pages
+	consPos   *uint64 // pointer into consMmap
+	prodPos   *uint64 // pointer into prodMmap
+	ring      []byte  // data region (double-mapped, so no wrap logic needed)
+	mask      uint64
+	pos       uint64 // current consumer position (local copy)
+	closed    atomic.Bool
+	pollSleep time.Duration
+
+	// Stats (written by reader goroutine, read atomically by display)
+	batchCount int64       // events in current batch (reader goroutine only)
+	lastBatch  atomic.Int64 // events drained in last completed batch
+	bufSize    int          // ring capacity in bytes
 }
 
 // NewRingPollReader creates a busy-polling ring buffer reader for the given map.
-func NewRingPollReader(m *ebpf.Map) (*RingPollReader, error) {
+func NewRingPollReader(m *ebpf.Map, pollSleep time.Duration) (*RingPollReader, error) {
 	if m.Type() != ebpf.RingBuf {
 		return nil, fmt.Errorf("ringpoll: expected RingBuf map, got %s", m.Type())
 	}
@@ -63,13 +69,15 @@ func NewRingPollReader(m *ebpf.Map) (*RingPollReader, error) {
 	prodPos := (*uint64)(unsafe.Pointer(&prod[0]))
 
 	return &RingPollReader{
-		consMmap: cons,
-		prodMmap: prod,
-		consPos:  consPos,
-		prodPos:  prodPos,
-		ring:     prod[pageSize:],
-		mask:     uint64(size - 1),
-		pos:      atomic.LoadUint64(consPos),
+		consMmap:  cons,
+		prodMmap:  prod,
+		consPos:   consPos,
+		prodPos:   prodPos,
+		ring:      prod[pageSize:],
+		mask:      uint64(size - 1),
+		pos:       atomic.LoadUint64(consPos),
+		pollSleep: pollSleep,
+		bufSize:   size,
 	}, nil
 }
 
@@ -85,8 +93,26 @@ func (r *RingPollReader) Cleanup() {
 	syscall.Munmap(r.consMmap)
 }
 
-// ReadInto busy-polls the ring buffer for the next committed record.
-// Returns true on success, false when the reader has been closed.
+// Pending returns the current ring buffer fill level in bytes.
+func (r *RingPollReader) Pending() int {
+	prod := atomic.LoadUint64(r.prodPos)
+	cons := atomic.LoadUint64(r.consPos)
+	return int(prod - cons)
+}
+
+// LastBatch returns the number of events drained in the last completed batch.
+func (r *RingPollReader) LastBatch() int64 {
+	return r.lastBatch.Load()
+}
+
+// BufSize returns the ring buffer capacity in bytes.
+func (r *RingPollReader) BufSize() int {
+	return r.bufSize
+}
+
+// ReadInto polls the ring buffer for the next committed record.
+// Sleeps briefly when the ring is empty. Returns true on success,
+// false when the reader has been closed.
 func (r *RingPollReader) ReadInto(rec *PollRecord) bool {
 	for {
 		if r.closed.Load() {
@@ -95,7 +121,12 @@ func (r *RingPollReader) ReadInto(rec *PollRecord) bool {
 
 		prod := atomic.LoadUint64(r.prodPos)
 		if r.pos == prod {
-			runtime.Gosched()
+			// Ring empty — record completed batch, sleep
+			if r.batchCount > 0 {
+				r.lastBatch.Store(r.batchCount)
+				r.batchCount = 0
+			}
+			time.Sleep(r.pollSleep)
 			continue
 		}
 
@@ -105,7 +136,7 @@ func (r *RingPollReader) ReadInto(rec *PollRecord) bool {
 
 		if hdrLen&bpfRingbufBusyBit != 0 {
 			// Producer reserved but hasn't committed yet
-			runtime.Gosched()
+			time.Sleep(r.pollSleep)
 			continue
 		}
 
@@ -132,6 +163,7 @@ func (r *RingPollReader) ReadInto(rec *PollRecord) bool {
 		r.pos += dataAligned
 		atomic.StoreUint64(r.consPos, r.pos)
 
+		r.batchCount++
 		return true
 	}
 }
