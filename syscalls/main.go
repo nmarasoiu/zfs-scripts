@@ -15,7 +15,6 @@ package main
 
 import (
 	"bytes"
-	"encoding/binary"
 	"flag"
 	"fmt"
 	"log"
@@ -28,6 +27,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"github.com/DataDog/sketches-go/ddsketch"
 	"github.com/cilium/ebpf"
@@ -431,10 +431,23 @@ func (ss *syscallStats) Snapshot() *syscallStats {
 	}
 }
 
+// LightSnapshot copies only simpleStats (no DDSketches or topN).
+// Used for entries that won't be individually rendered (not in top N or focus).
+func (ss *syscallStats) LightSnapshot() *syscallStats {
+	return &syscallStats{
+		intervalStats: ss.intervalStats.Clone(),
+		lifetimeStats: ss.lifetimeStats.Clone(),
+	}
+}
+
 // MergeFrom merges another syscallStats into this one (for "[N others]" bucket)
 func (ss *syscallStats) MergeFrom(other *syscallStats) {
-	ss.intervalSketch.MergeWith(other.intervalSketch)
-	ss.lifetimeSketch.MergeWith(other.lifetimeSketch)
+	if ss.intervalSketch != nil && other.intervalSketch != nil {
+		ss.intervalSketch.MergeWith(other.intervalSketch)
+	}
+	if ss.lifetimeSketch != nil && other.lifetimeSketch != nil {
+		ss.lifetimeSketch.MergeWith(other.lifetimeSketch)
+	}
 	mergeSimpleStats(ss.intervalStats, other.intervalStats)
 	mergeSimpleStats(ss.lifetimeStats, other.lifetimeStats)
 	// topN not merged - not used for summary rows
@@ -498,9 +511,41 @@ type stateSnapshot struct {
 	lastReset        time.Time
 }
 
-func (s *State) Snapshot() *stateSnapshot {
+func (s *State) Snapshot(displayTopN int) *stateSnapshot {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+
+	// Identify which entries need full DDSketch copies (only those that will be rendered).
+	// Everything else gets a lightweight copy (simpleStats only).
+	type entryRef struct {
+		comm  string
+		id    uint32
+		count uint64
+	}
+	var all []entryRef
+	for comm, fm := range s.procSyscallStats {
+		for id, ss := range fm {
+			all = append(all, entryRef{comm, id, ss.lifetimeStats.count})
+		}
+	}
+
+	// Sort by lifetime count desc to find top entries
+	sort.Slice(all, func(i, j int) bool {
+		return all[i].count > all[j].count
+	})
+
+	// Mark entries needing full copy: top N*2 (both columns) + focus processes
+	type entryKey struct {
+		comm string
+		id   uint32
+	}
+	fullLimit := displayTopN*2 + 16 // small buffer for boundary ties
+	needFull := make(map[entryKey]bool, fullLimit)
+	for i, e := range all {
+		if i < fullLimit || s.focusProcesses[e.comm] {
+			needFull[entryKey{e.comm, e.id}] = true
+		}
+	}
 
 	snap := &stateSnapshot{
 		procSyscallStats: make(map[string]map[uint32]*syscallStats, len(s.procSyscallStats)),
@@ -509,10 +554,15 @@ func (s *State) Snapshot() *stateSnapshot {
 	}
 
 	for name, fm := range s.procSyscallStats {
-		snap.procSyscallStats[name] = make(map[uint32]*syscallStats, len(fm))
+		snapFm := make(map[uint32]*syscallStats, len(fm))
 		for id, ss := range fm {
-			snap.procSyscallStats[name][id] = ss.Snapshot()
+			if needFull[entryKey{name, id}] {
+				snapFm[id] = ss.Snapshot()
+			} else {
+				snapFm[id] = ss.LightSnapshot()
+			}
 		}
+		snap.procSyscallStats[name] = snapFm
 	}
 
 	return snap
@@ -811,12 +861,12 @@ func (d *Display) renderProcessSummary(buf *strings.Builder, procSyscallStats ma
 		if i < len(rightSlice) {
 			rightStr = formatSummaryRow(rightSlice[i].label, rightSlice[i].stats.lifetimeStats, rightSlice[i].stats.lifetimeSketch, totalSecs)
 		} else if i == len(rightSlice) && hasOthers {
-			// Show [N others] as last row on right
-			merged := newSyscallStats()
+			// Show [N others] as last row on right — merge only simpleStats (light copies have no sketches)
+			mergedStats := newSimpleStats()
 			for _, e := range otherSlice {
-				merged.MergeFrom(e.stats)
+				mergeSimpleStats(mergedStats, e.stats.lifetimeStats)
 			}
-			rightStr = formatSummaryRow(fmt.Sprintf("[%d others]", len(otherSlice)), merged.lifetimeStats, merged.lifetimeSketch, totalSecs)
+			rightStr = formatSummaryRow(fmt.Sprintf("[%d others]", len(otherSlice)), mergedStats, nil, totalSecs)
 		} else {
 			rightStr = strings.Repeat(" ", summaryLineWidth)
 		}
@@ -833,6 +883,16 @@ func formatSummaryRow(name string, st *simpleStats, sketch *ddsketch.DDSketch, s
 	if n == 0 {
 		return fmt.Sprintf("%-28s │ %8s %8s %8s %8s %8s │ %9s %9s",
 			name, "-", "-", "-", "-", "-", "0", "-")
+	}
+	if sketch == nil {
+		return fmt.Sprintf("%-28s │ %s %8s %8s %8s %s │ %9s %9s",
+			name,
+			formatLatencyPadded(st.Avg()),
+			"-", "-", "-",
+			formatLatencyPadded(st.max),
+			formatCount(int64(n)),
+			formatRate(n, secs),
+		)
 	}
 	p50, _ := sketch.GetValueAtQuantile(0.50)
 	p90, _ := sketch.GetValueAtQuantile(0.90)
@@ -964,11 +1024,12 @@ func main() {
 	go func() {
 		defer readerDone.Done()
 		var rec PollRecord
-		var event bpfLatencyEvent
+		eventSize := int(unsafe.Sizeof(bpfLatencyEvent{}))
 		for rd.ReadInto(&rec) {
-			if err := binary.Read(bytes.NewReader(rec.RawSample), binary.LittleEndian, &event); err != nil {
+			if len(rec.RawSample) < eventSize {
 				continue
 			}
+			event := *(*bpfLatencyEvent)(unsafe.Pointer(&rec.RawSample[0]))
 			latencyUs := int64(event.LatencyNs / 1000)
 			if latencyUs < 1 {
 				latencyUs = 1
@@ -994,7 +1055,7 @@ func main() {
 			case <-displayTicker.C:
 				// Read drop counter from kernel
 				readDropCount(objs.DropCount, &totalDrops)
-				snap := state.Snapshot()
+				snap := state.Snapshot(*topProcs)
 				if len(snap.procSyscallStats) > 0 {
 					display.render(snap, *interval, totalDrops.Load())
 				}
@@ -1039,7 +1100,7 @@ func main() {
 	readerDone.Wait()
 
 	readDropCount(objs.DropCount, &totalDrops)
-	snap := state.Snapshot()
+	snap := state.Snapshot(*topProcs)
 	display.render(snap, *interval, totalDrops.Load())
 }
 
