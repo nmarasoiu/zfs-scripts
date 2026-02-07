@@ -52,6 +52,7 @@ type RingPollReader struct {
 	atomicPollCount     atomic.Int64
 	lastNonEmpty        atomic.Int64 // batch size of most recent non-empty poll (last1)
 	lastEmptyNano       atomic.Int64 // UnixNano of most recent empty poll (last0)
+	maxPending          atomic.Int64 // high-water mark of ring fill (bytes)
 }
 
 // NewRingPollReader creates a busy-polling ring buffer reader for the given map.
@@ -122,6 +123,11 @@ func (r *RingPollReader) BufSize() int {
 	return r.bufSize
 }
 
+// MaxPending returns the high-water mark of ring buffer fill in bytes.
+func (r *RingPollReader) MaxPending() int64 {
+	return r.maxPending.Load()
+}
+
 // PollStats returns ring poll statistics for display.
 //   - avg1: average batch size of non-empty polls
 //   - avg0: average batch size of all polls (including empty)
@@ -156,6 +162,9 @@ func (r *RingPollReader) ReadInto(rec *PollRecord) bool {
 		}
 
 		prod := atomic.LoadUint64(r.prodPos)
+		if pending := int64(prod - r.pos); pending > r.maxPending.Load() {
+			r.maxPending.Store(pending)
+		}
 		if r.pos == prod {
 			// Ring empty — record completed batch and poll stats
 			r.pollCount++

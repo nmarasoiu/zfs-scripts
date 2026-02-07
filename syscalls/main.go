@@ -605,14 +605,17 @@ func (d *Display) render(snap *stateSnapshot, intervalDur time.Duration, drops u
 	if d.ring != nil {
 		pending := d.ring.Pending()
 		capBytes := d.ring.BufSize()
+		maxPend := d.ring.MaxPending()
 		pctFull := float64(pending) / float64(capBytes) * 100
+		maxPct := float64(maxPend) / float64(capBytes) * 100
 		avg1, avg0, last1, last0 := d.ring.PollStats()
 		last0Str := "-"
 		if last0 > 0 {
 			last0Str = formatMicro(last0)
 		}
-		ringInfo = fmt.Sprintf(" | Ring: %6s/%s (%5.1f%%) avg1:%-6.0f avg0:%-8.1f last1:%-6s last0:%-8s",
+		ringInfo = fmt.Sprintf(" | Ring avg: %6s/%s (%5.1f%%)  Ring max: %6s/%s (%5.1f%%)  avg1:%-6.0f avg0:%-8.1f last1:%-6s last0:%-8s",
 			formatBytes(int64(pending)), formatBytes(int64(capBytes)), pctFull,
+			formatBytes(maxPend), formatBytes(int64(capBytes)), maxPct,
 			avg1, avg0, formatCount(last1), last0Str)
 	}
 	fmt.Fprintf(&buf, "Total: %s syscalls | Rate: %s/s | Processes: %d | Drops: %s (%s/s)%s\n",
