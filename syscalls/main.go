@@ -43,9 +43,9 @@ const (
 
 var (
 	interval    = flag.Duration("i", 10*time.Second, "stats reset interval")
-	focusProcs  = flag.String("c", "storagenode", "focus processes for per-syscall detail (comma-separated, empty=none)")
+	focusProcs  = flag.String("c", "", "focus processes for per-syscall detail (comma-separated, empty=none)")
 	topProcs    = flag.Int("n", 28, "top N process/syscall rows per column in summary")
-	syscallList = flag.String("s", "pread64,pwrite64,fsync,fdatasync,read,write", "comma-separated syscalls to trace")
+	syscallList = flag.String("s", "all", "comma-separated syscalls to trace (or 'all')")
 	batch       = flag.Bool("batch", false, "batch mode (no screen clearing)")
 )
 
@@ -130,6 +130,55 @@ var syscallNums = map[string]uint32{
 	"accept4":      288,
 	"recvmmsg":     299,
 	"sendmmsg":     307,
+	"getdents64":   217,
+	"ioctl":        16,
+	"madvise":      28,
+	"sched_yield":  24,
+	"clock_gettime": 228,
+	"gettimeofday": 96,
+	"getpid":       39,
+	"gettid":       186,
+	"getuid":       102,
+	"getgid":       104,
+	"rt_sigaction": 13,
+	"rt_sigprocmask": 14,
+	"rt_sigreturn": 15,
+	"pselect6":     270,
+	"ppoll":        271,
+	"eventfd2":     290,
+	"timerfd_create": 283,
+	"timerfd_settime": 286,
+	"signalfd4":    289,
+	"epoll_create1": 291,
+	"epoll_ctl":    233,
+	"pipe2":        293,
+	"inotify_init1": 294,
+	"inotify_add_watch": 254,
+	"inotify_rm_watch": 255,
+	"statfs":       137,
+	"fstatfs":      138,
+	"prctl":        157,
+	"arch_prctl":   158,
+	"set_tid_address": 218,
+	"set_robust_list": 273,
+	"getrandom":    318,
+	"memfd_create": 319,
+	"statx":        332,
+	"io_uring_setup": 425,
+	"io_uring_enter": 426,
+	"io_uring_register": 427,
+	"copy_file_range": 326,
+	"preadv2":      327,
+	"pwritev2":     328,
+	"setsockopt":   54,
+	"getsockopt":   55,
+	"getsockname":  51,
+	"getpeername":  52,
+	"socketpair":   53,
+	"exit_group":   231,
+	"waitid":       247,
+	"tgkill":       234,
+	"clock_nanosleep": 230,
 }
 
 // Reverse map for display
@@ -775,21 +824,26 @@ func main() {
 	}
 
 	// Parse syscall list
+	traceAll := false
 	var traceSyscalls []uint32
-	for _, name := range strings.Split(*syscallList, ",") {
-		name = strings.TrimSpace(name)
-		if name == "" {
-			continue
+	trimmed := strings.TrimSpace(*syscallList)
+	if strings.EqualFold(trimmed, "all") {
+		traceAll = true
+	} else {
+		for _, name := range strings.Split(trimmed, ",") {
+			name = strings.TrimSpace(name)
+			if name == "" {
+				continue
+			}
+			if num, ok := syscallNums[name]; ok {
+				traceSyscalls = append(traceSyscalls, num)
+			} else {
+				log.Fatalf("Unknown syscall: %s", name)
+			}
 		}
-		if num, ok := syscallNums[name]; ok {
-			traceSyscalls = append(traceSyscalls, num)
-		} else {
-			log.Fatalf("Unknown syscall: %s", name)
+		if len(traceSyscalls) == 0 {
+			log.Fatal("No syscalls to trace")
 		}
-	}
-
-	if len(traceSyscalls) == 0 {
-		log.Fatal("No syscalls to trace")
 	}
 
 	// Remove memlock limit for eBPF
@@ -805,10 +859,18 @@ func main() {
 	defer objs.Close()
 
 	// Set up syscall filter
-	for _, num := range traceSyscalls {
+	if traceAll {
+		var key uint32
 		var enabled uint8 = 1
-		if err := objs.SyscallFilter.Put(num, enabled); err != nil {
-			log.Fatalf("Failed to add syscall to filter: %v", err)
+		if err := objs.TraceAll.Put(key, enabled); err != nil {
+			log.Fatalf("Failed to set trace_all flag: %v", err)
+		}
+	} else {
+		for _, num := range traceSyscalls {
+			var enabled uint8 = 1
+			if err := objs.SyscallFilter.Put(num, enabled); err != nil {
+				log.Fatalf("Failed to add syscall to filter: %v", err)
+			}
 		}
 	}
 
@@ -931,16 +993,22 @@ func main() {
 		}
 	}()
 
-	syscallStr := make([]string, len(traceSyscalls))
-	for i, num := range traceSyscalls {
-		syscallStr[i] = syscallNames[num]
+	var syscallLabel string
+	if traceAll {
+		syscallLabel = "ALL"
+	} else {
+		syscallStr := make([]string, len(traceSyscalls))
+		for i, num := range traceSyscalls {
+			syscallStr[i] = syscallNames[num]
+		}
+		syscallLabel = strings.Join(syscallStr, ",")
 	}
 	if len(focusList) > 0 {
 		log.Printf("Tracing syscalls: %s | focus: %s | top %d processes (interval=%v)",
-			strings.Join(syscallStr, ","), strings.Join(focusList, ","), *topProcs, *interval)
+			syscallLabel, strings.Join(focusList, ","), *topProcs, *interval)
 	} else {
 		log.Printf("Tracing syscalls: %s | top %d processes (interval=%v)",
-			strings.Join(syscallStr, ","), *topProcs, *interval)
+			syscallLabel, *topProcs, *interval)
 	}
 
 	// Wait for signal, then drain

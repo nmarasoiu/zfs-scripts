@@ -45,7 +45,7 @@ struct {
 // Ring buffer for events
 struct {
     __uint(type, BPF_MAP_TYPE_RINGBUF);
-    __uint(max_entries, 256 * 1024);
+    __uint(max_entries, 1024 * 1024);
 } events SEC(".maps");
 
 // Target process name filter (if set)
@@ -72,11 +72,24 @@ struct {
     __type(value, __u64);
 } drop_count SEC(".maps");
 
+// Trace-all flag: if [0]==1, skip syscall_filter check
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, __u8);
+} trace_all SEC(".maps");
+
 static __always_inline int should_trace(__u32 syscall_id) {
-    // Check if this syscall is in our filter
-    __u8 *enabled = bpf_map_lookup_elem(&syscall_filter, &syscall_id);
-    if (!enabled || *enabled == 0) {
-        return 0;
+    // If trace_all flag is set, skip syscall filter
+    __u32 zero = 0;
+    __u8 *all = bpf_map_lookup_elem(&trace_all, &zero);
+    if (!all || *all == 0) {
+        // Check if this syscall is in our filter
+        __u8 *enabled = bpf_map_lookup_elem(&syscall_filter, &syscall_id);
+        if (!enabled || *enabled == 0) {
+            return 0;
+        }
     }
 
     // Check process name filter

@@ -77,6 +77,7 @@ type bpfMapSpecs struct {
 	SyscallFilter *ebpf.MapSpec `ebpf:"syscall_filter"`
 	SyscallIds    *ebpf.MapSpec `ebpf:"syscall_ids"`
 	TargetComm    *ebpf.MapSpec `ebpf:"target_comm"`
+	TraceAll      *ebpf.MapSpec `ebpf:"trace_all"`
 }
 
 // bpfObjects contains all objects after they have been loaded into the kernel.
@@ -104,6 +105,7 @@ type bpfMaps struct {
 	SyscallFilter *ebpf.Map `ebpf:"syscall_filter"`
 	SyscallIds    *ebpf.Map `ebpf:"syscall_ids"`
 	TargetComm    *ebpf.Map `ebpf:"target_comm"`
+	TraceAll      *ebpf.Map `ebpf:"trace_all"`
 }
 
 func (m *bpfMaps) Close() error {
@@ -114,6 +116,7 @@ func (m *bpfMaps) Close() error {
 		m.SyscallFilter,
 		m.SyscallIds,
 		m.TargetComm,
+		m.TraceAll,
 	)
 }
 
