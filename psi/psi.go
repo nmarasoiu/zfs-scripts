@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 )
 
 type pressure struct {
@@ -76,15 +77,39 @@ func printTable(name string, some, full pressure) {
 	fmt.Println()
 }
 
+func printLoadTable() {
+	data, err := os.ReadFile("/proc/loadavg")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error reading loadavg: %v\n", err)
+		return
+	}
+	fields := strings.Fields(string(data))
+	// fields: 1min 5min 15min running/total last_pid
+	min1, min5, min15 := fields[0], fields[1], fields[2]
+	procs := ""
+	if len(fields) >= 4 {
+		procs = fields[3]
+	}
+	fmt.Printf("%-6s │ %7s │ %7s │ %7s │ %10s\n", "LOAD", "1min", "5min", "15min", "procs")
+	fmt.Printf("───────┼─────────┼─────────┼─────────┼───────────\n")
+	fmt.Printf("%-6s │ %7s │ %7s │ %7s │ %10s\n", "", min1, min5, min15, procs)
+	fmt.Println()
+}
+
 func main() {
 	resources := []string{"cpu", "io", "memory"}
 
-	for _, r := range resources {
-		some, full, err := readPressure(r)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error reading %s: %v\n", r, err)
-			continue
+	for {
+		fmt.Print("\033[H\033[2J")
+		printLoadTable()
+		for _, r := range resources {
+			some, full, err := readPressure(r)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error reading %s: %v\n", r, err)
+				continue
+			}
+			printTable(strings.ToUpper(r), some, full)
 		}
-		printTable(strings.ToUpper(r), some, full)
+		time.Sleep(2 * time.Second)
 	}
 }
