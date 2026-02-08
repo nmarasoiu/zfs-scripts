@@ -492,13 +492,13 @@ func filterStatsGeneral(procStats map[string]map[uint32]*syscallStats, text stri
 	lower := strings.ToLower(text)
 	filtered := make(map[string]map[uint32]*syscallStats)
 	for proc, fm := range procStats {
-		if strings.Contains(strings.ToLower(proc), lower) {
+		if strings.HasPrefix(strings.ToLower(proc), lower) {
 			filtered[proc] = fm
 			continue
 		}
 		matched := make(map[uint32]*syscallStats)
 		for id, ss := range fm {
-			if strings.Contains(syscallName(id), lower) {
+			if strings.HasPrefix(syscallName(id), lower) {
 				matched[id] = ss
 			}
 		}
