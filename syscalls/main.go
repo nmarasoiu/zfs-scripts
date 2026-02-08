@@ -42,9 +42,10 @@ const (
 	flushSize       = 1024
 	flushInterval   = 10 * time.Millisecond
 
-	panelWidth    = 34
-	panelSep      = " │ "
-	panelMinWidth = 80
+	panelWidth       = 34
+	panelSep         = " │ "
+	panelSepDisplay  = 3 // display width of panelSep (│ is 1 column wide)
+	panelMinTermCols = 240
 )
 
 type interactiveMode int
@@ -519,11 +520,11 @@ func (d *Display) render(state *State, metrics *runtimeMetrics, mapCap int64) {
 	var footerBuf strings.Builder
 	d.renderFooter(&footerBuf, elapsed, totalSamples, nProcs, metrics, mapCap)
 
-	// Compose main content with panel if interactive
+	// Compose main content with panel if interactive and terminal is wide enough
 	mainStr := mainBuf.String()
 	footerStr := footerBuf.String()
 	termW, _ := termSize()
-	showPanel := d.interactive && termW >= panelMinWidth
+	showPanel := d.interactive && termW >= panelMinTermCols
 
 	var output strings.Builder
 
@@ -532,35 +533,36 @@ func (d *Display) render(state *State, metrics *runtimeMetrics, mapCap int64) {
 		if d.mode == modeDetail {
 			highlightProc = d.selectedProc
 		}
-		panelLines := renderPanel(d.lastSummaries, highlightProc, d.filterText)
+		panelMaxRows := d.topN
+		panelLines := renderPanel(d.lastSummaries, highlightProc, d.filterText, panelMaxRows)
 		mainLines := strings.Split(strings.TrimRight(mainStr, "\n"), "\n")
 
-		mainColWidth := termW - len(panelSep) - panelWidth
-		if mainColWidth < 10 {
-			mainColWidth = 10
-		}
+		// mainColWidth is in display columns (not bytes).
+		// panelSep contains │ (3 bytes but 1 display column), so panelSepDisplay=3 chars displayed.
+		mainColWidth := termW - panelSepDisplay - panelWidth
 
-		maxRows := len(mainLines)
-		if len(panelLines) > maxRows {
-			maxRows = len(panelLines)
-		}
+		// Only zip panel alongside main content rows; panel does not overflow past main.
+		nZip := len(mainLines)
 
-		for i := 0; i < maxRows; i++ {
-			left := ""
-			if i < len(mainLines) {
-				left = mainLines[i]
+		for i := 0; i < nZip; i++ {
+			left := mainLines[i]
+			// Compute display width: count bytes that are part of multi-byte
+			// UTF-8 sequences (continuation bytes 0x80..0xBF don't take display space).
+			// For our use case, each multi-byte char (like │ = 3 bytes) occupies 1 column.
+			displayLen := displayWidth(left)
+			if displayLen < mainColWidth {
+				left += strings.Repeat(" ", mainColWidth-displayLen)
 			}
 			right := ""
 			if i < len(panelLines) {
 				right = panelLines[i]
 			}
-			// Pad left column to mainColWidth (visual, not rune-aware but fine for ASCII)
-			if len(left) < mainColWidth {
-				left += strings.Repeat(" ", mainColWidth-len(left))
-			} else if len(left) > mainColWidth {
-				left = left[:mainColWidth]
+			if right != "" {
+				fmt.Fprintf(&output, "%s%s%s\n", left, panelSep, padOrTrunc(right, panelWidth))
+			} else {
+				output.WriteString(left)
+				output.WriteByte('\n')
 			}
-			fmt.Fprintf(&output, "%s%s%s\n", left, panelSep, padOrTrunc(right, panelWidth))
 		}
 	} else {
 		output.WriteString(mainStr)
@@ -876,6 +878,27 @@ func collectProcessSummaries(procStats map[string]map[uint32]*syscallStats, elap
 	return summaries
 }
 
+// displayWidth returns the number of display columns a string occupies.
+// Counts each rune as 1 column (works for ASCII + box-drawing chars).
+func displayWidth(s string) int {
+	n := 0
+	for i := 0; i < len(s); {
+		if s[i] < 0x80 {
+			n++
+			i++
+		} else {
+			// Skip continuation bytes of multi-byte UTF-8 sequence
+			// The lead byte counts as 1 display column
+			n++
+			i++
+			for i < len(s) && s[i]&0xC0 == 0x80 {
+				i++
+			}
+		}
+	}
+	return n
+}
+
 // padOrTrunc pads s with spaces or truncates to exactly width characters.
 func padOrTrunc(s string, width int) string {
 	if len(s) >= width {
@@ -885,16 +908,21 @@ func padOrTrunc(s string, width int) string {
 }
 
 // renderPanel builds the right-side process panel lines.
-func renderPanel(summaries []processSummary, highlightProc, filterText string) []string {
+// maxRows limits the number of process rows (0 = unlimited).
+func renderPanel(summaries []processSummary, highlightProc, filterText string, maxRows int) []string {
 	var lines []string
 
 	// Header
 	lines = append(lines, padOrTrunc("  PROCESS         RATE    TOTAL", panelWidth))
 	lines = append(lines, strings.Repeat("─", panelWidth))
 
+	n := 0
 	for _, ps := range summaries {
 		if filterText != "" && !strings.Contains(ps.name, filterText) {
 			continue
+		}
+		if maxRows > 0 && n >= maxRows {
+			break
 		}
 		marker := " "
 		if ps.name == highlightProc {
@@ -908,6 +936,7 @@ func renderPanel(summaries []processSummary, highlightProc, filterText string) [
 		}
 		line := fmt.Sprintf("%s %-15s %8s %8s", marker, padOrTrunc(ps.name, 15), rateStr, formatCount(int64(ps.count)))
 		lines = append(lines, padOrTrunc(line, panelWidth))
+		n++
 	}
 	return lines
 }
