@@ -228,6 +228,7 @@ func termSize() (int, int) {
 // runInput reads stdin byte-by-byte and sends parsed key events to ch.
 // Exits on read error (stdin closed or program shutting down).
 func runInput(ch chan<- keyEvent) {
+	fd := int(os.Stdin.Fd())
 	var buf [3]byte
 	for {
 		n, err := os.Stdin.Read(buf[:1])
@@ -237,15 +238,17 @@ func runInput(ch chan<- keyEvent) {
 		b := buf[0]
 		switch {
 		case b == 0x1b: // Escape or CSI sequence
-			// Try to read more bytes to consume CSI sequences (arrow keys etc)
-			os.Stdin.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
-			n2, _ := os.Stdin.Read(buf[1:])
-			os.Stdin.SetReadDeadline(time.Time{})
-			if n2 == 0 {
-				// Pure Esc key
+			// Use poll(2) to check if more bytes arrive within 50ms.
+			// If yes, it's a CSI sequence (arrow keys etc) — consume and discard.
+			// If no, it's a bare Esc keypress.
+			pfds := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
+			ready, _ := unix.Poll(pfds, 50)
+			if ready > 0 {
+				// Drain the CSI sequence (up to 2 more bytes)
+				os.Stdin.Read(buf[1:])
+			} else {
 				ch <- keyEvent{kind: keyEsc}
 			}
-			// Otherwise discard the CSI sequence
 		case b == 0x0d || b == 0x0a:
 			ch <- keyEvent{kind: keyEnter}
 		case b == 0x7f || b == 0x08:
