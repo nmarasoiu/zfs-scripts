@@ -128,8 +128,11 @@ func (d *Display) render(state *State, metrics *runtimeMetrics, mapCap int64) {
 		nSketches += len(fm)
 	}
 
-	fmt.Fprintf(&mainBuf, "Syscall Latency Monitor - %s (uptime: %s) -- %d sketches\n",
-		now.Format("15:04:05"), formatDuration(elapsed), nSketches)
+	const sketchBytesEach = 400 // empirical ~0.4KB per DDSketch (struct + mapping + stores + few bins)
+	totalMB := float64(nSketches) * sketchBytesEach / 1024 / 1024
+
+	fmt.Fprintf(&mainBuf, "Syscall Latency Monitor - %s (uptime: %s) -- %d sketches × 0.4KB ≈ %.1fMB\n",
+		now.Format("15:04:05"), formatDuration(elapsed), nSketches, totalMB)
 
 	// Collect process summaries for the panel (while holding lock)
 	d.lastSummaries = collectProcessSummaries(state.procSyscallStats, elapsed.Seconds())
