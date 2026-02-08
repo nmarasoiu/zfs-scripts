@@ -1,10 +1,10 @@
 package main
 
 import (
-	"bufio"
 	"fmt"
 	"os"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -37,16 +37,14 @@ func parseLine(line string) pressure {
 	return p
 }
 
-func readPressure(resource string) (some, full pressure, err error) {
-	f, err := os.Open("/proc/pressure/" + resource)
-	if err != nil {
-		return
-	}
-	defer f.Close()
+func pread(fd int, buf []byte) int {
+	n, _ := syscall.Pread(fd, buf, 0)
+	return n
+}
 
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := scanner.Text()
+func readPressure(fd int, buf []byte) (some, full pressure) {
+	n := pread(fd, buf)
+	for _, line := range strings.Split(string(buf[:n]), "\n") {
 		if strings.HasPrefix(line, "some ") {
 			some = parseLine(line)
 		} else if strings.HasPrefix(line, "full ") {
@@ -57,7 +55,6 @@ func readPressure(resource string) (some, full pressure, err error) {
 }
 
 func formatTotal(t string) string {
-	// total is in microseconds, convert to seconds
 	var us uint64
 	fmt.Sscanf(t, "%d", &us)
 	secs := float64(us) / 1000000.0
@@ -77,14 +74,9 @@ func printTable(name string, some, full pressure) {
 	fmt.Println()
 }
 
-func printLoadTable() {
-	data, err := os.ReadFile("/proc/loadavg")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error reading loadavg: %v\n", err)
-		return
-	}
-	fields := strings.Fields(string(data))
-	// fields: 1min 5min 15min running/total last_pid
+func printLoadTable(fd int, buf []byte) {
+	n := pread(fd, buf)
+	fields := strings.Fields(string(buf[:n]))
 	min1, min5, min15 := fields[0], fields[1], fields[2]
 	procs := ""
 	if len(fields) >= 4 {
@@ -96,20 +88,37 @@ func printLoadTable() {
 	fmt.Println()
 }
 
+type psiFile struct {
+	name string
+	fd   int
+}
+
+func mustOpen(path string) int {
+	fd, err := syscall.Open(path, syscall.O_RDONLY, 0)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "open %s: %v\n", path, err)
+		os.Exit(1)
+	}
+	return fd
+}
+
 func main() {
-	resources := []string{"cpu", "io", "memory"}
+	loadFd := mustOpen("/proc/loadavg")
+	psiFiles := []psiFile{
+		{"CPU", mustOpen("/proc/pressure/cpu")},
+		{"IO", mustOpen("/proc/pressure/io")},
+		{"MEMORY", mustOpen("/proc/pressure/memory")},
+	}
+
+	var buf [512]byte
 
 	for {
 		fmt.Print("\033[H\033[2J")
-		printLoadTable()
-		for _, r := range resources {
-			some, full, err := readPressure(r)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error reading %s: %v\n", r, err)
-				continue
-			}
-			printTable(strings.ToUpper(r), some, full)
+		printLoadTable(loadFd, buf[:])
+		for _, pf := range psiFiles {
+			some, full := readPressure(pf.fd, buf[:])
+			printTable(pf.name, some, full)
 		}
-		time.Sleep(2 * time.Second)
+		time.Sleep(1 * time.Second)
 	}
 }
