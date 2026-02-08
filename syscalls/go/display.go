@@ -140,7 +140,7 @@ func (d *Display) render(state *State, metrics *runtimeMetrics, mapCap int64) {
 	// Optionally filter procSyscallStats for display
 	viewStats := state.procSyscallStats
 	if d.mode == modeFilter && d.filterText != "" {
-		viewStats = filterProcStats(viewStats, d.filterText)
+		viewStats = filterStatsGeneral(viewStats, d.filterText)
 	}
 
 	// Main content depends on mode
@@ -204,7 +204,14 @@ func (d *Display) render(state *State, metrics *runtimeMetrics, mapCap int64) {
 			highlightProc = d.selectedProc
 		}
 		panelMaxRows := d.topN + 2
-		panelLines := renderPanel(d.lastSummaries, highlightProc, d.filterText, panelMaxRows)
+		var panelMatchedProcs map[string]bool
+		if d.mode == modeFilter && d.filterText != "" {
+			panelMatchedProcs = make(map[string]bool, len(viewStats))
+			for proc := range viewStats {
+				panelMatchedProcs[proc] = true
+			}
+		}
+		panelLines := renderPanel(d.lastSummaries, highlightProc, panelMatchedProcs, panelMaxRows)
 
 		// mainColWidth = space allocated to main content (display columns).
 		mainColWidth := termW - panelOverhead
@@ -238,7 +245,7 @@ func (d *Display) render(state *State, metrics *runtimeMetrics, mapCap int64) {
 		case modeNormal:
 			output.WriteString("  [/] filter  [q] quit\n")
 		case modeFilter:
-			fmt.Fprintf(&output, "  Filter: %s_  [/] cancel  [Enter] select  [Bksp] back\n", d.filterText)
+			fmt.Fprintf(&output, "  Filter (proc/syscall): %s_  [/] cancel  [Enter] select  [Bksp] back\n", d.filterText)
 		case modeDetail:
 			fmt.Fprintf(&output, "  [%s]  [/] back  [q] quit\n", d.selectedProc)
 		}
@@ -281,8 +288,8 @@ func (d *Display) handleKey(ev keyEvent) bool {
 			if match := d.topFilterMatch(); match != "" {
 				d.selectedProc = match
 				d.mode = modeDetail
+				d.filterText = ""
 			}
-			d.filterText = ""
 		}
 	case modeDetail:
 		if ev.kind == keyChar {
@@ -298,10 +305,12 @@ func (d *Display) handleKey(ev keyEvent) bool {
 	return false
 }
 
-// topFilterMatch returns the first process name matching the current filter prefix.
+// topFilterMatch returns the first process name matching the current filter text
+// (case-insensitive substring match on process name).
 func (d *Display) topFilterMatch() string {
+	lower := strings.ToLower(d.filterText)
 	for _, ps := range d.lastSummaries {
-		if d.filterText == "" || strings.HasPrefix(ps.name, d.filterText) {
+		if lower == "" || strings.Contains(strings.ToLower(ps.name), lower) {
 			return ps.name
 		}
 	}
@@ -522,13 +531,26 @@ func formatSummaryRow(name string, st *simpleStats, sketch *ddsketch.DDSketch, s
 	)
 }
 
-// filterProcStats returns a shallow copy of procStats containing only processes
-// whose name starts with prefix. Must be called while state.mu is held.
-func filterProcStats(procStats map[string]map[uint32]*syscallStats, prefix string) map[string]map[uint32]*syscallStats {
+// filterStatsGeneral returns a filtered copy of procStats where entries match
+// the text against process name or syscall name (case-insensitive substring).
+// Process name matches include all syscalls; syscall matches are per-entry.
+// Must be called while state.mu is held.
+func filterStatsGeneral(procStats map[string]map[uint32]*syscallStats, text string) map[string]map[uint32]*syscallStats {
+	lower := strings.ToLower(text)
 	filtered := make(map[string]map[uint32]*syscallStats)
 	for proc, fm := range procStats {
-		if strings.HasPrefix(proc, prefix) {
+		if strings.Contains(strings.ToLower(proc), lower) {
 			filtered[proc] = fm
+			continue
+		}
+		matched := make(map[uint32]*syscallStats)
+		for id, ss := range fm {
+			if strings.Contains(syscallName(id), lower) {
+				matched[id] = ss
+			}
+		}
+		if len(matched) > 0 {
+			filtered[proc] = matched
 		}
 	}
 	return filtered
@@ -604,7 +626,7 @@ func padOrTrunc(s string, width int) string {
 
 // renderPanel builds the right-side process panel lines.
 // maxRows limits the number of process rows (0 = unlimited).
-func renderPanel(summaries []processSummary, highlightProc, filterText string, maxRows int) []string {
+func renderPanel(summaries []processSummary, highlightProc string, matchedProcs map[string]bool, maxRows int) []string {
 	var lines []string
 
 	// Header
@@ -613,7 +635,7 @@ func renderPanel(summaries []processSummary, highlightProc, filterText string, m
 
 	n := 0
 	for _, ps := range summaries {
-		if filterText != "" && !strings.HasPrefix(ps.name, filterText) {
+		if matchedProcs != nil && !matchedProcs[ps.name] {
 			continue
 		}
 		if maxRows > 0 && n >= maxRows {
