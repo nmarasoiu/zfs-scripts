@@ -1030,14 +1030,23 @@ func main() {
 	defer rd.Cleanup()
 
 	state := newState()
+	interactive := !*batch && isTerminal(int(os.Stdin.Fd())) && isTerminal(int(os.Stdout.Fd()))
 	display := &Display{
 		batchMode:      *batch,
 		focusProcesses: focusList,
 		topN:           *topProcs,
 		ring:           rd,
+		interactive:    interactive,
 	}
 	metrics := &runtimeMetrics{}
 	mapMaxVal := int64(objs.StartTimes.MaxEntries())
+
+	// Terminal raw mode for interactive input
+	var origTermios *unix.Termios
+	if interactive {
+		origTermios = enableRawMode()
+		fmt.Print("\033[?25l") // hide cursor
+	}
 
 	// Signal handling
 	done := make(chan struct{})
@@ -1047,8 +1056,18 @@ func main() {
 	go func() {
 		<-sig
 		signal.Stop(sig) // restore default handler so second Ctrl+C force-kills
+		if interactive {
+			fmt.Print("\033[?25h") // restore cursor
+		}
+		restoreTermMode(origTermios)
 		close(done)
 		rd.Close()
+	}()
+	defer func() {
+		if interactive {
+			fmt.Print("\033[?25h")
+		}
+		restoreTermMode(origTermios)
 	}()
 
 	// Reader goroutine: busy-polls ring buffer, batches events, flushes under single Lock
@@ -1059,6 +1078,12 @@ func main() {
 		runReader(rd, state)
 	}()
 
+	// Input goroutine for interactive mode
+	keyCh := make(chan keyEvent, 16)
+	if interactive {
+		go runInput(keyCh)
+	}
+
 	// Display goroutine (10 FPS)
 	displayTicker := time.NewTicker(displayInterval)
 	go func() {
@@ -1068,6 +1093,14 @@ func main() {
 			case <-done:
 				return
 			case <-displayTicker.C:
+				readDropCount(objs.DropCount, &metrics.drops)
+				display.render(state, metrics, mapMaxVal)
+			case ev := <-keyCh:
+				if display.handleKey(ev) {
+					// 'q' pressed — trigger shutdown via signal
+					sig <- syscall.SIGINT
+					return
+				}
 				readDropCount(objs.DropCount, &metrics.drops)
 				display.render(state, metrics, mapMaxVal)
 			}
