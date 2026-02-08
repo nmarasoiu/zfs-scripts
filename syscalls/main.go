@@ -42,10 +42,10 @@ const (
 	flushSize       = 1024
 	flushInterval   = 10 * time.Millisecond
 
-	panelWidth       = 34
-	panelSep         = " │ "
-	panelSepDisplay  = 3 // display width of panelSep (│ is 1 column wide)
-	panelMinTermCols = 240
+	panelWidth      = 34
+	panelSep        = " │ "
+	panelSepDisplay = 3 // display width of panelSep (│ is 1 column wide)
+	panelOverhead   = panelSepDisplay + panelWidth
 )
 
 type interactiveMode int
@@ -80,6 +80,7 @@ var (
 	focusProcs = flag.String("c", "", "only trace these processes (comma-separated, empty=all)")
 	topProcs   = flag.Int("n", 0, "top N rows to display (0=all)")
 	batch      = flag.Bool("batch", false, "batch mode (no screen clearing)")
+	colsFlag   = flag.Int("cols", 0, "override terminal width (enables panel in batch mode)")
 	pollSleep       = flag.Duration("poll-sleep", 50*time.Microsecond, "ring buffer poll sleep when empty")
 	cleanupInterval = flag.Duration("cleanup-interval", 5*time.Second, "how often to scan BPF hash map for stale entries")
 	staleAge        = flag.Duration("stale-age", 10*time.Second, "age threshold to count an in-flight entry as stale")
@@ -399,6 +400,7 @@ type Display struct {
 	focusProcesses []string // ordered list of focus process names
 	topN           int
 	ring           *RingPollReader
+	colsOverride   int // --cols override; 0 = auto-detect
 
 	// Interactive state (all owned by display goroutine — no sync needed)
 	interactive   bool
@@ -520,11 +522,25 @@ func (d *Display) render(state *State, metrics *runtimeMetrics, mapCap int64) {
 	var footerBuf strings.Builder
 	d.renderFooter(&footerBuf, elapsed, totalSamples, nProcs, metrics, mapCap)
 
-	// Compose main content with panel if interactive and terminal is wide enough
+	// Compose main content with panel when terminal is wide enough.
+	// Panel display is independent of interactive mode — --cols enables it in batch too.
 	mainStr := mainBuf.String()
 	footerStr := footerBuf.String()
 	termW, _ := termSize()
-	showPanel := d.interactive && termW >= panelMinTermCols
+	if d.colsOverride > 0 {
+		termW = d.colsOverride
+	}
+
+	mainLines := strings.Split(strings.TrimRight(mainStr, "\n"), "\n")
+
+	// Compute max display width of main content to decide if panel fits.
+	maxContentWidth := 0
+	for _, line := range mainLines {
+		if w := displayWidth(line); w > maxContentWidth {
+			maxContentWidth = w
+		}
+	}
+	showPanel := termW >= maxContentWidth+panelOverhead
 
 	var output strings.Builder
 
@@ -535,20 +551,12 @@ func (d *Display) render(state *State, metrics *runtimeMetrics, mapCap int64) {
 		}
 		panelMaxRows := d.topN
 		panelLines := renderPanel(d.lastSummaries, highlightProc, d.filterText, panelMaxRows)
-		mainLines := strings.Split(strings.TrimRight(mainStr, "\n"), "\n")
 
-		// mainColWidth is in display columns (not bytes).
-		// panelSep contains │ (3 bytes but 1 display column), so panelSepDisplay=3 chars displayed.
-		mainColWidth := termW - panelSepDisplay - panelWidth
+		// mainColWidth = space allocated to main content (display columns).
+		mainColWidth := termW - panelOverhead
 
-		// Only zip panel alongside main content rows; panel does not overflow past main.
-		nZip := len(mainLines)
-
-		for i := 0; i < nZip; i++ {
+		for i := 0; i < len(mainLines); i++ {
 			left := mainLines[i]
-			// Compute display width: count bytes that are part of multi-byte
-			// UTF-8 sequences (continuation bytes 0x80..0xBF don't take display space).
-			// For our use case, each multi-byte char (like │ = 3 bytes) occupies 1 column.
 			displayLen := displayWidth(left)
 			if displayLen < mainColWidth {
 				left += strings.Repeat(" ", mainColWidth-displayLen)
@@ -899,12 +907,27 @@ func displayWidth(s string) int {
 	return n
 }
 
-// padOrTrunc pads s with spaces or truncates to exactly width characters.
+// padOrTrunc pads with spaces or truncates to exactly width display columns.
 func padOrTrunc(s string, width int) string {
-	if len(s) >= width {
-		return s[:width]
+	dw := displayWidth(s)
+	if dw >= width {
+		// Truncate to width display columns
+		n := 0
+		i := 0
+		for i < len(s) && n < width {
+			if s[i] < 0x80 {
+				i++
+			} else {
+				i++
+				for i < len(s) && s[i]&0xC0 == 0x80 {
+					i++
+				}
+			}
+			n++
+		}
+		return s[:i]
 	}
-	return s + strings.Repeat(" ", width-len(s))
+	return s + strings.Repeat(" ", width-dw)
 }
 
 // renderPanel builds the right-side process panel lines.
@@ -1065,6 +1088,7 @@ func main() {
 		focusProcesses: focusList,
 		topN:           *topProcs,
 		ring:           rd,
+		colsOverride:   *colsFlag,
 		interactive:    interactive,
 	}
 	metrics := &runtimeMetrics{}
