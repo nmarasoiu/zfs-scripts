@@ -61,7 +61,6 @@ type keyKind int
 const (
 	keyChar keyKind = iota
 	keyEnter
-	keyEsc
 	keyBackspace
 )
 
@@ -228,27 +227,14 @@ func termSize() (int, int) {
 // runInput reads stdin byte-by-byte and sends parsed key events to ch.
 // Exits on read error (stdin closed or program shutting down).
 func runInput(ch chan<- keyEvent) {
-	fd := int(os.Stdin.Fd())
-	var buf [3]byte
+	var buf [1]byte
 	for {
-		n, err := os.Stdin.Read(buf[:1])
+		n, err := os.Stdin.Read(buf[:])
 		if err != nil || n == 0 {
 			return
 		}
 		b := buf[0]
 		switch {
-		case b == 0x1b: // Escape or CSI sequence
-			// Use poll(2) to check if more bytes arrive within 50ms.
-			// If yes, it's a CSI sequence (arrow keys etc) — consume and discard.
-			// If no, it's a bare Esc keypress.
-			pfds := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
-			ready, _ := unix.Poll(pfds, 50)
-			if ready > 0 {
-				// Drain the CSI sequence (up to 2 more bytes)
-				os.Stdin.Read(buf[1:])
-			} else {
-				ch <- keyEvent{kind: keyEsc}
-			}
 		case b == 0x0d || b == 0x0a:
 			ch <- keyEvent{kind: keyEnter}
 		case b == 0x7f || b == 0x08:
@@ -593,9 +579,9 @@ func (d *Display) render(state *State, metrics *runtimeMetrics, mapCap int64) {
 		case modeNormal:
 			output.WriteString("  [/] filter  [q] quit\n")
 		case modeFilter:
-			fmt.Fprintf(&output, "  Filter: %s_\n", d.filterText)
+			fmt.Fprintf(&output, "  Filter: %s_  [/] cancel  [Enter] select  [Bksp] back\n", d.filterText)
 		case modeDetail:
-			fmt.Fprintf(&output, "  [%s]  [Esc] back  [q] quit\n", d.selectedProc)
+			fmt.Fprintf(&output, "  [%s]  [/] back  [q] quit\n", d.selectedProc)
 		}
 	}
 
@@ -608,20 +594,29 @@ func (d *Display) render(state *State, metrics *runtimeMetrics, mapCap int64) {
 func (d *Display) handleKey(ev keyEvent) bool {
 	switch d.mode {
 	case modeNormal:
-		switch {
-		case ev.kind == keyChar && ev.ch == '/':
-			d.mode = modeFilter
-			d.filterText = ""
-		case ev.kind == keyChar && ev.ch == 'q':
-			return true // signal quit
+		if ev.kind == keyChar {
+			switch ev.ch {
+			case '/':
+				d.mode = modeFilter
+				d.filterText = ""
+			case 'q':
+				return true
+			}
 		}
 	case modeFilter:
 		switch ev.kind {
 		case keyChar:
-			d.filterText += string(ev.ch)
+			if ev.ch == '/' {
+				d.filterText = ""
+				d.mode = modeNormal
+			} else {
+				d.filterText += string(ev.ch)
+			}
 		case keyBackspace:
 			if len(d.filterText) > 0 {
 				d.filterText = d.filterText[:len(d.filterText)-1]
+			} else {
+				d.mode = modeNormal
 			}
 		case keyEnter:
 			if match := d.topFilterMatch(); match != "" {
@@ -629,17 +624,16 @@ func (d *Display) handleKey(ev keyEvent) bool {
 				d.mode = modeDetail
 			}
 			d.filterText = ""
-		case keyEsc:
-			d.filterText = ""
-			d.mode = modeNormal
 		}
 	case modeDetail:
-		switch {
-		case ev.kind == keyEsc:
-			d.mode = modeNormal
-			d.selectedProc = ""
-		case ev.kind == keyChar && ev.ch == 'q':
-			return true
+		if ev.kind == keyChar {
+			switch ev.ch {
+			case '/':
+				d.mode = modeNormal
+				d.selectedProc = ""
+			case 'q':
+				return true
+			}
 		}
 	}
 	return false
