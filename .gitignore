@@ -12,7 +12,6 @@ slow_devices/slow-devices
 blk-latency/blk-latency
 stats_world/blk-ddsketch/blk-ddsketch
 softnet/softnet
-psi/psi
 duty_cycle_limiter/dutycycle
 zpool_iostat/zpool_iostat
 zpool_iostat/zpool_iostat_wv
