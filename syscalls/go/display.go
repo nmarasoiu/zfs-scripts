@@ -22,7 +22,6 @@ type interactiveMode int
 const (
 	modeNormal interactiveMode = iota
 	modeFilter
-	modeDetail
 )
 
 type processSummary struct {
@@ -50,7 +49,6 @@ type Display struct {
 	interactive   bool
 	mode          interactiveMode
 	filterText    string
-	selectedProc  string
 	lastSummaries []processSummary
 }
 
@@ -143,22 +141,11 @@ func (d *Display) render(state *State, metrics *runtimeMetrics, mapCap int64) {
 		viewStats = filterStatsGeneral(viewStats, d.filterText)
 	}
 
-	// Main content depends on mode
-	switch d.mode {
-	case modeDetail:
-		// Show only the selected process's detail table
-		filtered := make(map[string]map[uint32]*syscallStats)
-		if fm, ok := state.procSyscallStats[d.selectedProc]; ok {
-			filtered[d.selectedProc] = fm
-		}
-		d.renderTable(&mainBuf, filtered)
-	default:
-		// Normal and filter modes
-		if len(d.focusProcesses) > 0 {
-			d.renderTable(&mainBuf, viewStats)
-		} else {
-			d.renderSummary(&mainBuf, viewStats, elapsed)
-		}
+	// Main content
+	if len(d.focusProcesses) > 0 {
+		d.renderTable(&mainBuf, viewStats)
+	} else {
+		d.renderSummary(&mainBuf, viewStats, elapsed)
 	}
 
 	// Totals for footer
@@ -199,10 +186,6 @@ func (d *Display) render(state *State, metrics *runtimeMetrics, mapCap int64) {
 	var output strings.Builder
 
 	if showPanel {
-		highlightProc := ""
-		if d.mode == modeDetail {
-			highlightProc = d.selectedProc
-		}
 		panelMaxRows := d.topN + 2
 		var panelMatchedProcs map[string]bool
 		if d.mode == modeFilter && d.filterText != "" {
@@ -211,7 +194,7 @@ func (d *Display) render(state *State, metrics *runtimeMetrics, mapCap int64) {
 				panelMatchedProcs[proc] = true
 			}
 		}
-		panelLines := renderPanel(d.lastSummaries, highlightProc, panelMatchedProcs, panelMaxRows)
+		panelLines := renderPanel(d.lastSummaries, panelMatchedProcs, panelMaxRows)
 
 		// mainColWidth = space allocated to main content (display columns).
 		mainColWidth := termW - panelOverhead
@@ -245,9 +228,7 @@ func (d *Display) render(state *State, metrics *runtimeMetrics, mapCap int64) {
 		case modeNormal:
 			output.WriteString("  [/] filter  [q] quit\n")
 		case modeFilter:
-			fmt.Fprintf(&output, "  Filter (proc/syscall): %s_  [/] cancel  [Enter] select  [Bksp] back\n", d.filterText)
-		case modeDetail:
-			fmt.Fprintf(&output, "  [%s]  [/] back  [q] quit\n", d.selectedProc)
+			fmt.Fprintf(&output, "  Filter (proc/syscall): %s_  [/] cancel  [Bksp] back\n", d.filterText)
 		}
 	}
 
@@ -284,37 +265,9 @@ func (d *Display) handleKey(ev keyEvent) bool {
 			} else {
 				d.mode = modeNormal
 			}
-		case keyEnter:
-			if match := d.topFilterMatch(); match != "" {
-				d.selectedProc = match
-				d.mode = modeDetail
-				d.filterText = ""
-			}
-		}
-	case modeDetail:
-		if ev.kind == keyChar {
-			switch ev.ch {
-			case '/':
-				d.mode = modeNormal
-				d.selectedProc = ""
-			case 'q':
-				return true
-			}
 		}
 	}
 	return false
-}
-
-// topFilterMatch returns the first process name matching the current filter text
-// (case-insensitive substring match on process name).
-func (d *Display) topFilterMatch() string {
-	lower := strings.ToLower(d.filterText)
-	for _, ps := range d.lastSummaries {
-		if lower == "" || strings.Contains(strings.ToLower(ps.name), lower) {
-			return ps.name
-		}
-	}
-	return ""
 }
 
 func (d *Display) renderFooter(buf *strings.Builder, elapsed time.Duration, totalSamples uint64, nProcs int, metrics *runtimeMetrics, mapCap int64) {
@@ -626,7 +579,7 @@ func padOrTrunc(s string, width int) string {
 
 // renderPanel builds the right-side process panel lines.
 // maxRows limits the number of process rows (0 = unlimited).
-func renderPanel(summaries []processSummary, highlightProc string, matchedProcs map[string]bool, maxRows int) []string {
+func renderPanel(summaries []processSummary, matchedProcs map[string]bool, maxRows int) []string {
 	var lines []string
 
 	// Header
@@ -641,17 +594,13 @@ func renderPanel(summaries []processSummary, highlightProc string, matchedProcs 
 		if maxRows > 0 && n >= maxRows {
 			break
 		}
-		marker := " "
-		if ps.name == highlightProc {
-			marker = ">"
-		}
 		rateStr := "-"
 		if ps.rate >= 1 {
 			rateStr = formatCount(int64(ps.rate)) + "/s"
 		} else if ps.rate > 0 {
 			rateStr = fmt.Sprintf("%.1f/s", ps.rate)
 		}
-		line := fmt.Sprintf("%s %-15s %8s %8s", marker, padOrTrunc(ps.name, 15), rateStr, formatCount(int64(ps.count)))
+		line := fmt.Sprintf("  %-15s %8s %8s", padOrTrunc(ps.name, 15), rateStr, formatCount(int64(ps.count)))
 		lines = append(lines, padOrTrunc(line, panelWidth))
 		n++
 	}

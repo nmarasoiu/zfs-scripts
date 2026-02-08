@@ -10,7 +10,6 @@ type keyKind int
 
 const (
 	keyChar keyKind = iota
-	keyEnter
 	keyBackspace
 )
 
@@ -68,8 +67,6 @@ func runInput(ch chan<- keyEvent) {
 		}
 		b := buf[0]
 		switch {
-		case b == 0x0d || b == 0x0a:
-			ch <- keyEvent{kind: keyEnter}
 		case b == 0x7f || b == 0x08:
 			ch <- keyEvent{kind: keyBackspace}
 		case b >= 0x20 && b <= 0x7e:
