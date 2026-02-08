@@ -193,7 +193,7 @@ func (d *Display) render(state *State, metrics *runtimeMetrics, mapCap int64) {
 		if d.mode == modeDetail {
 			highlightProc = d.selectedProc
 		}
-		panelMaxRows := d.topN
+		panelMaxRows := d.topN + 2
 		panelLines := renderPanel(d.lastSummaries, highlightProc, d.filterText, panelMaxRows)
 
 		// mainColWidth = space allocated to main content (display columns).
