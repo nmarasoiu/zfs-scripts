@@ -122,8 +122,14 @@ func (d *Display) render(state *State, metrics *runtimeMetrics, mapCap int64) {
 
 	elapsed := now.Sub(state.startTime)
 
-	fmt.Fprintf(&mainBuf, "Syscall Latency Monitor - %s (uptime: %s)\n",
-		now.Format("15:04:05"), formatDuration(elapsed))
+	// Count total sketches (one per process×syscall pair)
+	nSketches := 0
+	for _, fm := range state.procSyscallStats {
+		nSketches += len(fm)
+	}
+
+	fmt.Fprintf(&mainBuf, "Syscall Latency Monitor - %s (uptime: %s) -- %d sketches\n",
+		now.Format("15:04:05"), formatDuration(elapsed), nSketches)
 
 	// Collect process summaries for the panel (while holding lock)
 	d.lastSummaries = collectProcessSummaries(state.procSyscallStats, elapsed.Seconds())
