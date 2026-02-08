@@ -46,7 +46,7 @@ check_and_fix "eno1 rps_flow_cnt" \
 
 # RFS global
 check_and_fix "rps_sock_flow_entries" \
-    /proc/sys/net/core/rps_sock_flow_entries "32768"
+    /proc/sys/net/core/rps_sock_flow_entries "131072"
 
 # eno1 hardirq → CPU2
 ENO1_IRQ=$(cat /sys/class/net/eno1/device/irq 2>/dev/null || true)

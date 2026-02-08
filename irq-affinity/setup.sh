@@ -28,8 +28,8 @@ if [ -n "$XHCI_IRQ" ]; then
 fi
 
 # 4. Enable RFS globally
-echo 32768 > /proc/sys/net/core/rps_sock_flow_entries
-echo "  rps_sock_flow_entries = 32768"
+echo 131072 > /proc/sys/net/core/rps_sock_flow_entries
+echo "  rps_sock_flow_entries = 131072"
 
 # 5. Pin tor to CPUs 0,1,3
 for pid in $(pgrep -x tor 2>/dev/null); do
@@ -42,7 +42,7 @@ echo "=== Installing persistent configuration ==="
 # Layer 1: udev rule (RPS + RFS)
 cat > /etc/udev/rules.d/99-network-tuning.rules << 'EOF'
 # RPS: steer softirqs to CPUs 0,1,3 (exclude CPU2 = eno1 hardirq handler)
-# RFS: enable receive flow steering with 32k flows
+# RFS: enable receive flow steering with 128k global flows, 32k per-queue
 ACTION=="add", SUBSYSTEM=="net", KERNEL=="eno1", RUN+="/bin/sh -c 'echo b > /sys/class/net/eno1/queues/rx-0/rps_cpus && echo 32768 > /sys/class/net/eno1/queues/rx-0/rps_flow_cnt'"
 EOF
 echo "  Installed /etc/udev/rules.d/99-network-tuning.rules"
@@ -69,7 +69,7 @@ XHCI=$(awk -F: '/xhci/{gsub(/ /,"",$1); print $1; exit}' /proc/interrupts)
 [ -n "$XHCI" ] && echo 3 > /proc/irq/"$XHCI"/smp_affinity_list 2>/dev/null
 
 # RFS global
-echo 32768 > /proc/sys/net/core/rps_sock_flow_entries 2>/dev/null
+echo 131072 > /proc/sys/net/core/rps_sock_flow_entries 2>/dev/null
 
 log "eno1 IRQ $IRQ→CPU2 AHCI=${AHCI:-?}→CPU1 XHCI=${XHCI:-?}→CPU3"
 EOF
@@ -77,7 +77,7 @@ chmod +x /etc/networkd-dispatcher/routable.d/50-irq-affinity
 echo "  Installed /etc/networkd-dispatcher/routable.d/50-irq-affinity"
 
 # Layer 2b: sysctl for RFS (guaranteed at boot, no race)
-echo "net.core.rps_sock_flow_entries = 32768" > /etc/sysctl.d/90-rfs.conf
+echo "net.core.rps_sock_flow_entries = 131072" > /etc/sysctl.d/90-rfs.conf
 echo "  Installed /etc/sysctl.d/90-rfs.conf"
 
 # Layer 3: systemd overrides for tor

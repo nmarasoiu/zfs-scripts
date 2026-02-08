@@ -32,7 +32,7 @@ Dedicate CPU2 to eno1 hardware interrupts. Move everything else off.
 | AHCI IRQ             | any → CPU1        | CPU1 (pinned)      |
 | XHCI IRQ             | any → CPU3        | CPU3 (pinned)      |
 | tor relay            | any               | CPUs 0,1,3         |
-| rps_sock_flow_entries| 0                 | 32768 (enables RFS)|
+| rps_sock_flow_entries| 0                 | 131072 (enables RFS)|
 
 ## Persistence — 3 layers
 
