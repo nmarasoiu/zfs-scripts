@@ -29,6 +29,7 @@ import (
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/rlimit"
+	"github.com/nmarasoiu/zfs-scripts/ringpoll"
 	"golang.org/x/sys/unix"
 )
 
@@ -83,8 +84,8 @@ func configureBPFFilters(objs *bpfObjects, focusList []string) {
 }
 
 // runReader busy-polls the ring buffer, batches events, and flushes to state.
-func runReader(rd *RingPollReader, state *State) {
-	var rec PollRecord
+func runReader(rd *ringpoll.Reader, state *State) {
+	var rec ringpoll.Record
 	eventSize := int(unsafe.Sizeof(bpfLatencyEvent{}))
 	batch := make([]pendingEvent, 0, flushSize)
 	lastFlush := time.Now()
@@ -161,7 +162,7 @@ func main() {
 	defer tpExit.Close()
 
 	// Open ring buffer (busy-poll reader — no epoll)
-	rd, err := NewRingPollReader(objs.Events, *pollSleep)
+	rd, err := ringpoll.NewReader(objs.Events, *pollSleep)
 	if err != nil {
 		log.Fatalf("Failed to open ring buffer: %v", err)
 	}

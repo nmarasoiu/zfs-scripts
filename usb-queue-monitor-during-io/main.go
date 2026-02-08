@@ -29,6 +29,7 @@ import (
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/rlimit"
+	"github.com/nmarasoiu/zfs-scripts/ringpoll"
 )
 
 const (
@@ -509,7 +510,7 @@ type Display struct {
 	deviceSizes  map[string]string
 	startTime    time.Time
 	displayCount uint64
-	ring         *RingPollReader
+	ring         *ringpoll.Reader
 }
 
 func (d *Display) resetCursor() {
@@ -784,7 +785,7 @@ func main() {
 	defer tpComplete.Close()
 
 	// Open ring buffer (busy-poll reader)
-	rd, err := NewRingPollReader(objs.Events, *pollSleep)
+	rd, err := ringpoll.NewReader(objs.Events, *pollSleep)
 	if err != nil {
 		log.Fatalf("Failed to open ring buffer: %v", err)
 	}
@@ -835,7 +836,7 @@ func main() {
 	readerDone.Add(1)
 	go func() {
 		defer readerDone.Done()
-		var rec PollRecord
+		var rec ringpoll.Record
 		eventSize := int(unsafe.Sizeof(bpfQueueEvent{}))
 		pending := make([]pendingEvent, 0, flushSize)
 		lastFlush := time.Now()

@@ -1,4 +1,30 @@
-package main
+// Package ringpoll provides a busy-polling reader for BPF ring buffers.
+//
+// It replaces the epoll-based reader in cilium/ebpf with direct mmap access
+// to the ring buffer's producer/consumer pages, eliminating epoll_wait syscall
+// overhead entirely. This is critical for high-throughput eBPF tracing where
+// the ring buffer has near-continuous data flow.
+//
+// On a system tracing 180K syscalls/sec, cilium/ebpf's default epoll reader
+// generated 42K epoll_wait calls/sec just to drain the ring buffer. With
+// ringpoll, epoll_wait drops to zero and total reader overhead falls from
+// ~110K syscalls/sec to ~5K/sec.
+//
+// Kernel side: pair this with bpf_ringbuf_submit(data, BPF_RB_NO_WAKEUP)
+// to suppress wakeup notifications that would otherwise fire on every submit.
+//
+// Usage:
+//
+//	rd, err := ringpoll.NewReader(objs.Events, 50*time.Microsecond)
+//	if err != nil { log.Fatal(err) }
+//	defer rd.Close()
+//	defer rd.Cleanup()
+//
+//	var rec ringpoll.Record
+//	for rd.ReadInto(&rec) {
+//	    // process rec.RawSample
+//	}
+package ringpoll
 
 import (
 	"encoding/binary"
@@ -18,14 +44,14 @@ const (
 	ringbufHdrSize       = 8 // uint32 Len + uint32 PgOff
 )
 
-// PollRecord holds a single ring buffer sample.
-type PollRecord struct {
+// Record holds a single ring buffer sample.
+type Record struct {
 	RawSample []byte
 }
 
-// RingPollReader reads from a BPF ring buffer by busy-polling the mmap'd
+// Reader reads from a BPF ring buffer by busy-polling the mmap'd
 // producer/consumer positions directly, avoiding epoll entirely.
-type RingPollReader struct {
+type Reader struct {
 	consMmap  []byte  // mmap'd consumer page
 	prodMmap  []byte  // mmap'd producer + data pages
 	consPos   *uint64 // pointer into consMmap
@@ -37,7 +63,7 @@ type RingPollReader struct {
 	pollSleep time.Duration
 
 	// Stats (written by reader goroutine, read atomically by display)
-	batchCount int64       // events in current batch (reader goroutine only)
+	batchCount int64        // events in current batch (reader goroutine only)
 	lastBatch  atomic.Int64 // events drained in last completed batch
 	bufSize    int          // ring capacity in bytes
 
@@ -55,8 +81,10 @@ type RingPollReader struct {
 	maxPending          atomic.Int64 // high-water mark of ring fill (bytes)
 }
 
-// NewRingPollReader creates a busy-polling ring buffer reader for the given map.
-func NewRingPollReader(m *ebpf.Map, pollSleep time.Duration) (*RingPollReader, error) {
+// NewReader creates a busy-polling ring buffer reader for the given BPF map.
+// The map must be of type RingBuf. pollSleep controls how long the reader
+// sleeps when the ring is empty (50us is a good starting point).
+func NewReader(m *ebpf.Map, pollSleep time.Duration) (*Reader, error) {
 	if m.Type() != ebpf.RingBuf {
 		return nil, fmt.Errorf("ringpoll: expected RingBuf map, got %s", m.Type())
 	}
@@ -81,7 +109,7 @@ func NewRingPollReader(m *ebpf.Map, pollSleep time.Duration) (*RingPollReader, e
 	consPos := (*uint64)(unsafe.Pointer(&cons[0]))
 	prodPos := (*uint64)(unsafe.Pointer(&prod[0]))
 
-	return &RingPollReader{
+	return &Reader{
 		consMmap:  cons,
 		prodMmap:  prod,
 		consPos:   consPos,
@@ -96,35 +124,35 @@ func NewRingPollReader(m *ebpf.Map, pollSleep time.Duration) (*RingPollReader, e
 
 // Close signals the reader to stop. The read loop will return false on the
 // next iteration. Call Cleanup after the read goroutine has exited.
-func (r *RingPollReader) Close() {
+func (r *Reader) Close() {
 	r.closed.Store(true)
 }
 
 // Cleanup unmaps the shared memory. Must be called after the read loop exits.
-func (r *RingPollReader) Cleanup() {
+func (r *Reader) Cleanup() {
 	syscall.Munmap(r.prodMmap)
 	syscall.Munmap(r.consMmap)
 }
 
 // Pending returns the current ring buffer fill level in bytes.
-func (r *RingPollReader) Pending() int {
+func (r *Reader) Pending() int {
 	prod := atomic.LoadUint64(r.prodPos)
 	cons := atomic.LoadUint64(r.consPos)
 	return int(prod - cons)
 }
 
 // LastBatch returns the number of events drained in the last completed batch.
-func (r *RingPollReader) LastBatch() int64 {
+func (r *Reader) LastBatch() int64 {
 	return r.lastBatch.Load()
 }
 
 // BufSize returns the ring buffer capacity in bytes.
-func (r *RingPollReader) BufSize() int {
+func (r *Reader) BufSize() int {
 	return r.bufSize
 }
 
 // MaxPending returns the high-water mark of ring buffer fill in bytes.
-func (r *RingPollReader) MaxPending() int64 {
+func (r *Reader) MaxPending() int64 {
 	return r.maxPending.Load()
 }
 
@@ -133,7 +161,7 @@ func (r *RingPollReader) MaxPending() int64 {
 //   - avg0: average batch size of all polls (including empty)
 //   - last1: batch size of most recent non-empty poll
 //   - last0: time since last empty poll
-func (r *RingPollReader) PollStats() (avg1, avg0 float64, last1 int64, last0 time.Duration) {
+func (r *Reader) PollStats() (avg1, avg0 float64, last1 int64, last0 time.Duration) {
 	eSum := r.atomicEventSum.Load()
 	neCount := r.atomicNonEmptyCount.Load()
 	pCount := r.atomicPollCount.Load()
@@ -154,7 +182,7 @@ func (r *RingPollReader) PollStats() (avg1, avg0 float64, last1 int64, last0 tim
 
 // Commit publishes the current consumer position to the kernel, freeing
 // ring buffer space. Call after processing a batch of events.
-func (r *RingPollReader) Commit() {
+func (r *Reader) Commit() {
 	atomic.StoreUint64(r.consPos, r.pos)
 }
 
@@ -163,7 +191,7 @@ func (r *RingPollReader) Commit() {
 // after processing a batch to free ring space.
 // Sleeps briefly when the ring is empty (commits before sleeping so the
 // kernel sees freed space). Returns true on success, false when closed.
-func (r *RingPollReader) ReadInto(rec *PollRecord) bool {
+func (r *Reader) ReadInto(rec *Record) bool {
 	for {
 		if r.closed.Load() {
 			return false

@@ -5,7 +5,10 @@ go 1.21
 require (
 	github.com/DataDog/sketches-go v1.4.4
 	github.com/cilium/ebpf v0.12.3
+	github.com/nmarasoiu/zfs-scripts/ringpoll v0.0.0
 )
+
+replace github.com/nmarasoiu/zfs-scripts/ringpoll => ../../ringpoll
 
 require (
 	golang.org/x/exp v0.0.0-20230224173230-c95f2b4c22f2 // indirect

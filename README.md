@@ -202,8 +202,10 @@ go build <tool>.go
 ## Dependencies
 
 ```bash
-# eBPF tools
-go get github.com/cilium/ebpf
+# eBPF ring buffer reader (busy-poll, replaces cilium/ebpf's epoll-based reader)
+go get github.com/nmarasoiu/zfs-scripts/ringpoll
+
+# Histogram/sketch libraries
 go get github.com/HdrHistogram/hdrhistogram-go
 go get github.com/DataDog/sketches-go/ddsketch
 

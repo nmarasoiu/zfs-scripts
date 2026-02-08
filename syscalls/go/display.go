@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/DataDog/sketches-go/ddsketch"
+	"github.com/nmarasoiu/zfs-scripts/ringpoll"
 )
 
 const (
@@ -42,7 +43,7 @@ type Display struct {
 	batchMode      bool
 	focusProcesses []string // ordered list of focus process names
 	topN           int
-	ring           *RingPollReader
+	ring           *ringpoll.Reader
 	colsOverride   int // --cols override; 0 = auto-detect
 
 	// Interactive state (all owned by display goroutine — no sync needed)
