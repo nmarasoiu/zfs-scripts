@@ -1,12 +1,9 @@
-.PHONY: all generate build clean
+.PHONY: all build clean
 
 all: build
 
-generate:
-	go generate ./...
-
-build: generate
+build:
 	go build -o usb-queue-monitor-v2 .
 
 clean:
-	rm -f usb-queue-monitor-v2 bpf_bpfel.go bpf_bpfel.o
+	rm -f usb-queue-monitor-v2

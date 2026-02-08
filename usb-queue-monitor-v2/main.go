@@ -1,10 +1,7 @@
 // usb-queue-monitor-v2: Block I/O queue depth monitor via sysfs polling
 //
 // Polls /sys/block/*/inflight at ~200 Hz to build exact queue depth histograms.
-// eBPF tracepoints (block_rq_issue/complete) provide the true peak queue depth
-// per device, catching spikes between poll intervals.
-//
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -target bpfel bpf bpf/peak_depth.c -- -I/usr/include -I.
+// P100 (Max) is the true maximum observed across all sysfs samples.
 
 package main
 
@@ -21,10 +18,6 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
-
-	"github.com/cilium/ebpf"
-	"github.com/cilium/ebpf/link"
-	"github.com/cilium/ebpf/rlimit"
 )
 
 const (
@@ -38,7 +31,7 @@ const (
 var devices = []string{"sda", "nvme0n1", "nvme1n1", "", "sdc", "sdd", "sde", "sdf", "sdg"}
 
 // Configurable percentiles to display (P0 replaced by Util column)
-var percentiles = []float64{10, 20, 30, 40, 50, 60, 70, 80, 90, 95, 99, 99.5, 99.9, 99.95, 99.99, 99.995, 99.999, 100}
+var percentiles = []float64{10, 20, 30, 40, 50, 60, 70, 80, 90, 95, 99, 99.5, 99.9, 99.95, 99.99, 99.995, 99.999}
 
 // Histogram maintains exact counts for queue depth values 0-255
 // Memory: 256 × 8 bytes = 2KB per device (vs 10MB reservoir)
@@ -228,31 +221,6 @@ func (ir *InflightReader) Read() (int, error) {
 // Close closes the file handle
 func (ir *InflightReader) Close() error {
 	return ir.file.Close()
-}
-
-// getInflight reads the current in-flight IO count for a device (legacy, used at startup)
-func getInflight(device string) (int, error) {
-	data, err := os.ReadFile(fmt.Sprintf("/sys/block/%s/inflight", device))
-	if err != nil {
-		return 0, err
-	}
-
-	parts := strings.Fields(strings.TrimSpace(string(data)))
-	if len(parts) < 2 {
-		return 0, fmt.Errorf("invalid inflight format for %s", device)
-	}
-
-	read, err := strconv.Atoi(parts[0])
-	if err != nil {
-		return 0, err
-	}
-
-	write, err := strconv.Atoi(parts[1])
-	if err != nil {
-		return 0, err
-	}
-
-	return read + write, nil
 }
 
 // calcPercentiles calculates all configured percentiles from a histogram
@@ -488,7 +456,7 @@ func formatPercentileHeader(pct float64) string {
 
 var usbDevices = []string{"sdc", "sdd", "sde", "sdf", "sdg"}
 
-func (d *Display) render(histograms map[string]*Histogram, usbAggregate *Histogram, currents map[string]int, usbAggrCurrent int, totalSamples uint64, ebpfPeaks map[string]int64) {
+func (d *Display) render(histograms map[string]*Histogram, usbAggregate *Histogram, currents map[string]int, usbAggrCurrent int, totalSamples uint64) {
 	d.displayCount++
 	var buf strings.Builder
 
@@ -501,8 +469,8 @@ func (d *Display) render(histograms map[string]*Histogram, usbAggregate *Histogr
 	}
 
 	// Build dynamic header
-	// 8=Device, 9=Current, 9=Util, percentiles*9, 9=Avg, 12=Device(size), 2+30+2=bar, 10=Device, 5=Avg
-	lineWidth := 8 + 9 + 9 + len(percentiles)*9 + 9 + 12 + 2 + maxQueuePerDev + 2 + 10 + 5
+	// 8=Device, 9=Current, 9=Util, percentiles*9, 9=Max, 9=Avg, 12=Device(size), 2+30+2=bar, 10=Device, 5=Avg
+	lineWidth := 8 + 9 + 9 + len(percentiles)*9 + 9 + 9 + 12 + 2 + maxQueuePerDev + 2 + 10 + 5
 	buf.WriteString(strings.Repeat("=", lineWidth))
 	buf.WriteString("\n")
 	fmt.Fprintf(&buf, "%-8s %8s %8s", "Device", "Current", "Util")
@@ -512,6 +480,7 @@ func (d *Display) render(histograms map[string]*Histogram, usbAggregate *Histogr
 			fmt.Fprintf(&buf, " %8s", "Avg")
 		}
 	}
+	fmt.Fprintf(&buf, " %8s", "Max")
 	fmt.Fprintf(&buf, "  %-11s  %-32s  %-8s%4s\n", "Device", "        Utilization", "Device", "Avg")
 	buf.WriteString(strings.Repeat("-", lineWidth))
 	buf.WriteString("\n")
@@ -526,12 +495,9 @@ func (d *Display) render(histograms map[string]*Histogram, usbAggregate *Histogr
 		hist := histograms[dev]
 		current := currents[dev]
 		pcts := calcPercentiles(hist)
-		// P100 = eBPF peak (sees every I/O event, ground truth)
-		if ep, ok := ebpfPeaks[dev]; ok {
-			pcts[len(pcts)-1] = float64(ep)
-		}
 		avg := hist.GetAverage()
 		util := hist.GetUtilization()
+		maxVal := hist.GetMax()
 
 		// Find P99 for bar display
 		p99Int := 0
@@ -549,22 +515,16 @@ func (d *Display) render(histograms map[string]*Histogram, usbAggregate *Histogr
 				fmt.Fprintf(&buf, " %8.2f", avg)
 			}
 		}
+		fmt.Fprintf(&buf, " %8d", maxVal)
 		devWithSize := fmt.Sprintf("%s(%s)", dev, d.deviceSizes[dev])
 		fmt.Fprintf(&buf, "  %-11s  [%s]  %-8s%4d\n", devWithSize, bar, dev, int(avg+0.5))
 
 		// After last USB device, show aggregate USB stats
 		if dev == "sdg" {
 			aggrPcts := calcPercentiles(usbAggregate)
-			// P100 = sum of USB eBPF peaks (ground truth)
-			usbPeakSum := int64(0)
-			for _, ud := range usbDevices {
-				if ep, ok := ebpfPeaks[ud]; ok {
-					usbPeakSum += ep
-				}
-			}
-			aggrPcts[len(aggrPcts)-1] = float64(usbPeakSum)
 			aggrAvg := usbAggregate.GetAverage()
 			aggrUtil := usbAggregate.GetUtilization()
+			aggrMax := usbAggregate.GetMax()
 
 			fmt.Fprintf(&buf, "%-8s %4d/%-3d %7.1f%%", "USB", usbAggrCurrent, maxQueueUSBAggr, aggrUtil)
 			for i, val := range aggrPcts {
@@ -573,6 +533,7 @@ func (d *Display) render(histograms map[string]*Histogram, usbAggregate *Histogr
 					fmt.Fprintf(&buf, " %8.2f", aggrAvg)
 				}
 			}
+			fmt.Fprintf(&buf, " %8d", aggrMax)
 			// Scaled utilization bar: scale from 0-150 to 0-30 for display
 			scaledCurrent := int(float64(usbAggrCurrent) / float64(maxQueueUSBAggr) * float64(maxQueuePerDev) + 0.5)
 			aggrP99 := 0.0
@@ -633,65 +594,6 @@ type SamplerState struct {
 type CurrentValues struct {
 	values      map[string]*atomic.Int32
 	usbAggrCurr atomic.Int32
-}
-
-// ---------- eBPF peak depth helpers ----------
-
-// devNameCache maps eBPF dev encoding (major<<20 | minor) to device name
-var (
-	devNameCache   = make(map[uint32]string)
-	devNameCacheMu sync.RWMutex
-)
-
-func lookupDevName(dev uint32) string {
-	devNameCacheMu.RLock()
-	if name, ok := devNameCache[dev]; ok {
-		devNameCacheMu.RUnlock()
-		return name
-	}
-	devNameCacheMu.RUnlock()
-
-	major := dev >> 20
-	minor := dev & 0xFFFFF
-	name := fmt.Sprintf("%d:%d", major, minor)
-
-	sysPath := fmt.Sprintf("/sys/dev/block/%d:%d/device/../block", major, minor)
-	if entries, err := os.ReadDir(sysPath); err == nil && len(entries) > 0 {
-		name = entries[0].Name()
-	} else {
-		ueventPath := fmt.Sprintf("/sys/dev/block/%d:%d/uevent", major, minor)
-		if data, err := os.ReadFile(ueventPath); err == nil {
-			for _, line := range strings.Split(string(data), "\n") {
-				if strings.HasPrefix(line, "DEVNAME=") {
-					name = strings.TrimPrefix(line, "DEVNAME=")
-					break
-				}
-			}
-		}
-	}
-
-	devNameCacheMu.Lock()
-	devNameCache[dev] = name
-	devNameCacheMu.Unlock()
-	return name
-}
-
-// readEbpfPeaks iterates the peak_depth eBPF map and returns per-device peaks
-func readEbpfPeaks(m *ebpf.Map) map[string]int64 {
-	peaks := make(map[string]int64)
-	if m == nil {
-		return peaks
-	}
-	var key uint32
-	var val int64
-	iter := m.Iterate()
-	for iter.Next(&key, &val) {
-		name := lookupDevName(key)
-		if val > 0 {
-			peaks[name] = val
-		}
-	}
-	return peaks
 }
 
 func main() {
@@ -761,32 +663,6 @@ func main() {
 		histograms:   histograms,
 		usbAggregate: usbAggregate,
 	}
-
-	// eBPF: load peak queue depth tracker
-	if err := rlimit.RemoveMemlock(); err != nil {
-		log.Fatalf("Failed to remove memlock limit: %v", err)
-	}
-	objs := bpfObjects{}
-	if err := loadBpfObjects(&objs, nil); err != nil {
-		log.Fatalf("Failed to load eBPF objects: %v", err)
-	}
-	defer objs.Close()
-
-	tpIssue, err := link.AttachTracing(link.TracingOptions{
-		Program: objs.BlockRqIssue,
-	})
-	if err != nil {
-		log.Fatalf("Failed to attach block_rq_issue: %v", err)
-	}
-	defer tpIssue.Close()
-
-	tpComplete, err := link.AttachTracing(link.TracingOptions{
-		Program: objs.BlockRqComplete,
-	})
-	if err != nil {
-		log.Fatalf("Failed to attach block_rq_complete: %v", err)
-	}
-	defer tpComplete.Close()
 
 	display := &Display{
 		batchMode:   *batchMode,
@@ -892,9 +768,6 @@ func main() {
 				}
 				usbAggrCurrent := int(currents.usbAggrCurr.Load())
 
-				// Read eBPF peak queue depths
-				ebpfPeaks := readEbpfPeaks(objs.PeakDepth)
-
 				// Snapshot histograms under lock (fast: 2KB copy per device)
 				histogramsCopy := make(map[string]*Histogram)
 				state.mu.RLock()
@@ -905,7 +778,7 @@ func main() {
 				state.mu.RUnlock()
 
 				// Render (outside of lock)
-				display.render(histogramsCopy, usbAggrCopy, currentMap, usbAggrCurrent, sampleCount.Load(), ebpfPeaks)
+				display.render(histogramsCopy, usbAggrCopy, currentMap, usbAggrCurrent, sampleCount.Load())
 			}
 		}
 	}()
