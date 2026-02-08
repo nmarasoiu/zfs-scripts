@@ -398,6 +398,13 @@ type Display struct {
 	focusProcesses []string // ordered list of focus process names
 	topN           int
 	ring           *RingPollReader
+
+	// Interactive state (all owned by display goroutine — no sync needed)
+	interactive   bool
+	mode          interactiveMode
+	filterText    string
+	selectedProc  string
+	lastSummaries []processSummary
 }
 
 func (d *Display) resetCursor() {
@@ -715,6 +722,66 @@ func formatSummaryRow(name string, st *simpleStats, sketch *ddsketch.DDSketch, s
 		formatCount(int64(n)),
 		formatRate(n, secs),
 	)
+}
+
+// collectProcessSummaries aggregates per-process totals from procSyscallStats.
+// Must be called while state.mu is held.
+func collectProcessSummaries(procStats map[string]map[uint32]*syscallStats, elapsedSecs float64) []processSummary {
+	summaries := make([]processSummary, 0, len(procStats))
+	for proc, fm := range procStats {
+		var total uint64
+		for _, ss := range fm {
+			total += ss.stats.count
+		}
+		rate := float64(0)
+		if elapsedSecs > 0 {
+			rate = float64(total) / elapsedSecs
+		}
+		summaries = append(summaries, processSummary{name: proc, count: total, rate: rate})
+	}
+	sort.Slice(summaries, func(i, j int) bool {
+		if summaries[i].count != summaries[j].count {
+			return summaries[i].count > summaries[j].count
+		}
+		return summaries[i].name < summaries[j].name
+	})
+	return summaries
+}
+
+// padOrTrunc pads s with spaces or truncates to exactly width characters.
+func padOrTrunc(s string, width int) string {
+	if len(s) >= width {
+		return s[:width]
+	}
+	return s + strings.Repeat(" ", width-len(s))
+}
+
+// renderPanel builds the right-side process panel lines.
+func renderPanel(summaries []processSummary, highlightProc, filterText string) []string {
+	var lines []string
+
+	// Header
+	lines = append(lines, padOrTrunc("  PROCESS         RATE    TOTAL", panelWidth))
+	lines = append(lines, strings.Repeat("─", panelWidth))
+
+	for _, ps := range summaries {
+		if filterText != "" && !strings.Contains(ps.name, filterText) {
+			continue
+		}
+		marker := " "
+		if ps.name == highlightProc {
+			marker = ">"
+		}
+		rateStr := "-"
+		if ps.rate >= 1 {
+			rateStr = formatCount(int64(ps.rate)) + "/s"
+		} else if ps.rate > 0 {
+			rateStr = fmt.Sprintf("%.1f/s", ps.rate)
+		}
+		line := fmt.Sprintf("%s %-15s %8s %8s", marker, padOrTrunc(ps.name, 15), rateStr, formatCount(int64(ps.count)))
+		lines = append(lines, padOrTrunc(line, panelWidth))
+	}
+	return lines
 }
 
 // parseFocusList parses the -c flag into a deduplicated list of process names,
