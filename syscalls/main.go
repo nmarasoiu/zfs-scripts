@@ -489,6 +489,12 @@ func (d *Display) render(state *State, metrics *runtimeMetrics, mapCap int64) {
 	// Collect process summaries for the panel (while holding lock)
 	d.lastSummaries = collectProcessSummaries(state.procSyscallStats, elapsed.Seconds())
 
+	// Optionally filter procSyscallStats for display
+	viewStats := state.procSyscallStats
+	if d.mode == modeFilter && d.filterText != "" {
+		viewStats = filterProcStats(viewStats, d.filterText)
+	}
+
 	// Main content depends on mode
 	switch d.mode {
 	case modeDetail:
@@ -499,11 +505,11 @@ func (d *Display) render(state *State, metrics *runtimeMetrics, mapCap int64) {
 		}
 		d.renderTable(&mainBuf, filtered)
 	default:
-		// Normal and filter modes show the standard view
+		// Normal and filter modes
 		if len(d.focusProcesses) > 0 {
-			d.renderTable(&mainBuf, state.procSyscallStats)
+			d.renderTable(&mainBuf, viewStats)
 		} else {
-			d.renderSummary(&mainBuf, state.procSyscallStats, elapsed)
+			d.renderSummary(&mainBuf, viewStats, elapsed)
 		}
 	}
 
@@ -636,10 +642,10 @@ func (d *Display) handleKey(ev keyEvent) bool {
 	return false
 }
 
-// topFilterMatch returns the first process name matching the current filter text.
+// topFilterMatch returns the first process name matching the current filter prefix.
 func (d *Display) topFilterMatch() string {
 	for _, ps := range d.lastSummaries {
-		if d.filterText == "" || strings.Contains(ps.name, d.filterText) {
+		if d.filterText == "" || strings.HasPrefix(ps.name, d.filterText) {
 			return ps.name
 		}
 	}
@@ -862,6 +868,18 @@ func formatSummaryRow(name string, st *simpleStats, sketch *ddsketch.DDSketch, s
 	)
 }
 
+// filterProcStats returns a shallow copy of procStats containing only processes
+// whose name starts with prefix. Must be called while state.mu is held.
+func filterProcStats(procStats map[string]map[uint32]*syscallStats, prefix string) map[string]map[uint32]*syscallStats {
+	filtered := make(map[string]map[uint32]*syscallStats)
+	for proc, fm := range procStats {
+		if strings.HasPrefix(proc, prefix) {
+			filtered[proc] = fm
+		}
+	}
+	return filtered
+}
+
 // collectProcessSummaries aggregates per-process totals from procSyscallStats.
 // Must be called while state.mu is held.
 func collectProcessSummaries(procStats map[string]map[uint32]*syscallStats, elapsedSecs float64) []processSummary {
@@ -941,7 +959,7 @@ func renderPanel(summaries []processSummary, highlightProc, filterText string, m
 
 	n := 0
 	for _, ps := range summaries {
-		if filterText != "" && !strings.Contains(ps.name, filterText) {
+		if filterText != "" && !strings.HasPrefix(ps.name, filterText) {
 			continue
 		}
 		if maxRows > 0 && n >= maxRows {
