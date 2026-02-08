@@ -41,7 +41,39 @@ const (
 	maxLatencyUs    = 60_000_000             // 60 seconds in µs - clamp values above this
 	flushSize       = 1024
 	flushInterval   = 10 * time.Millisecond
+
+	panelWidth    = 34
+	panelSep      = " │ "
+	panelMinWidth = 80
 )
+
+type interactiveMode int
+
+const (
+	modeNormal interactiveMode = iota
+	modeFilter
+	modeDetail
+)
+
+type keyKind int
+
+const (
+	keyChar keyKind = iota
+	keyEnter
+	keyEsc
+	keyBackspace
+)
+
+type keyEvent struct {
+	kind keyKind
+	ch   byte
+}
+
+type processSummary struct {
+	name  string
+	count uint64
+	rate  float64
+}
 
 var (
 	focusProcs = flag.String("c", "", "only trace these processes (comma-separated, empty=all)")
@@ -151,6 +183,75 @@ func formatRate(count uint64, secs float64) string {
 		return fmt.Sprintf("%.1f/s", rate)
 	}
 	return formatCount(int64(rate)) + "/s"
+}
+
+// isTerminal returns true if the given fd refers to a terminal.
+func isTerminal(fd int) bool {
+	_, err := unix.IoctlGetTermios(fd, unix.TCGETS)
+	return err == nil
+}
+
+// enableRawMode puts stdin into raw mode (no ICANON/ECHO) but keeps ISIG
+// so Ctrl+C still triggers the signal handler. Returns the original termios
+// for later restore, or nil if stdin is not a terminal.
+func enableRawMode() *unix.Termios {
+	orig, err := unix.IoctlGetTermios(int(os.Stdin.Fd()), unix.TCGETS)
+	if err != nil {
+		return nil
+	}
+	raw := *orig
+	raw.Lflag &^= unix.ICANON | unix.ECHO
+	raw.Cc[unix.VMIN] = 1
+	raw.Cc[unix.VTIME] = 0
+	unix.IoctlSetTermios(int(os.Stdin.Fd()), unix.TCSETS, &raw)
+	return orig
+}
+
+// restoreTermMode restores the original terminal settings.
+func restoreTermMode(orig *unix.Termios) {
+	if orig != nil {
+		unix.IoctlSetTermios(int(os.Stdin.Fd()), unix.TCSETS, orig)
+	}
+}
+
+// termSize returns the terminal dimensions (cols, rows). Returns 0,0 if not a terminal.
+func termSize() (int, int) {
+	ws, err := unix.IoctlGetWinsize(int(os.Stdout.Fd()), unix.TIOCGWINSZ)
+	if err != nil {
+		return 0, 0
+	}
+	return int(ws.Col), int(ws.Row)
+}
+
+// runInput reads stdin byte-by-byte and sends parsed key events to ch.
+// Exits on read error (stdin closed or program shutting down).
+func runInput(ch chan<- keyEvent) {
+	var buf [3]byte
+	for {
+		n, err := os.Stdin.Read(buf[:1])
+		if err != nil || n == 0 {
+			return
+		}
+		b := buf[0]
+		switch {
+		case b == 0x1b: // Escape or CSI sequence
+			// Try to read more bytes to consume CSI sequences (arrow keys etc)
+			os.Stdin.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
+			n2, _ := os.Stdin.Read(buf[1:])
+			os.Stdin.SetReadDeadline(time.Time{})
+			if n2 == 0 {
+				// Pure Esc key
+				ch <- keyEvent{kind: keyEsc}
+			}
+			// Otherwise discard the CSI sequence
+		case b == 0x0d || b == 0x0a:
+			ch <- keyEvent{kind: keyEnter}
+		case b == 0x7f || b == 0x08:
+			ch <- keyEvent{kind: keyBackspace}
+		case b >= 0x20 && b <= 0x7e:
+			ch <- keyEvent{kind: keyChar, ch: b}
+		}
+	}
 }
 
 // topN tracks the top N maximum values
