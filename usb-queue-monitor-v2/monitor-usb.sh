@@ -2,7 +2,7 @@
 # USB Queue Monitor launcher and error checker
 
 TOOL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-MONITOR="$TOOL_DIR/usb-queue-monitor"
+MONITOR="$TOOL_DIR/usb-queue-monitor-v2"
 LOG_FILE="$TOOL_DIR/usb-monitor.log"
 PID_FILE="$TOOL_DIR/usb-monitor.pid"
 

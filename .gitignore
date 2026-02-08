@@ -31,5 +31,5 @@ zpool_iostat/per_dev/zpool-latency
 # Editor/IDE
 .claude/
 zfs-github-src
-top_txg
+top_txg/top_txg
 ram_crowding/htop
