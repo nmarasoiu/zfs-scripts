@@ -228,7 +228,7 @@ func (d *Display) render(state *State, metrics *runtimeMetrics, mapCap int64) {
 		case modeNormal:
 			output.WriteString("  [/] filter  [q] quit\n")
 		case modeFilter:
-			fmt.Fprintf(&output, "  Filter (proc/syscall): %s_  [/] cancel  [Bksp] back\n", d.filterText)
+			fmt.Fprintf(&output, "  Filter prefix (proc/syscall): %s_  [/] cancel  [Bksp] back\n", d.filterText)
 		}
 	}
 
