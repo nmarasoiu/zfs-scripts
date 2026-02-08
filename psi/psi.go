@@ -448,6 +448,6 @@ func main() {
 			printTable(pf.name, some, full)
 		}
 		printZpoolStatus()
-		time.Sleep(1 * time.Second)
+		time.Sleep(4 * time.Second)
 	}
 }

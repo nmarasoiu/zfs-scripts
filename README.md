@@ -182,6 +182,74 @@ At α=0.01 (1%), this means p99.99 = 100ms is guaranteed to be within 99-101ms. 
 
 ---
 
+## Quick Reference — Running All Programs
+
+All Go programs can be run directly with `go run` (no need to compile first).
+
+### Go — Pure Stdlib (run from repo root)
+
+```bash
+go run psi/psi.go                    # PSI pressure monitor (cpu/memory/io)
+go run zswap/zswap-stats.go          # Zswap compression stats
+go run zpool-latency/zpool-latency.go # Zpool latency histogram
+go run slow_devices/main.go          # Slow device report from zpool iostat
+go run zpool_iostat/main.go          # Zpool iostat histogram percentages
+go run zpool_iostat/per_dev/main.go  # Zpool iostat per-device breakdown
+go run duty_cycle_limiter/main.go    # Duty cycle limiter
+go run softnet/main.go               # Softnet stats (/proc/net/softnet_stat)
+go run usb-queue-monitor-v2/main.go  # USB/block queue depth monitor
+```
+
+### Go — With Dependencies (run from their directory)
+
+```bash
+cd top_txg && go run .               # Interactive TXG monitor (needs x/term)
+```
+
+### Go + eBPF (run from their directory, need root)
+
+```bash
+cd blk-latency && sudo go run .               # Block I/O latency (HDR histogram)
+cd stats_world/blk-ddsketch && sudo go run .   # Block I/O latency (DDSketch)
+cd syscalls/go && sudo go run .                # Syscall latency tracker
+```
+
+If the generated `bpf_bpfel.o` is missing, run `go generate` first.
+
+### Shell Scripts
+
+```bash
+# TXG monitoring
+top_txg/top_txg.sh                   # Interactive TXG monitor (bash version)
+top_txg/top_txgs.sh <col>            # Sort TXGs by column (otime/qtime/wtime/stime)
+top_txg/times.zfs.sh                 # Run top_txgs for all time columns
+
+# ZFS tuning
+zfs-tuning/zfs_tune_report.sh       # Report vdev queue params from sysfs
+zfs-tuning/zfs_tune_sync.sh         # Compare/sync zfs.conf to running kernel
+zfs-tuning/zfs_parse.sh             # Parse zfs.conf into table
+zfs-tuning/recordsize.sh            # Show recordsize/special_small_blocks
+zfs-tuning/special_and_recordsize.sh
+
+# USB monitor service wrapper
+usb-queue-monitor-v2/monitor-usb.sh {start|stop|restart|status|errors|tail}
+```
+
+### Python
+
+```bash
+python3 zfs-health/check_zfs.py          # ZFS health check (OK/WARN/NOK)
+python3 zfs-health/zfs_special_stats.py   # Special vdev stats aggregator
+```
+
+### BPFTrace
+
+```bash
+sudo bpftrace utils/disk_alert.bt        # Block I/O latency alerter
+```
+
+---
+
 ## Building
 
 All tools require Go 1.21+. eBPF tools additionally need:
@@ -190,13 +258,12 @@ All tools require Go 1.21+. eBPF tools additionally need:
 - Root privileges to run
 
 ```bash
-# For eBPF tools
-cd <tool-directory>
-go generate  # Compiles BPF C code
-go build
+# For eBPF tools (from their directory)
+go generate  # Compiles BPF C code (only needed once)
+go run .     # Or: go build
 
-# For non-eBPF tools
-go build <tool>.go
+# For pure Go tools (from repo root)
+go run <dir>/main.go
 ```
 
 ## Dependencies
