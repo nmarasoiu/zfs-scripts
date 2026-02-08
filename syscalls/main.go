@@ -473,22 +473,35 @@ func collectEntries(procStats map[string]map[uint32]*syscallStats, alwaysPrefix 
 }
 
 func (d *Display) render(state *State, metrics *runtimeMetrics, mapCap int64) {
-	var buf strings.Builder
+	var mainBuf strings.Builder
 	now := time.Now()
 
 	state.mu.Lock()
 
 	elapsed := now.Sub(state.startTime)
 
-	fmt.Fprintf(&buf, "Syscall Latency Monitor - %s (uptime: %s)\n",
+	fmt.Fprintf(&mainBuf, "Syscall Latency Monitor - %s (uptime: %s)\n",
 		now.Format("15:04:05"), formatDuration(elapsed))
 
-	// Focus mode: detailed single-column table
-	// Summary mode: compact two-column table
-	if len(d.focusProcesses) > 0 {
-		d.renderTable(&buf, state.procSyscallStats)
-	} else {
-		d.renderSummary(&buf, state.procSyscallStats, elapsed)
+	// Collect process summaries for the panel (while holding lock)
+	d.lastSummaries = collectProcessSummaries(state.procSyscallStats, elapsed.Seconds())
+
+	// Main content depends on mode
+	switch d.mode {
+	case modeDetail:
+		// Show only the selected process's detail table
+		filtered := make(map[string]map[uint32]*syscallStats)
+		if fm, ok := state.procSyscallStats[d.selectedProc]; ok {
+			filtered[d.selectedProc] = fm
+		}
+		d.renderTable(&mainBuf, filtered)
+	default:
+		// Normal and filter modes show the standard view
+		if len(d.focusProcesses) > 0 {
+			d.renderTable(&mainBuf, state.procSyscallStats)
+		} else {
+			d.renderSummary(&mainBuf, state.procSyscallStats, elapsed)
+		}
 	}
 
 	// Totals for footer
@@ -502,10 +515,125 @@ func (d *Display) render(state *State, metrics *runtimeMetrics, mapCap int64) {
 
 	state.mu.Unlock()
 
-	d.renderFooter(&buf, elapsed, totalSamples, nProcs, metrics, mapCap)
+	// Build footer
+	var footerBuf strings.Builder
+	d.renderFooter(&footerBuf, elapsed, totalSamples, nProcs, metrics, mapCap)
+
+	// Compose main content with panel if interactive
+	mainStr := mainBuf.String()
+	footerStr := footerBuf.String()
+	termW, _ := termSize()
+	showPanel := d.interactive && termW >= panelMinWidth
+
+	var output strings.Builder
+
+	if showPanel {
+		highlightProc := ""
+		if d.mode == modeDetail {
+			highlightProc = d.selectedProc
+		}
+		panelLines := renderPanel(d.lastSummaries, highlightProc, d.filterText)
+		mainLines := strings.Split(strings.TrimRight(mainStr, "\n"), "\n")
+
+		mainColWidth := termW - len(panelSep) - panelWidth
+		if mainColWidth < 10 {
+			mainColWidth = 10
+		}
+
+		maxRows := len(mainLines)
+		if len(panelLines) > maxRows {
+			maxRows = len(panelLines)
+		}
+
+		for i := 0; i < maxRows; i++ {
+			left := ""
+			if i < len(mainLines) {
+				left = mainLines[i]
+			}
+			right := ""
+			if i < len(panelLines) {
+				right = panelLines[i]
+			}
+			// Pad left column to mainColWidth (visual, not rune-aware but fine for ASCII)
+			if len(left) < mainColWidth {
+				left += strings.Repeat(" ", mainColWidth-len(left))
+			} else if len(left) > mainColWidth {
+				left = left[:mainColWidth]
+			}
+			fmt.Fprintf(&output, "%s%s%s\n", left, panelSep, padOrTrunc(right, panelWidth))
+		}
+	} else {
+		output.WriteString(mainStr)
+	}
+
+	output.WriteString(footerStr)
+
+	// Mode hints and filter prompt
+	if d.interactive {
+		switch d.mode {
+		case modeNormal:
+			output.WriteString("  [/] filter  [q] quit\n")
+		case modeFilter:
+			fmt.Fprintf(&output, "  Filter: %s_\n", d.filterText)
+		case modeDetail:
+			fmt.Fprintf(&output, "  [%s]  [Esc] back  [q] quit\n", d.selectedProc)
+		}
+	}
 
 	d.resetCursor()
-	fmt.Print(buf.String())
+	fmt.Print(output.String())
+}
+
+// handleKey processes a key event and updates display mode/state.
+// Returns true if the program should quit.
+func (d *Display) handleKey(ev keyEvent) bool {
+	switch d.mode {
+	case modeNormal:
+		switch {
+		case ev.kind == keyChar && ev.ch == '/':
+			d.mode = modeFilter
+			d.filterText = ""
+		case ev.kind == keyChar && ev.ch == 'q':
+			return true // signal quit
+		}
+	case modeFilter:
+		switch ev.kind {
+		case keyChar:
+			d.filterText += string(ev.ch)
+		case keyBackspace:
+			if len(d.filterText) > 0 {
+				d.filterText = d.filterText[:len(d.filterText)-1]
+			}
+		case keyEnter:
+			if match := d.topFilterMatch(); match != "" {
+				d.selectedProc = match
+				d.mode = modeDetail
+			}
+			d.filterText = ""
+		case keyEsc:
+			d.filterText = ""
+			d.mode = modeNormal
+		}
+	case modeDetail:
+		switch {
+		case ev.kind == keyEsc:
+			d.mode = modeNormal
+			d.selectedProc = ""
+		case ev.kind == keyChar && ev.ch == 'q':
+			return true
+		}
+	}
+	return false
+}
+
+// topFilterMatch returns the first process name matching the current filter text.
+func (d *Display) topFilterMatch() string {
+	for _, ps := range d.lastSummaries {
+		if d.filterText == "" || strings.Contains(ps.name, d.filterText) {
+			return ps.name
+		}
+	}
+	return ""
 }
 
 func (d *Display) renderFooter(buf *strings.Builder, elapsed time.Duration, totalSamples uint64, nProcs int, metrics *runtimeMetrics, mapCap int64) {
