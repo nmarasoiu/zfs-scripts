@@ -198,8 +198,12 @@ func (d *Display) render(state *State, drops uint64, ms *mapStats, rs *ringStats
 		const sketchBytesEach = 400 // empirical ~0.4KB per DDSketch (struct + mapping + stores + few bins)
 		totalMB := float64(v.NSketches) * sketchBytesEach / 1024 / 1024
 
-		fmt.Fprintf(&mainBuf, "Syscall Latency Monitor - %s (uptime: %s) -- %d sketches × 0.4KB ≈ %.1fMB\n",
-			now.Format("15:04:05"), formatDuration(elapsed), v.NSketches, totalMB)
+		evictStr := ""
+		if v.SketchEvictions > 0 {
+			evictStr = fmt.Sprintf("  evict:%s", formatCount(int64(v.SketchEvictions)))
+		}
+		fmt.Fprintf(&mainBuf, "Syscall Latency Monitor - %s (uptime: %s) -- %d sketches × 0.4KB ≈ %.1fMB%s\n",
+			now.Format("15:04:05"), formatDuration(elapsed), v.NSketches, totalMB, evictStr)
 
 		d.lastSummaries = collectProcessSummaries(v.ProcStats, elapsed.Seconds())
 
@@ -215,7 +219,7 @@ func (d *Display) render(state *State, drops uint64, ms *mapStats, rs *ringStats
 		if len(d.focusProcesses) > 0 {
 			d.renderTable(&mainBuf, viewStats)
 		} else {
-			d.renderSummary(&mainBuf, viewStats, elapsed, v.GlobalStats, sketchPercentiles(v.GlobalSketch), v.SketchEvictions)
+			d.renderSummary(&mainBuf, viewStats, elapsed, v.GlobalStats, sketchPercentiles(v.GlobalSketch))
 		}
 
 		nProcs = len(v.ProcStats)
@@ -429,7 +433,7 @@ func renderDetailRow(buf *strings.Builder, name string, st *simpleStats, pcts pe
 	)
 }
 
-func (d *Display) renderSummary(buf *strings.Builder, procStats map[string]map[uint32]*syscallStats, elapsed time.Duration, globalStats *simpleStats, globalPcts percentiles, sketchEvictions uint64) {
+func (d *Display) renderSummary(buf *strings.Builder, procStats map[string]map[uint32]*syscallStats, elapsed time.Duration, globalStats *simpleStats, globalPcts percentiles) {
 	entries := collectEntries(procStats, true)
 
 	totalSecs := elapsed.Seconds()
@@ -491,8 +495,8 @@ func (d *Display) renderSummary(buf *strings.Builder, procStats map[string]map[u
 		fmt.Fprintf(buf, "%s │ %s\n", leftStr, rightStr)
 	}
 
-	// Build summary bar: LIFETIME(all) stats == title == evict:N == legend ==
-	title := fmt.Sprintf("Process × Syscall (top %d) evict:%s", totalShown, formatCount(int64(sketchEvictions)))
+	// Build summary bar: LIFETIME(all) stats == title == legend ==
+	title := fmt.Sprintf("Process × Syscall (top %d)", totalShown)
 	legend := d.summaryBarLegend()
 
 	if globalStats.count > 0 {
