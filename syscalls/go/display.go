@@ -97,42 +97,39 @@ func (d *Display) summaryBarLegend() string {
 
 func (d *Display) render(state *State, metrics *runtimeMetrics, mapCap int64, rs *ringStats) {
 	var mainBuf strings.Builder
-	now := time.Now()
+	var elapsed time.Duration
+	var nProcs int
+	var filterMatched map[string]bool // non-nil when filter is active
 
-	state.mu.Lock()
+	state.Read(func(v StateView) {
+		now := time.Now()
+		elapsed = now.Sub(v.StartTime)
 
-	elapsed := now.Sub(state.startTime)
-	nSketches := state.sketches.Len()
-	sketchEvictions := state.sketchEvictions
+		const sketchBytesEach = 400 // empirical ~0.4KB per DDSketch (struct + mapping + stores + few bins)
+		totalMB := float64(v.NSketches) * sketchBytesEach / 1024 / 1024
 
-	const sketchBytesEach = 400 // empirical ~0.4KB per DDSketch (struct + mapping + stores + few bins)
-	totalMB := float64(nSketches) * sketchBytesEach / 1024 / 1024
+		fmt.Fprintf(&mainBuf, "Syscall Latency Monitor - %s (uptime: %s) -- %d sketches × 0.4KB ≈ %.1fMB\n",
+			now.Format("15:04:05"), formatDuration(elapsed), v.NSketches, totalMB)
 
-	fmt.Fprintf(&mainBuf, "Syscall Latency Monitor - %s (uptime: %s) -- %d sketches × 0.4KB ≈ %.1fMB\n",
-		now.Format("15:04:05"), formatDuration(elapsed), nSketches, totalMB)
+		d.lastSummaries = collectProcessSummaries(v.ProcStats, elapsed.Seconds())
 
-	// Snapshot the LRU as a nested map for display functions
-	procStats := state.snapshotStats()
+		viewStats := v.ProcStats
+		if d.mode == modeFilter && d.filterText != "" {
+			viewStats = filterStatsGeneral(viewStats, d.filterText)
+			filterMatched = make(map[string]bool, len(viewStats))
+			for proc := range viewStats {
+				filterMatched[proc] = true
+			}
+		}
 
-	// Collect process summaries for the top-processes panel (while holding lock)
-	d.lastSummaries = collectProcessSummaries(procStats, elapsed.Seconds())
+		if len(d.focusProcesses) > 0 {
+			d.renderTable(&mainBuf, viewStats)
+		} else {
+			d.renderSummary(&mainBuf, viewStats, elapsed, v.GlobalStats, sketchPercentiles(v.GlobalSketch), v.SketchEvictions)
+		}
 
-	// Optionally filter for display
-	viewStats := procStats
-	if d.mode == modeFilter && d.filterText != "" {
-		viewStats = filterStatsGeneral(viewStats, d.filterText)
-	}
-
-	// Main content
-	if len(d.focusProcesses) > 0 {
-		d.renderTable(&mainBuf, viewStats)
-	} else {
-		d.renderSummary(&mainBuf, viewStats, elapsed, state.globalStats, sketchPercentiles(state.globalSketch), sketchEvictions)
-	}
-
-	nProcs := len(procStats)
-
-	state.mu.Unlock()
+		nProcs = len(v.ProcStats)
+	})
 
 	// Build footer
 	var footerBuf strings.Builder
@@ -162,14 +159,7 @@ func (d *Display) render(state *State, metrics *runtimeMetrics, mapCap int64, rs
 
 	if showProcPanel {
 		procPanelMaxRows := d.topN + 4
-		var procPanelMatched map[string]bool
-		if d.mode == modeFilter && d.filterText != "" {
-			procPanelMatched = make(map[string]bool, len(viewStats))
-			for proc := range viewStats {
-				procPanelMatched[proc] = true
-			}
-		}
-		procPanelLines := renderProcPanel(d.lastSummaries, procPanelMatched, procPanelMaxRows)
+		procPanelLines := renderProcPanel(d.lastSummaries, filterMatched, procPanelMaxRows)
 
 		// mainColWidth = space allocated to main content (display columns).
 		mainColWidth := termW - procPanelOverhead

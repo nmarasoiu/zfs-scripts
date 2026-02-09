@@ -175,25 +175,47 @@ func newState(maxSketches int) *State {
 	return s
 }
 
-// snapshotStats builds a nested map view of the LRU for display functions.
-// Copies pointers only — DDSketch structs are NOT cloned.
-// Must be called while s.mu is held (all rendering happens under the lock;
-// only the final screen write is outside).
-func (s *State) snapshotStats() map[string]map[uint32]*syscallStats {
-	result := make(map[string]map[uint32]*syscallStats)
+// StateView provides read access to State internals within a locked scope.
+// Only valid for the duration of the callback passed to State.Read.
+// All fields are pointer-shared with the live State — no cloning.
+type StateView struct {
+	StartTime       time.Time
+	NSketches       int
+	SketchEvictions uint64
+	GlobalStats     *simpleStats
+	GlobalSketch    *ddsketch.DDSketch
+	ProcStats       map[string]map[uint32]*syscallStats
+}
+
+// Read calls fn with a read-only view of the state under the lock.
+// The view contains pointer-shared data — valid only within fn.
+func (s *State) Read(fn func(StateView)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Build nested map view from LRU (pointer copies only, no cloning).
+	procStats := make(map[string]map[uint32]*syscallStats)
 	for _, key := range s.sketches.Keys() {
 		val, ok := s.sketches.Peek(key)
 		if !ok {
 			continue
 		}
-		fm := result[key.proc]
+		fm := procStats[key.proc]
 		if fm == nil {
 			fm = make(map[uint32]*syscallStats)
-			result[key.proc] = fm
+			procStats[key.proc] = fm
 		}
 		fm[key.syscall] = val
 	}
-	return result
+
+	fn(StateView{
+		StartTime:       s.startTime,
+		NSketches:       s.sketches.Len(),
+		SketchEvictions: s.sketchEvictions,
+		GlobalStats:     s.globalStats,
+		GlobalSketch:    s.globalSketch,
+		ProcStats:       procStats,
+	})
 }
 
 type pendingEvent struct {
@@ -287,7 +309,6 @@ func collectEntries(procStats map[string]map[uint32]*syscallStats, alwaysPrefix 
 // filterStatsGeneral returns a filtered copy of procStats where entries match
 // the text against process name or syscall name (case-insensitive substring).
 // Process name matches include all syscalls; syscall matches are per-entry.
-// Must be called while state.mu is held.
 func filterStatsGeneral(procStats map[string]map[uint32]*syscallStats, text string) map[string]map[uint32]*syscallStats {
 	lower := strings.ToLower(text)
 	filtered := make(map[string]map[uint32]*syscallStats)
@@ -309,8 +330,7 @@ func filterStatsGeneral(procStats map[string]map[uint32]*syscallStats, text stri
 	return filtered
 }
 
-// collectProcessSummaries aggregates per-process totals from procSyscallStats.
-// Must be called while state.mu is held.
+// collectProcessSummaries aggregates per-process totals.
 func collectProcessSummaries(procStats map[string]map[uint32]*syscallStats, elapsedSecs float64) []processSummary {
 	summaries := make([]processSummary, 0, len(procStats))
 	for proc, fm := range procStats {
