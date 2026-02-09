@@ -176,7 +176,9 @@ func newState(maxSketches int) *State {
 }
 
 // snapshotStats builds a nested map view of the LRU for display functions.
-// Must be called while s.mu is held.
+// Copies pointers only — DDSketch structs are NOT cloned.
+// Must be called while s.mu is held (all rendering happens under the lock;
+// only the final screen write is outside).
 func (s *State) snapshotStats() map[string]map[uint32]*syscallStats {
 	result := make(map[string]map[uint32]*syscallStats)
 	for _, key := range s.sketches.Keys() {

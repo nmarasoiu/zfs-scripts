@@ -420,10 +420,7 @@ func (d *Display) renderSummary(buf *strings.Builder, procStats map[string]map[u
 	}
 
 	// Build summary bar: LIFETIME(all) stats == title == evict:N == legend ==
-	title := fmt.Sprintf("Process × Syscall (top %d)", totalShown)
-	if sketchEvictions > 0 {
-		title += fmt.Sprintf(" evict:%s", formatCount(int64(sketchEvictions)))
-	}
+	title := fmt.Sprintf("Process × Syscall (top %d) evict:%s", totalShown, formatCount(int64(sketchEvictions)))
 	legend := d.summaryBarLegend()
 
 	if globalStats.count > 0 {
