@@ -30,3 +30,5 @@ const (
 	ansiBold  = "\033[1m"
 	ansiReset = "\033[0m"
 )
+
+func formatPct(v float64) string { return fmt.Sprintf("%6.2f%%", v) }

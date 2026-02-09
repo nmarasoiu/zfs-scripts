@@ -19,6 +19,7 @@ func main() {
 		{"MEMORY", mustOpen("/proc/pressure/memory")},
 	}
 	poolFds := discoverPools()
+	cpuSt := newCpuState()
 
 	var buf [512]byte
 	var w bytes.Buffer
@@ -26,6 +27,9 @@ func main() {
 	for i := 0; *batchN == 0 || i < *batchN; i++ {
 		refreshZpoolCache()
 		updatePoolStates(poolFds, buf[:])
+		if cpuSt != nil {
+			cpuSt.update()
+		}
 
 		w.Reset()
 		if *batchN == 0 {
@@ -35,6 +39,9 @@ func main() {
 		for _, pf := range psiFiles {
 			some, full := readPressure(pf.fd, buf[:])
 			printTable(&w, pf.name, some, full)
+		}
+		if cpuSt != nil {
+			printCpuTable(&w, cpuSt)
 		}
 		printZpoolStatus(&w)
 		os.Stdout.Write(w.Bytes())
