@@ -67,6 +67,34 @@ func sectionHeader(buf *strings.Builder, title string, width int) {
 	buf.WriteString("\n")
 }
 
+// buildSepLine builds "== title ====...==== legend ==" fitting within width.
+func buildSepLine(width int, title, legend string) string {
+	prefix := "== " + title + " "
+	var suffix string
+	if legend != "" {
+		suffix = " " + legend + " =="
+	}
+	fill := width - len(prefix) - len(suffix)
+	if fill < 0 {
+		fill = 0
+	}
+	return prefix + strings.Repeat("=", fill) + suffix
+}
+
+// summaryBarLegend returns the legend text to embed in the summary bar.
+func (d *Display) summaryBarLegend() string {
+	if !d.interactive {
+		return ""
+	}
+	switch d.mode {
+	case modeNormal:
+		return "[/] filter  [q] quit"
+	case modeFilter:
+		return fmt.Sprintf("Filter: %s_  [/] cancel  [Bksp] back", d.filterText)
+	}
+	return ""
+}
+
 func (d *Display) render(state *State, metrics *runtimeMetrics, mapCap int64, rs *ringStats) {
 	var mainBuf strings.Builder
 	now := time.Now()
@@ -141,7 +169,7 @@ func (d *Display) render(state *State, metrics *runtimeMetrics, mapCap int64, rs
 	var output strings.Builder
 
 	if showPanel {
-		panelMaxRows := d.topN + 2
+		panelMaxRows := d.topN + 1
 		var panelMatchedProcs map[string]bool
 		if d.mode == modeFilter && d.filterText != "" {
 			panelMatchedProcs = make(map[string]bool, len(viewStats))
@@ -177,8 +205,8 @@ func (d *Display) render(state *State, metrics *runtimeMetrics, mapCap int64, rs
 
 	output.WriteString(footerStr)
 
-	// Mode hints and filter prompt
-	if d.interactive {
+	// Mode hints and filter prompt (only for table view; summary view embeds in summary bar)
+	if d.interactive && len(d.focusProcesses) > 0 {
 		switch d.mode {
 		case modeNormal:
 			output.WriteString("  [/] filter  [q] quit\n")
@@ -357,7 +385,7 @@ func (d *Display) renderSummary(buf *strings.Builder, procStats map[string]map[u
 
 	dualWidth := summaryLineWidth + 3 + summaryLineWidth
 
-	sectionHeader(buf, fmt.Sprintf("Process × Syscall (top %d)", totalShown), dualWidth)
+	// Section header is embedded in the summary bar (=== line) instead of a separate line.
 
 	hdr := fmt.Sprintf("%-28s │ %8s %8s %8s %8s %8s │ %9s %9s",
 		"LIFETIME", "avg", "p50", "p90", "p99", "max", "samples", "rate")
@@ -404,15 +432,19 @@ func (d *Display) renderSummary(buf *strings.Builder, procStats map[string]map[u
 		fmt.Fprintf(buf, "%s │ %s\n", leftStr, rightStr)
 	}
 
+	// Build summary bar: LIFETIME(all) stats == title == legend ==
+	title := fmt.Sprintf("Process × Syscall (top %d)", totalShown)
+	legend := d.summaryBarLegend()
+
 	if globalStats.count > 0 {
 		globalRow := formatSummaryRow("LIFETIME(all)", globalStats, globalPcts, totalSecs)
 		remaining := dualWidth - summaryLineWidth - 1
 		if remaining < 0 {
 			remaining = 0
 		}
-		fmt.Fprintf(buf, "%s %s\n", globalRow, strings.Repeat("=", remaining))
+		fmt.Fprintf(buf, "%s %s\n", globalRow, buildSepLine(remaining, title, legend))
 	} else {
-		buf.WriteString(strings.Repeat("=", dualWidth))
+		buf.WriteString(buildSepLine(dualWidth, title, legend))
 		buf.WriteString("\n")
 	}
 }
