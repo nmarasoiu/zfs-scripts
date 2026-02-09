@@ -198,12 +198,8 @@ func (d *Display) render(state *State, drops uint64, ms *mapStats, rs *ringStats
 		const sketchBytesEach = 400 // empirical ~0.4KB per DDSketch (struct + mapping + stores + few bins)
 		totalMB := float64(v.NSketches) * sketchBytesEach / 1024 / 1024
 
-		evictStr := ""
-		if v.SketchEvictions > 0 {
-			evictStr = fmt.Sprintf("  evict:%s", formatCount(int64(v.SketchEvictions)))
-		}
-		fmt.Fprintf(&mainBuf, "Syscall Latency Monitor - %s (uptime: %s) -- %d sketches × 0.4KB ≈ %.1fMB%s\n",
-			now.Format("15:04:05"), formatDuration(elapsed), v.NSketches, totalMB, evictStr)
+		fmt.Fprintf(&mainBuf, "Syscall Latency Monitor - %s (uptime: %s) -- %d sketches × 0.4KB ≈ %.1fMB  evict:%s\n",
+			now.Format("15:04:05"), formatDuration(elapsed), v.NSketches, totalMB, formatCount(int64(v.SketchEvictions)))
 
 		d.lastSummaries = collectProcessSummaries(v.ProcStats, elapsed.Seconds())
 
@@ -336,14 +332,10 @@ func (d *Display) renderFooter(buf *strings.Builder, elapsed time.Duration, nPro
 	}
 	ringInfo := ""
 	if rs != nil {
-		last0Str := "-"
-		if rs.last0 > 0 {
-			last0Str = formatMicro(rs.last0)
-		}
 		ringInfo = fmt.Sprintf(" | Ring %s  cur: %6s  avg1:%-6.0f avg0:%-8.1f last1:%-6s last0:%-8s",
 			rs.formatUsage(formatBytes),
 			formatBytes(int64(rs.pending)),
-			rs.avg1, rs.avg0, formatCount(rs.last1), last0Str)
+			rs.avg1, rs.avg0, formatCount(rs.last1), formatMicro(rs.last0))
 	}
 	mapInfo := ""
 	if ms != nil {
@@ -499,17 +491,12 @@ func (d *Display) renderSummary(buf *strings.Builder, procStats map[string]map[u
 	title := fmt.Sprintf("Process × Syscall (top %d)", totalShown)
 	legend := d.summaryBarLegend()
 
-	if globalStats.count > 0 {
-		globalRow := formatSummaryRow("LIFETIME(all)", globalStats, globalPcts, totalSecs)
-		remaining := dualWidth - summaryLineWidth - 1
-		if remaining < 0 {
-			remaining = 0
-		}
-		fmt.Fprintf(buf, "%s %s\n", globalRow, buildSepLine(remaining, title, legend))
-	} else {
-		buf.WriteString(buildSepLine(dualWidth, title, legend))
-		buf.WriteString("\n")
+	globalRow := formatSummaryRow("LIFETIME(all)", globalStats, globalPcts, totalSecs)
+	remaining := dualWidth - summaryLineWidth - 1
+	if remaining < 0 {
+		remaining = 0
 	}
+	fmt.Fprintf(buf, "%s %s\n", globalRow, buildSepLine(remaining, title, legend))
 }
 
 func formatSummaryRow(name string, st *simpleStats, pcts percentiles, secs float64) string {
