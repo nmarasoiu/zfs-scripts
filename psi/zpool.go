@@ -303,7 +303,7 @@ var (
 	zpLastRefresh time.Time
 )
 
-const zpRefreshInterval = 30 * time.Second
+var zpRefreshInterval = 30 * time.Second
 
 // refreshZpoolCache runs zpool status if the cache is stale.
 func refreshZpoolCache() {
