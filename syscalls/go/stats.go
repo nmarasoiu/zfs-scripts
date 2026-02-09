@@ -199,6 +199,18 @@ type runtimeMetrics struct {
 	mapStale atomic.Int64
 }
 
+// ringStats is a point-in-time snapshot of ring buffer metrics,
+// decoupling display from the ringpoll.Reader type.
+type ringStats struct {
+	pending    int
+	capBytes   int
+	maxPending int64
+	avg1       float64
+	avg0       float64
+	last1      int64
+	last0      time.Duration
+}
+
 type processSummary struct {
 	name  string
 	count uint64

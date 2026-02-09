@@ -104,6 +104,22 @@ func runReader(rd *ringpoll.Reader, state *State) {
 	}
 }
 
+func snapshotRingStats(rd *ringpoll.Reader) *ringStats {
+	if rd == nil {
+		return nil
+	}
+	avg1, avg0, last1, last0 := rd.PollStats()
+	return &ringStats{
+		pending:    rd.Pending(),
+		capBytes:   rd.BufSize(),
+		maxPending: rd.MaxPending(),
+		avg1:       avg1,
+		avg0:       avg0,
+		last1:      last1,
+		last0:      last0,
+	}
+}
+
 func main() {
 	flag.Parse()
 	focusList := parseFocusList()
@@ -161,7 +177,6 @@ func main() {
 		batchMode:      *batch,
 		focusProcesses: focusList,
 		topN:           *topProcs,
-		ring:           rd,
 		colsOverride:   *colsFlag,
 		interactive:    interactive,
 	}
@@ -221,7 +236,7 @@ func main() {
 				return
 			case <-displayTicker.C:
 				readDropCount(objs.DropCount, &metrics.drops)
-				display.render(state, metrics, mapMaxVal)
+				display.render(state, metrics, mapMaxVal, snapshotRingStats(rd))
 			case ev := <-keyCh:
 				if display.handleKey(ev) {
 					// 'q' pressed — trigger shutdown via signal
@@ -229,7 +244,7 @@ func main() {
 					return
 				}
 				readDropCount(objs.DropCount, &metrics.drops)
-				display.render(state, metrics, mapMaxVal)
+				display.render(state, metrics, mapMaxVal, snapshotRingStats(rd))
 			}
 		}
 	}()
@@ -265,6 +280,6 @@ func main() {
 	readerDone.Wait()
 
 	readDropCount(objs.DropCount, &metrics.drops)
-	display.render(state, metrics, mapMaxVal)
+	display.render(state, metrics, mapMaxVal, snapshotRingStats(rd))
 }
 

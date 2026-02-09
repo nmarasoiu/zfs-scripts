@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"strings"
 	"time"
-
-	"github.com/nmarasoiu/zfs-scripts/ringpoll"
 )
 
 const (
@@ -29,7 +27,6 @@ type Display struct {
 	batchMode      bool
 	focusProcesses []string // ordered list of focus process names
 	topN           int
-	ring           *ringpoll.Reader
 	colsOverride   int // --cols override; 0 = auto-detect
 
 	// Interactive state (all owned by display goroutine — no sync needed)
@@ -70,7 +67,7 @@ func sectionHeader(buf *strings.Builder, title string, width int) {
 	buf.WriteString("\n")
 }
 
-func (d *Display) render(state *State, metrics *runtimeMetrics, mapCap int64) {
+func (d *Display) render(state *State, metrics *runtimeMetrics, mapCap int64, rs *ringStats) {
 	var mainBuf strings.Builder
 	now := time.Now()
 
@@ -119,7 +116,7 @@ func (d *Display) render(state *State, metrics *runtimeMetrics, mapCap int64) {
 
 	// Build footer
 	var footerBuf strings.Builder
-	d.renderFooter(&footerBuf, elapsed, totalSamples, nProcs, metrics, mapCap)
+	d.renderFooter(&footerBuf, elapsed, totalSamples, nProcs, metrics, mapCap, rs)
 
 	// Compose main content with panel when terminal is wide enough.
 	// Panel display is independent of interactive mode — --cols enables it in batch too.
@@ -228,7 +225,7 @@ func (d *Display) handleKey(ev keyEvent) bool {
 	return false
 }
 
-func (d *Display) renderFooter(buf *strings.Builder, elapsed time.Duration, totalSamples uint64, nProcs int, metrics *runtimeMetrics, mapCap int64) {
+func (d *Display) renderFooter(buf *strings.Builder, elapsed time.Duration, totalSamples uint64, nProcs int, metrics *runtimeMetrics, mapCap int64, rs *ringStats) {
 	drops := metrics.drops.Load()
 	evicted := metrics.evicted.Load()
 	mapUsed := metrics.mapUsed.Load()
@@ -243,21 +240,17 @@ func (d *Display) renderFooter(buf *strings.Builder, elapsed time.Duration, tota
 		dropRate = float64(drops) / elapsed.Seconds()
 	}
 	ringInfo := ""
-	if d.ring != nil {
-		pending := d.ring.Pending()
-		capBytes := d.ring.BufSize()
-		maxPend := d.ring.MaxPending()
-		pctFull := float64(pending) / float64(capBytes) * 100
-		maxPct := float64(maxPend) / float64(capBytes) * 100
-		avg1, avg0, last1, last0 := d.ring.PollStats()
+	if rs != nil {
+		pctFull := float64(rs.pending) / float64(rs.capBytes) * 100
+		maxPct := float64(rs.maxPending) / float64(rs.capBytes) * 100
 		last0Str := "-"
-		if last0 > 0 {
-			last0Str = formatMicro(last0)
+		if rs.last0 > 0 {
+			last0Str = formatMicro(rs.last0)
 		}
 		ringInfo = fmt.Sprintf(" | Ring avg: %6s/%s (%5.1f%%)  Ring max: %6s/%s (%5.1f%%)  avg1:%-6.0f avg0:%-8.1f last1:%-6s last0:%-8s",
-			formatBytes(int64(pending)), formatBytes(int64(capBytes)), pctFull,
-			formatBytes(maxPend), formatBytes(int64(capBytes)), maxPct,
-			avg1, avg0, formatCount(last1), last0Str)
+			formatBytes(int64(rs.pending)), formatBytes(int64(rs.capBytes)), pctFull,
+			formatBytes(rs.maxPending), formatBytes(int64(rs.capBytes)), maxPct,
+			rs.avg1, rs.avg0, formatCount(rs.last1), last0Str)
 	}
 	mapInfo := ""
 	if mapCap > 0 {
