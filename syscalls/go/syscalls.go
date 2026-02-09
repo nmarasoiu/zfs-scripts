@@ -129,7 +129,6 @@ var syscallNames = [451]string{
 	449: "futex_waitv", 450: "set_mempolicy_home_node",
 }
 
-
 func syscallName(id uint32) string {
 	if int(id) < len(syscallNames) && syscallNames[id] != "" {
 		return syscallNames[id]

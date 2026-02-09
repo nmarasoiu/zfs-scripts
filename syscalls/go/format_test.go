@@ -171,3 +171,33 @@ func TestPadOrTrunc(t *testing.T) {
 		}
 	}
 }
+
+func TestDisplayWidth(t *testing.T) {
+	tests := []struct {
+		s    string
+		want int
+	}{
+		{"hello", 5},
+		{"", 0},
+		{"héllo", 5},    // é is 1 display column
+		{"── title", 8}, // ─ is 1 display column (3 UTF-8 bytes)
+		{"abc│def", 7},  // │ is 1 display column
+	}
+	for _, tt := range tests {
+		got := displayWidth(tt.s)
+		if got != tt.want {
+			t.Errorf("displayWidth(%q) = %d, want %d", tt.s, got, tt.want)
+		}
+	}
+}
+
+func TestFormatLatencyPadded(t *testing.T) {
+	got := formatLatencyPadded(42)
+	if got != "    42µs" {
+		t.Errorf("formatLatencyPadded(42) = %q, want %q", got, "    42µs")
+	}
+	// 8 display columns: 4 spaces + "42" + "µs" (µ is 2 bytes but 1 display column)
+	if displayWidth(got) != 8 {
+		t.Errorf("formatLatencyPadded(42) display width = %d, want 8", displayWidth(got))
+	}
+}

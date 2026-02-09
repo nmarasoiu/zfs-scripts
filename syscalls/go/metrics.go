@@ -31,8 +31,8 @@ type runtimeMetrics struct {
 // decoupling display from the ringpoll.Reader type.
 type ringStats struct {
 	capacityStats
-	pending int         // current pending bytes
-	avg1    float64     // poll stats
+	pending int     // current pending bytes
+	avg1    float64 // poll stats
 	avg0    float64
 	last1   int64
 	last0   time.Duration

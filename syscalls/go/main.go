@@ -285,4 +285,3 @@ func run() error {
 	display.render(state, metrics.drops.Load(), snapshotRingStats(rd, &ringAvg{}))
 	return nil
 }
-

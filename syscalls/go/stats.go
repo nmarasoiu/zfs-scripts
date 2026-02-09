@@ -5,6 +5,7 @@ import (
 	"math"
 	"sync"
 	"time"
+	"unsafe"
 
 	"github.com/DataDog/sketches-go/ddsketch"
 	"github.com/hashicorp/golang-lru/v2/simplelru"
@@ -15,10 +16,7 @@ import (
 var commIntern = make(map[string]string)
 
 func commString(comm [16]int8) string {
-	var buf [16]byte
-	for i, c := range comm {
-		buf[i] = byte(c)
-	}
+	buf := *(*[16]byte)(unsafe.Pointer(&comm))
 	var raw string
 	if n := bytes.IndexByte(buf[:], 0); n >= 0 {
 		raw = string(buf[:n])

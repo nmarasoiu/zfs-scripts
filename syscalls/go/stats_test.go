@@ -1,0 +1,222 @@
+package main
+
+import (
+	"testing"
+)
+
+// --- commString ---
+
+func TestCommString_NullTerminated(t *testing.T) {
+	var comm [16]int8
+	for i, c := range []byte("tor") {
+		comm[i] = int8(c)
+	}
+	got := commString(comm)
+	if got != "tor" {
+		t.Errorf("commString = %q, want %q", got, "tor")
+	}
+}
+
+func TestCommString_FullBuffer(t *testing.T) {
+	var comm [16]int8
+	for i, c := range []byte("0123456789abcdef") {
+		comm[i] = int8(c)
+	}
+	got := commString(comm)
+	if got != "0123456789abcdef" {
+		t.Errorf("commString = %q, want %q", got, "0123456789abcdef")
+	}
+}
+
+func TestCommString_Interning(t *testing.T) {
+	// Reset intern map for test isolation
+	old := commIntern
+	commIntern = make(map[string]string)
+	defer func() { commIntern = old }()
+
+	var comm [16]int8
+	for i, c := range []byte("sshd") {
+		comm[i] = int8(c)
+	}
+	s1 := commString(comm)
+	s2 := commString(comm)
+	if s1 != s2 {
+		t.Errorf("interned strings not equal: %q vs %q", s1, s2)
+	}
+}
+
+// --- simpleStats ---
+
+func TestSimpleStats_Empty(t *testing.T) {
+	s := newSimpleStats()
+	if s.Avg() != 0 {
+		t.Errorf("empty Avg = %d, want 0", s.Avg())
+	}
+	if s.count != 0 {
+		t.Errorf("empty count = %d, want 0", s.count)
+	}
+}
+
+func TestSimpleStats_SingleValue(t *testing.T) {
+	s := newSimpleStats()
+	s.Record(42)
+	if s.min != 42 || s.max != 42 {
+		t.Errorf("min=%d max=%d, want both 42", s.min, s.max)
+	}
+	if s.Avg() != 42 {
+		t.Errorf("Avg = %d, want 42", s.Avg())
+	}
+	if s.count != 1 {
+		t.Errorf("count = %d, want 1", s.count)
+	}
+}
+
+func TestSimpleStats_MinMaxAvg(t *testing.T) {
+	s := newSimpleStats()
+	for _, v := range []int64{10, 20, 30, 40, 50} {
+		s.Record(v)
+	}
+	if s.min != 10 {
+		t.Errorf("min = %d, want 10", s.min)
+	}
+	if s.max != 50 {
+		t.Errorf("max = %d, want 50", s.max)
+	}
+	if s.Avg() != 30 {
+		t.Errorf("Avg = %d, want 30", s.Avg())
+	}
+	if s.count != 5 {
+		t.Errorf("count = %d, want 5", s.count)
+	}
+}
+
+// --- syscallStats ---
+
+func TestSyscallStats_RecordUpdatesSketchAndStats(t *testing.T) {
+	ss := newSyscallStats()
+	ss.Record(100)
+	ss.Record(200)
+	ss.Record(300)
+
+	if ss.stats.count != 3 {
+		t.Errorf("count = %d, want 3", ss.stats.count)
+	}
+	if ss.stats.min != 100 {
+		t.Errorf("min = %d, want 100", ss.stats.min)
+	}
+	if ss.stats.max != 300 {
+		t.Errorf("max = %d, want 300", ss.stats.max)
+	}
+
+	// DDSketch should have recorded 3 values
+	p50, _ := ss.sketch.GetValueAtQuantile(0.50)
+	if p50 < 150 || p50 > 250 {
+		t.Errorf("p50 = %.0f, expected near 200", p50)
+	}
+}
+
+func TestSketchPercentiles_Monotonic(t *testing.T) {
+	ss := newSyscallStats()
+	for i := int64(1); i <= 1000; i++ {
+		ss.Record(i)
+	}
+	pcts := sketchPercentiles(ss.sketch)
+	if pcts.P25 > pcts.P50 || pcts.P50 > pcts.P75 || pcts.P75 > pcts.P90 || pcts.P90 > pcts.P99 || pcts.P99 > pcts.P999 {
+		t.Errorf("percentiles not monotonic: P25=%d P50=%d P75=%d P90=%d P99=%d P999=%d",
+			pcts.P25, pcts.P50, pcts.P75, pcts.P90, pcts.P99, pcts.P999)
+	}
+}
+
+// --- State ---
+
+func TestState_RecordBatchAndRead(t *testing.T) {
+	state := newState(100)
+	batch := []pendingEvent{
+		{"tor", 0, 100},  // read
+		{"tor", 0, 200},  // read
+		{"tor", 1, 50},   // write
+		{"sshd", 0, 300}, // read
+	}
+	state.RecordBatch(batch)
+
+	state.Read(func(v StateView) {
+		if v.NSketches != 3 {
+			t.Errorf("NSketches = %d, want 3", v.NSketches)
+		}
+		if v.GlobalStats.count != 4 {
+			t.Errorf("global count = %d, want 4", v.GlobalStats.count)
+		}
+
+		torSyscalls := v.ProcStats["tor"]
+		if torSyscalls == nil {
+			t.Fatal("missing tor in ProcStats")
+		}
+		torRead := torSyscalls[0]
+		if torRead == nil {
+			t.Fatal("missing tor/read in ProcStats")
+		}
+		if torRead.stats.count != 2 {
+			t.Errorf("tor/read count = %d, want 2", torRead.stats.count)
+		}
+
+		sshdSyscalls := v.ProcStats["sshd"]
+		if sshdSyscalls == nil {
+			t.Fatal("missing sshd in ProcStats")
+		}
+		sshdRead := sshdSyscalls[0]
+		if sshdRead.stats.count != 1 {
+			t.Errorf("sshd/read count = %d, want 1", sshdRead.stats.count)
+		}
+	})
+}
+
+func TestState_LRUEviction(t *testing.T) {
+	state := newState(2) // only 2 sketches allowed
+	state.RecordBatch([]pendingEvent{
+		{"a", 0, 10},
+		{"b", 1, 20},
+		{"c", 2, 30}, // should evict "a"/0
+	})
+
+	state.Read(func(v StateView) {
+		if v.NSketches != 2 {
+			t.Errorf("NSketches = %d, want 2", v.NSketches)
+		}
+		if v.SketchEvictions != 1 {
+			t.Errorf("evictions = %d, want 1", v.SketchEvictions)
+		}
+		// "a" should have been evicted (LRU), "b" and "c" remain
+		if v.ProcStats["a"] != nil {
+			t.Error("expected 'a' to be evicted")
+		}
+		if v.ProcStats["b"] == nil {
+			t.Error("expected 'b' to be present")
+		}
+		if v.ProcStats["c"] == nil {
+			t.Error("expected 'c' to be present")
+		}
+	})
+}
+
+func TestState_GlobalStatsTrackAllEvents(t *testing.T) {
+	state := newState(100)
+	state.RecordBatch([]pendingEvent{
+		{"p1", 0, 5},
+		{"p2", 1, 15},
+	})
+	state.RecordBatch([]pendingEvent{
+		{"p1", 0, 25},
+	})
+
+	state.Read(func(v StateView) {
+		if v.GlobalStats.count != 3 {
+			t.Errorf("global count = %d, want 3", v.GlobalStats.count)
+		}
+		if v.GlobalStats.min != 5 {
+			t.Errorf("global min = %d, want 5", v.GlobalStats.min)
+		}
+		if v.GlobalStats.max != 25 {
+			t.Errorf("global max = %d, want 25", v.GlobalStats.max)
+		}
+	})
+}
