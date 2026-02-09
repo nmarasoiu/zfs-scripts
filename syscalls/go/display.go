@@ -131,20 +131,13 @@ func (d *Display) render(state *State, metrics *runtimeMetrics, mapCap int64, rs
 		d.renderSummary(&mainBuf, viewStats, elapsed, state.globalStats, sketchPercentiles(state.globalSketch))
 	}
 
-	// Totals for footer
-	var totalSamples uint64
-	for _, fm := range state.procSyscallStats {
-		for _, ss := range fm {
-			totalSamples += ss.stats.count
-		}
-	}
 	nProcs := len(state.procSyscallStats)
 
 	state.mu.Unlock()
 
 	// Build footer
 	var footerBuf strings.Builder
-	d.renderFooter(&footerBuf, elapsed, totalSamples, nProcs, metrics, mapCap, rs)
+	d.renderFooter(&footerBuf, elapsed, nProcs, metrics, mapCap, rs)
 
 	// Compose main content with panel when terminal is wide enough.
 	// Panel display is independent of interactive mode — --cols enables it in batch too.
@@ -253,16 +246,12 @@ func (d *Display) handleKey(ev keyEvent) bool {
 	return false
 }
 
-func (d *Display) renderFooter(buf *strings.Builder, elapsed time.Duration, totalSamples uint64, nProcs int, metrics *runtimeMetrics, mapCap int64, rs *ringStats) {
+func (d *Display) renderFooter(buf *strings.Builder, elapsed time.Duration, nProcs int, metrics *runtimeMetrics, mapCap int64, rs *ringStats) {
 	drops := metrics.drops.Load()
 	evicted := metrics.evicted.Load()
 	mapUsed := metrics.mapUsed.Load()
 	mapStale := metrics.mapStale.Load()
 
-	rate := float64(0)
-	if elapsed.Seconds() > 0 {
-		rate = float64(totalSamples) / elapsed.Seconds()
-	}
 	dropRate := float64(0)
 	if elapsed.Seconds() > 0 {
 		dropRate = float64(drops) / elapsed.Seconds()
@@ -287,9 +276,8 @@ func (d *Display) renderFooter(buf *strings.Builder, elapsed time.Duration, tota
 			formatCount(mapUsed), formatCount(mapCap), pct,
 			formatCount(mapStale), formatCount(int64(evicted)))
 	}
-	fmt.Fprintf(buf, "Total: %s syscalls | Rate: %s/s | Processes: %d | Drops: %s (%s/s)%s%s\n",
-		formatCount(int64(totalSamples)), formatCount(int64(rate)), nProcs,
-		formatCount(int64(drops)), formatCount(int64(dropRate)), mapInfo, ringInfo)
+	fmt.Fprintf(buf, "Processes: %d | Drops: %s (%s/s)%s%s\n",
+		nProcs, formatCount(int64(drops)), formatCount(int64(dropRate)), mapInfo, ringInfo)
 
 	if d.batchMode {
 		buf.WriteString("\n")
