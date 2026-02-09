@@ -66,8 +66,6 @@ func (t *topN) Get() []int64 {
 	return result
 }
 
-func (t *topN) Reset() { t.values = t.values[:0] }
-
 // simpleStats tracks min/max/sum/count explicitly (no sketch overhead)
 type simpleStats struct {
 	min   int64

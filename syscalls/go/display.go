@@ -21,10 +21,8 @@ type tableEntry struct {
 }
 
 // collectEntries builds a sorted list of table entries from per-process stats.
-// When alwaysPrefix is true, labels are always "proc/syscall"; otherwise the
-// proc prefix is omitted when there is exactly one process.
-func collectEntries(procStats map[string]map[uint32]*syscallStats, alwaysPrefix bool) []tableEntry {
-	singleProc := !alwaysPrefix && len(procStats) == 1
+// When singleProc is true, the proc prefix is omitted from labels.
+func collectEntries(procStats map[string]map[uint32]*syscallStats, singleProc bool) []tableEntry {
 
 	var entries []tableEntry
 	for proc, fm := range procStats {
@@ -333,7 +331,7 @@ func (d *Display) renderFooter(buf *strings.Builder, elapsed time.Duration, nPro
 	ringInfo := ""
 	if rs != nil {
 		ringInfo = fmt.Sprintf(" | Ring %s  cur: %6s  avg1:%-6.0f avg0:%-8.1f last1:%-6s last0:%-8s",
-			rs.formatUsage(formatBytes),
+			rs.formatUsage(),
 			formatBytes(int64(rs.pending)),
 			rs.avg1, rs.avg0, formatCount(rs.last1), formatMicro(rs.last0))
 	}
@@ -346,7 +344,7 @@ func (d *Display) renderFooter(buf *strings.Builder, elapsed time.Duration, nPro
 }
 
 func (d *Display) renderTable(buf *strings.Builder, procStats map[string]map[uint32]*syscallStats) {
-	entries := collectEntries(procStats, false)
+	entries := collectEntries(procStats, len(procStats) == 1)
 
 	if len(entries) == 0 {
 		return
@@ -368,12 +366,7 @@ func (d *Display) renderTable(buf *strings.Builder, procStats map[string]map[uin
 	labelWidth++ // padding
 
 	// Section title
-	var title string
-	if len(d.focusProcesses) > 0 {
-		title = strings.Join(d.focusProcesses, ",")
-	} else {
-		title = "All Processes"
-	}
+	title := strings.Join(d.focusProcesses, ",")
 	lineWidth := labelWidth + 142
 	sectionHeader(buf, fmt.Sprintf("%s (%d)", title, shown), lineWidth)
 
@@ -420,7 +413,7 @@ func renderDetailRow(buf *strings.Builder, name string, st *simpleStats, pcts pe
 }
 
 func (d *Display) renderSummary(buf *strings.Builder, procStats map[string]map[uint32]*syscallStats, elapsed time.Duration, globalStats *simpleStats, globalPcts percentiles) {
-	entries := collectEntries(procStats, true)
+	entries := collectEntries(procStats, false)
 
 	totalSecs := elapsed.Seconds()
 	nPerCol := d.topN // rows per column

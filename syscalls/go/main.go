@@ -105,9 +105,6 @@ func runReader(rd *ringpoll.Reader, state *State) {
 }
 
 func snapshotRingStats(rd *ringpoll.Reader, ra *ringAvg) *ringStats {
-	if rd == nil {
-		return nil
-	}
 	pending := rd.Pending()
 	ra.add(pending)
 	avg1, avg0, last1, last0 := rd.PollStats()
@@ -132,18 +129,18 @@ func main() {
 	}
 }
 
-func printVersion(name string) {
+func printVersion() {
 	if commit != "" {
-		fmt.Printf("%s %s (%s)\n", name, version, commit)
+		fmt.Printf("syscall-latency %s (%s)\n", version, commit)
 	} else {
-		fmt.Printf("%s %s\n", name, version)
+		fmt.Printf("syscall-latency %s\n", version)
 	}
 }
 
 func run() error {
 	flag.Parse()
 	if *showVersion {
-		printVersion("syscall-latency")
+		printVersion()
 		return nil
 	}
 	focusList := parseFocusList()

@@ -13,13 +13,13 @@ type capacityStats struct {
 	cap int64
 }
 
-// formatUsage returns "avg: V/C (P%)  max: V/C (P%)" using fmtVal for values.
-func (cs capacityStats) formatUsage(fmtVal func(int64) string) string {
+// formatUsage returns "avg: V/C (P%)  max: V/C (P%)".
+func (cs capacityStats) formatUsage() string {
 	avgPct := float64(cs.avg) / float64(cs.cap) * 100
 	maxPct := float64(cs.max) / float64(cs.cap) * 100
 	return fmt.Sprintf("avg: %6s/%s (%4.1f%%)  max: %6s/%s (%4.1f%%)",
-		fmtVal(cs.avg), fmtVal(cs.cap), avgPct,
-		fmtVal(cs.max), fmtVal(cs.cap), maxPct)
+		formatBytes(cs.avg), formatBytes(cs.cap), avgPct,
+		formatBytes(cs.max), formatBytes(cs.cap), maxPct)
 }
 
 // runtimeMetrics groups atomic counters shared between goroutines.
