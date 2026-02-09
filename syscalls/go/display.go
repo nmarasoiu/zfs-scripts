@@ -185,7 +185,7 @@ func (d *Display) summaryBarLegend() string {
 	return ""
 }
 
-func (d *Display) render(state *State, drops uint64, ms *mapStats, rs *ringStats) {
+func (d *Display) render(state *State, drops uint64, rs *ringStats) {
 	var mainBuf strings.Builder
 	var elapsed time.Duration
 	var nProcs int
@@ -223,7 +223,7 @@ func (d *Display) render(state *State, drops uint64, ms *mapStats, rs *ringStats
 
 	// Build footer
 	var footerBuf strings.Builder
-	d.renderFooter(&footerBuf, elapsed, nProcs, drops, ms, rs)
+	d.renderFooter(&footerBuf, elapsed, nProcs, drops, rs)
 
 	// Compose main content with top-processes panel when terminal is wide enough.
 	// Panel display is independent of interactive mode — --cols enables it in batch too.
@@ -325,7 +325,7 @@ func (d *Display) handleKey(ev keyEvent) bool {
 	return false
 }
 
-func (d *Display) renderFooter(buf *strings.Builder, elapsed time.Duration, nProcs int, drops uint64, ms *mapStats, rs *ringStats) {
+func (d *Display) renderFooter(buf *strings.Builder, elapsed time.Duration, nProcs int, drops uint64, rs *ringStats) {
 	dropRate := float64(0)
 	if elapsed.Seconds() > 0 {
 		dropRate = float64(drops) / elapsed.Seconds()
@@ -337,14 +337,8 @@ func (d *Display) renderFooter(buf *strings.Builder, elapsed time.Duration, nPro
 			formatBytes(int64(rs.pending)),
 			rs.avg1, rs.avg0, formatCount(rs.last1), formatMicro(rs.last0))
 	}
-	mapInfo := ""
-	if ms != nil {
-		mapInfo = fmt.Sprintf(" | Map %s stale:%s evict:%s",
-			ms.formatUsage(formatCount),
-			formatCount(ms.stale), formatCount(int64(ms.evicted)))
-	}
-	fmt.Fprintf(buf, "Processes: %d | Drops: %s (%s/s)%s%s\n",
-		nProcs, formatCount(int64(drops)), formatCount(int64(dropRate)), mapInfo, ringInfo)
+	fmt.Fprintf(buf, "Processes: %d | Drops: %s (%s/s)%s\n",
+		nProcs, formatCount(int64(drops)), formatCount(int64(dropRate)), ringInfo)
 
 	if d.batchMode {
 		buf.WriteString("\n")

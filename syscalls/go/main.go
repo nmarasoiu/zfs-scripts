@@ -48,9 +48,6 @@ var (
 	batch       = flag.Bool("batch", false, "batch mode (no screen clearing)")
 	colsFlag    = flag.Int("cols", 0, "override terminal width (enables panel in batch mode)")
 	pollSleep   = flag.Duration("poll-sleep", 50*time.Microsecond, "ring buffer poll sleep when empty")
-	cleanupInterval = flag.Duration("cleanup-interval", 5*time.Second, "how often to scan BPF hash map for stale entries")
-	staleAge    = flag.Duration("stale-age", 10*time.Second, "age threshold to count an in-flight entry as stale")
-	evictAge    = flag.Duration("evict-age", 60*time.Second, "age threshold to evict (delete) a stale entry")
 	maxSketches = flag.Int("max-sketches", 4096, "max process×syscall sketches to keep (LRU eviction)")
 	showVersion = flag.Bool("version", false, "print version and exit")
 )
@@ -210,7 +207,6 @@ func run() error {
 		interactive:    interactive,
 	}
 	metrics := &runtimeMetrics{}
-	mapMaxVal := int64(objs.StartTimes.MaxEntries())
 
 	// Terminal raw mode for interactive input
 	var origTermios *unix.Termios
@@ -264,7 +260,7 @@ func run() error {
 				return
 			case <-displayTicker.C:
 				readDropCount(objs.DropCount, &metrics.drops)
-				display.render(state, metrics.drops.Load(), snapshotMapStats(metrics, mapMaxVal), snapshotRingStats(rd, &ra))
+				display.render(state, metrics.drops.Load(), snapshotRingStats(rd, &ra))
 			case ev := <-keyCh:
 				if display.handleKey(ev) {
 					// 'q' pressed — trigger shutdown via signal
@@ -272,33 +268,7 @@ func run() error {
 					return
 				}
 				readDropCount(objs.DropCount, &metrics.drops)
-				display.render(state, metrics.drops.Load(), snapshotMapStats(metrics, mapMaxVal), snapshotRingStats(rd, &ra))
-			}
-		}
-	}()
-
-	// Stale entry cleanup goroutine
-	cleanupTicker := time.NewTicker(*cleanupInterval)
-	go func() {
-		defer cleanupTicker.Stop()
-		for {
-			select {
-			case <-done:
-				return
-			case <-cleanupTicker.C:
-				total, stale, evicted := cleanStaleEntries(objs.StartTimes, objs.SyscallIds, *staleAge, *evictAge, mapMaxVal)
-				used := int64(total - evicted)
-				metrics.mapUsed.Store(used)
-				metrics.mapStale.Store(int64(stale - evicted))
-				// Track avg/max
-				metrics.mapSumUsed.Add(used)
-				metrics.mapSamples.Add(1)
-				if cur := metrics.mapMaxUsed.Load(); used > cur {
-					metrics.mapMaxUsed.Store(used)
-				}
-				if evicted > 0 {
-					metrics.evicted.Add(uint64(evicted))
-				}
+				display.render(state, metrics.drops.Load(), snapshotRingStats(rd, &ra))
 			}
 		}
 	}()
@@ -315,7 +285,7 @@ func run() error {
 	readerDone.Wait()
 
 	readDropCount(objs.DropCount, &metrics.drops)
-	display.render(state, metrics.drops.Load(), snapshotMapStats(metrics, mapMaxVal), snapshotRingStats(rd, &ringAvg{}))
+	display.render(state, metrics.drops.Load(), snapshotRingStats(rd, &ringAvg{}))
 	return nil
 }
 

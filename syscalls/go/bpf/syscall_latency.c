@@ -29,17 +29,17 @@ struct latency_event {
 // Force BTF type emission
 struct latency_event *unused_event __attribute__((unused));
 
-// Start timestamp per thread
+// Start timestamp per thread (LRU: kernel auto-evicts oldest on full)
 struct {
-    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
     __uint(max_entries, MAX_ENTRIES);
     __type(key, __u32);  // tid
     __type(value, __u64); // start time
 } start_times SEC(".maps");
 
-// Syscall ID per thread (to match enter with exit)
+// Syscall ID per thread (LRU: kernel auto-evicts oldest on full)
 struct {
-    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
     __uint(max_entries, MAX_ENTRIES);
     __type(key, __u32);  // tid
     __type(value, __u32); // syscall_id

@@ -24,41 +24,7 @@ func (cs capacityStats) formatUsage(fmtVal func(int64) string) string {
 
 // runtimeMetrics groups atomic counters shared between goroutines.
 type runtimeMetrics struct {
-	drops    atomic.Uint64
-	evicted  atomic.Uint64
-	mapUsed  atomic.Int64
-	mapStale atomic.Int64
-
-	// Map avg/max tracking (updated each cleanup tick)
-	mapMaxUsed atomic.Int64
-	mapSumUsed atomic.Int64
-	mapSamples atomic.Int64
-}
-
-// mapStats is a point-in-time snapshot of BPF hash map occupancy.
-type mapStats struct {
-	capacityStats
-	stale   int64
-	evicted uint64
-}
-
-func snapshotMapStats(metrics *runtimeMetrics, mapCap int64) *mapStats {
-	if mapCap <= 0 {
-		return nil
-	}
-	var avg int64
-	if n := metrics.mapSamples.Load(); n > 0 {
-		avg = metrics.mapSumUsed.Load() / n
-	}
-	return &mapStats{
-		capacityStats: capacityStats{
-			avg: avg,
-			max: metrics.mapMaxUsed.Load(),
-			cap: mapCap,
-		},
-		stale:   metrics.mapStale.Load(),
-		evicted: metrics.evicted.Load(),
-	}
+	drops atomic.Uint64
 }
 
 // ringStats is a point-in-time snapshot of ring buffer metrics,
@@ -73,7 +39,7 @@ type ringStats struct {
 }
 
 // ringAvg accumulates ring pending samples across display ticks
-// to compute a true running average (like mapSumUsed/mapSamples).
+// to compute a true running average.
 type ringAvg struct {
 	sum     int64
 	samples int64
