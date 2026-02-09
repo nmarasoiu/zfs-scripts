@@ -20,6 +20,11 @@ import (
 	"time"
 )
 
+var (
+	version = "dev"
+	commit  = ""
+)
+
 const (
 	displayInterval = 50 * time.Millisecond // ~20 FPS display refresh
 	maxQueuePerDev  = 30
@@ -599,7 +604,17 @@ type CurrentValues struct {
 func main() {
 	batchMode := flag.Bool("batch", false, "Enable batch mode (no screen clearing, suitable for nohup)")
 	delay := flag.Duration("delay", 5*time.Millisecond, "Delay between polling iterations")
+	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
+
+	if *showVersion {
+		if commit != "" {
+			fmt.Printf("usb-queue-monitor-v2 %s (%s)\n", version, commit)
+		} else {
+			fmt.Printf("usb-queue-monitor-v2 %s\n", version)
+		}
+		return
+	}
 
 	// Setup logging
 	if *batchMode {

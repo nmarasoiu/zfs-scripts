@@ -38,15 +38,21 @@ const (
 )
 
 var (
-	focusProcs = flag.String("c", "", "only trace these processes (comma-separated, empty=all)")
-	topProcs   = flag.Int("n", 0, "top N rows to display (0=all)")
-	batch      = flag.Bool("batch", false, "batch mode (no screen clearing)")
-	colsFlag   = flag.Int("cols", 0, "override terminal width (enables panel in batch mode)")
-	pollSleep       = flag.Duration("poll-sleep", 50*time.Microsecond, "ring buffer poll sleep when empty")
+	version = "dev"
+	commit  = ""
+)
+
+var (
+	focusProcs  = flag.String("c", "", "only trace these processes (comma-separated, empty=all)")
+	topProcs    = flag.Int("n", 0, "top N rows to display (0=all)")
+	batch       = flag.Bool("batch", false, "batch mode (no screen clearing)")
+	colsFlag    = flag.Int("cols", 0, "override terminal width (enables panel in batch mode)")
+	pollSleep   = flag.Duration("poll-sleep", 50*time.Microsecond, "ring buffer poll sleep when empty")
 	cleanupInterval = flag.Duration("cleanup-interval", 5*time.Second, "how often to scan BPF hash map for stale entries")
-	staleAge        = flag.Duration("stale-age", 10*time.Second, "age threshold to count an in-flight entry as stale")
-	evictAge        = flag.Duration("evict-age", 60*time.Second, "age threshold to evict (delete) a stale entry")
-	maxSketches     = flag.Int("max-sketches", 4096, "max process×syscall sketches to keep (LRU eviction)")
+	staleAge    = flag.Duration("stale-age", 10*time.Second, "age threshold to count an in-flight entry as stale")
+	evictAge    = flag.Duration("evict-age", 60*time.Second, "age threshold to evict (delete) a stale entry")
+	maxSketches = flag.Int("max-sketches", 4096, "max process×syscall sketches to keep (LRU eviction)")
+	showVersion = flag.Bool("version", false, "print version and exit")
 )
 
 // parseFocusList parses the -c flag into a deduplicated list of process names,
@@ -129,8 +135,20 @@ func main() {
 	}
 }
 
+func printVersion(name string) {
+	if commit != "" {
+		fmt.Printf("%s %s (%s)\n", name, version, commit)
+	} else {
+		fmt.Printf("%s %s\n", name, version)
+	}
+}
+
 func run() error {
 	flag.Parse()
+	if *showVersion {
+		printVersion("syscall-latency")
+		return nil
+	}
 	focusList := parseFocusList()
 
 	// Remove memlock limit for eBPF

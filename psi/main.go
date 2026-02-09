@@ -10,12 +10,27 @@ import (
 	"time"
 )
 
+var (
+	version = "dev"
+	commit  = ""
+)
+
 func main() {
 	batchN := flag.Int("batch", 0, "run N iterations then exit (0 = infinite)")
 	psiInterval := flag.Duration("psi", 4*time.Second, "PSI/load refresh interval")
 	cpuInterval := flag.Duration("cpu", 4*time.Second, "CPU utilization refresh interval")
 	zpoolInterval := flag.Duration("zpool", 30*time.Second, "zpool status subprocess interval")
+	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
+
+	if *showVersion {
+		if commit != "" {
+			fmt.Printf("psi %s (%s)\n", version, commit)
+		} else {
+			fmt.Printf("psi %s\n", version)
+		}
+		return
+	}
 
 	zpRefreshInterval = *zpoolInterval
 

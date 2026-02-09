@@ -41,11 +41,17 @@ const (
 )
 
 var (
-	interval  = flag.Duration("i", 10*time.Second, "stats interval for interval view")
-	devices   = flag.String("d", "", "comma-separated device filter (e.g., sdc,sdd or 8:32,8:48)")
-	batch     = flag.Bool("batch", false, "batch mode (no screen clearing)")
-	alpha     = flag.Float64("alpha", 0.01, "DDSketch relative accuracy (0.01 = 1%)")
-	pollSleep = flag.Duration("poll-sleep", 50*time.Microsecond, "ring buffer poll sleep when empty")
+	version = "dev"
+	commit  = ""
+)
+
+var (
+	interval    = flag.Duration("i", 10*time.Second, "stats interval for interval view")
+	devices     = flag.String("d", "", "comma-separated device filter (e.g., sdc,sdd or 8:32,8:48)")
+	batch       = flag.Bool("batch", false, "batch mode (no screen clearing)")
+	alpha       = flag.Float64("alpha", 0.01, "DDSketch relative accuracy (0.01 = 1%)")
+	pollSleep   = flag.Duration("poll-sleep", 50*time.Microsecond, "ring buffer poll sleep when empty")
+	showVersion = flag.Bool("version", false, "print version and exit")
 )
 
 // Device names cache: dev -> name
@@ -553,8 +559,20 @@ func main() {
 	}
 }
 
+func printVersion(name string) {
+	if commit != "" {
+		fmt.Printf("%s %s (%s)\n", name, version, commit)
+	} else {
+		fmt.Printf("%s %s\n", name, version)
+	}
+}
+
 func run() error {
 	flag.Parse()
+	if *showVersion {
+		printVersion("blk-ddsketch")
+		return nil
+	}
 
 	// Parse device filter
 	filterDevs, err := parseDeviceFilter(*devices)

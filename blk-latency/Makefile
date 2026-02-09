@@ -1,12 +1,16 @@
 .PHONY: all generate build clean
 
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null)
+LDFLAGS  = -X main.version=$(VERSION) -X main.commit=$(COMMIT)
+
 all: build
 
 generate:
 	go generate ./...
 
 build: generate
-	go build -o blk-latency .
+	go build -ldflags "$(LDFLAGS)" -o blk-latency .
 
 clean:
 	rm -f blk-latency bpf_bpfel.go bpf_bpfel.o

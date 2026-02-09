@@ -23,9 +23,15 @@ import (
 )
 
 var (
-	interval = flag.Duration("i", 2*time.Second, "sampling interval")
-	batch    = flag.Bool("batch", false, "batch mode: print once per interval, no screen clearing")
-	showHelp = flag.Bool("help", false, "show detailed help")
+	version = "dev"
+	commit  = ""
+)
+
+var (
+	interval    = flag.Duration("i", 2*time.Second, "sampling interval")
+	batch       = flag.Bool("batch", false, "batch mode: print once per interval, no screen clearing")
+	showHelp    = flag.Bool("help", false, "show detailed help")
+	showVersion = flag.Bool("version", false, "print version and exit")
 )
 
 // ── data types ──────────────────────────────────────────────────
@@ -385,6 +391,14 @@ TUNING CHEATSHEET
 func main() {
 	flag.Usage = func() { printHelp() }
 	flag.Parse()
+	if *showVersion {
+		if commit != "" {
+			fmt.Printf("softnet %s (%s)\n", version, commit)
+		} else {
+			fmt.Printf("softnet %s\n", version)
+		}
+		return
+	}
 	if *showHelp {
 		printHelp()
 		return
