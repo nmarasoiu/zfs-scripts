@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -67,15 +69,15 @@ func formatTotal(t string) string {
 	return fmt.Sprintf("%.1fs", secs)
 }
 
-func printTable(name string, some, full pressure) {
-	fmt.Printf("%-6s │ %7s │ %7s │ %7s │ %10s\n", name, "avg10", "avg60", "avg300", "total")
-	fmt.Printf("───────┼─────────┼─────────┼─────────┼───────────\n")
-	fmt.Printf("%-6s │ %6s%% │ %6s%% │ %6s%% │ %10s\n", "some", some.avg10, some.avg60, some.avg300, formatTotal(some.total))
-	fmt.Printf("%-6s │ %6s%% │ %6s%% │ %6s%% │ %10s\n", "full", full.avg10, full.avg60, full.avg300, formatTotal(full.total))
-	fmt.Println()
+func printTable(w io.Writer, name string, some, full pressure) {
+	fmt.Fprintf(w, "%-6s │ %7s │ %7s │ %7s │ %10s\n", name, "avg10", "avg60", "avg300", "total")
+	fmt.Fprintf(w, "───────┼─────────┼─────────┼─────────┼───────────\n")
+	fmt.Fprintf(w, "%-6s │ %6s%% │ %6s%% │ %6s%% │ %10s\n", "some", some.avg10, some.avg60, some.avg300, formatTotal(some.total))
+	fmt.Fprintf(w, "%-6s │ %6s%% │ %6s%% │ %6s%% │ %10s\n", "full", full.avg10, full.avg60, full.avg300, formatTotal(full.total))
+	fmt.Fprintln(w)
 }
 
-func printLoadTable(fd int, buf []byte) {
+func printLoadTable(w io.Writer, fd int, buf []byte) {
 	n := pread(fd, buf)
 	fields := strings.Fields(string(buf[:n]))
 	min1, min5, min15 := fields[0], fields[1], fields[2]
@@ -83,10 +85,10 @@ func printLoadTable(fd int, buf []byte) {
 	if len(fields) >= 4 {
 		procs = fields[3]
 	}
-	fmt.Printf("%-6s │ %7s │ %7s │ %7s │ %10s\n", "LOAD", "1min", "5min", "15min", "procs")
-	fmt.Printf("───────┼─────────┼─────────┼─────────┼───────────\n")
-	fmt.Printf("%-6s │ %7s │ %7s │ %7s │ %10s\n", "", min1, min5, min15, procs)
-	fmt.Println()
+	fmt.Fprintf(w, "%-6s │ %7s │ %7s │ %7s │ %10s\n", "LOAD", "1min", "5min", "15min", "procs")
+	fmt.Fprintf(w, "───────┼─────────┼─────────┼─────────┼───────────\n")
+	fmt.Fprintf(w, "%-6s │ %7s │ %7s │ %7s │ %10s\n", "", min1, min5, min15, procs)
+	fmt.Fprintln(w)
 }
 
 type psiFile struct {
@@ -370,13 +372,71 @@ func parseZpoolStatus() ([]zpPool, error) {
 	return pools, nil
 }
 
-func printZpoolStatus() {
+// poolStateFd holds a pre-opened fd to /proc/spl/kstat/zfs/<pool>/state
+type poolStateFd struct {
+	name string
+	fd   int
+}
+
+// discoverPools finds ZFS pools by scanning kstat for dirs with a state file.
+func discoverPools() []poolStateFd {
+	entries, err := os.ReadDir("/proc/spl/kstat/zfs")
+	if err != nil {
+		return nil
+	}
+	var fds []poolStateFd
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		path := "/proc/spl/kstat/zfs/" + e.Name() + "/state"
+		fd, err := syscall.Open(path, syscall.O_RDONLY, 0)
+		if err != nil {
+			continue
+		}
+		fds = append(fds, poolStateFd{name: e.Name(), fd: fd})
+	}
+	return fds
+}
+
+var (
+	zpCachedPools []zpPool
+	zpLastRefresh time.Time
+)
+
+const zpRefreshInterval = 30 * time.Second
+
+// refreshZpoolCache runs zpool status if the cache is stale.
+func refreshZpoolCache() {
+	if time.Since(zpLastRefresh) < zpRefreshInterval {
+		return
+	}
 	pools, err := parseZpoolStatus()
 	if err != nil {
 		return
 	}
+	zpCachedPools = pools
+	zpLastRefresh = time.Now()
+}
 
-	for _, pool := range pools {
+// updatePoolStates reads live pool state from kstat via pread (no subprocess).
+func updatePoolStates(poolFds []poolStateFd, buf []byte) {
+	for _, pf := range poolFds {
+		n := pread(pf.fd, buf)
+		if n <= 0 {
+			continue
+		}
+		state := strings.TrimSpace(string(buf[:n]))
+		for i := range zpCachedPools {
+			if zpCachedPools[i].name == pf.name {
+				zpCachedPools[i].state = state
+			}
+		}
+	}
+}
+
+func printZpoolStatus(w io.Writer) {
+	for _, pool := range zpCachedPools {
 		// header
 		stateStr := fmt.Sprintf("%-8s", pool.state)
 		if pool.state != "ONLINE" {
@@ -384,19 +444,19 @@ func printZpoolStatus() {
 		}
 		scan := condenseScan(pool.scan)
 
-		fmt.Printf("%-6s │ %-10s │ %s", "POOL", pool.name, stateStr)
+		fmt.Fprintf(w, "%-6s │ %-10s │ %s", "POOL", pool.name, stateStr)
 		if scan != "" {
-			fmt.Printf(" │ %s", scan)
+			fmt.Fprintf(w, " │ %s", scan)
 		}
-		fmt.Println()
-		fmt.Println("───────┼──────────────────────────────────────────────────────────")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "───────┼──────────────────────────────────────────────────────────")
 
 		for _, dev := range pool.devices {
 			indent := strings.Repeat("  ", dev.depth)
 			name := indent + shortenDev(dev.name)
 
 			if dev.state == "" {
-				fmt.Printf("       │ %s\n", name)
+				fmt.Fprintf(w, "       │ %s\n", name)
 				continue
 			}
 
@@ -423,10 +483,10 @@ func printZpoolStatus() {
 				notes = " " + n
 			}
 
-			fmt.Printf("       │ %s %s %s %s %s %s%s\n",
+			fmt.Fprintf(w, "       │ %s %s %s %s %s %s%s\n",
 				nameF, stF, rdF, wrF, ckF, slF, notes)
 		}
-		fmt.Println()
+		fmt.Fprintln(w)
 	}
 }
 
@@ -437,17 +497,25 @@ func main() {
 		{"IO", mustOpen("/proc/pressure/io")},
 		{"MEMORY", mustOpen("/proc/pressure/memory")},
 	}
+	poolFds := discoverPools()
 
 	var buf [512]byte
+	var w bytes.Buffer
 
 	for {
-		fmt.Print("\033[H\033[2J")
-		printLoadTable(loadFd, buf[:])
+		refreshZpoolCache()
+		updatePoolStates(poolFds, buf[:])
+
+		w.Reset()
+		fmt.Fprint(&w, "\033[H\033[2J")
+		printLoadTable(&w, loadFd, buf[:])
 		for _, pf := range psiFiles {
 			some, full := readPressure(pf.fd, buf[:])
-			printTable(pf.name, some, full)
+			printTable(&w, pf.name, some, full)
 		}
-		printZpoolStatus()
+		printZpoolStatus(&w)
+		os.Stdout.Write(w.Bytes())
+
 		time.Sleep(4 * time.Second)
 	}
 }
