@@ -102,12 +102,8 @@ func (d *Display) render(state *State, metrics *runtimeMetrics, mapCap int64, rs
 	state.mu.Lock()
 
 	elapsed := now.Sub(state.startTime)
-
-	// Count total sketches (one per process×syscall pair)
-	nSketches := 0
-	for _, fm := range state.procSyscallStats {
-		nSketches += len(fm)
-	}
+	nSketches := state.sketches.Len()
+	sketchEvictions := state.sketchEvictions
 
 	const sketchBytesEach = 400 // empirical ~0.4KB per DDSketch (struct + mapping + stores + few bins)
 	totalMB := float64(nSketches) * sketchBytesEach / 1024 / 1024
@@ -115,11 +111,14 @@ func (d *Display) render(state *State, metrics *runtimeMetrics, mapCap int64, rs
 	fmt.Fprintf(&mainBuf, "Syscall Latency Monitor - %s (uptime: %s) -- %d sketches × 0.4KB ≈ %.1fMB\n",
 		now.Format("15:04:05"), formatDuration(elapsed), nSketches, totalMB)
 
-	// Collect process summaries for the panel (while holding lock)
-	d.lastSummaries = collectProcessSummaries(state.procSyscallStats, elapsed.Seconds())
+	// Snapshot the LRU as a nested map for display functions
+	procStats := state.snapshotStats()
 
-	// Optionally filter procSyscallStats for display
-	viewStats := state.procSyscallStats
+	// Collect process summaries for the panel (while holding lock)
+	d.lastSummaries = collectProcessSummaries(procStats, elapsed.Seconds())
+
+	// Optionally filter for display
+	viewStats := procStats
 	if d.mode == modeFilter && d.filterText != "" {
 		viewStats = filterStatsGeneral(viewStats, d.filterText)
 	}
@@ -128,10 +127,10 @@ func (d *Display) render(state *State, metrics *runtimeMetrics, mapCap int64, rs
 	if len(d.focusProcesses) > 0 {
 		d.renderTable(&mainBuf, viewStats)
 	} else {
-		d.renderSummary(&mainBuf, viewStats, elapsed, state.globalStats, sketchPercentiles(state.globalSketch))
+		d.renderSummary(&mainBuf, viewStats, elapsed, state.globalStats, sketchPercentiles(state.globalSketch), sketchEvictions)
 	}
 
-	nProcs := len(state.procSyscallStats)
+	nProcs := len(procStats)
 
 	state.mu.Unlock()
 
@@ -358,7 +357,7 @@ func renderDetailRow(buf *strings.Builder, name string, st *simpleStats, pcts pe
 	)
 }
 
-func (d *Display) renderSummary(buf *strings.Builder, procStats map[string]map[uint32]*syscallStats, elapsed time.Duration, globalStats *simpleStats, globalPcts percentiles) {
+func (d *Display) renderSummary(buf *strings.Builder, procStats map[string]map[uint32]*syscallStats, elapsed time.Duration, globalStats *simpleStats, globalPcts percentiles, sketchEvictions uint64) {
 	entries := collectEntries(procStats, true)
 
 	totalSecs := elapsed.Seconds()
@@ -420,8 +419,11 @@ func (d *Display) renderSummary(buf *strings.Builder, procStats map[string]map[u
 		fmt.Fprintf(buf, "%s │ %s\n", leftStr, rightStr)
 	}
 
-	// Build summary bar: LIFETIME(all) stats == title == legend ==
+	// Build summary bar: LIFETIME(all) stats == title == evict:N == legend ==
 	title := fmt.Sprintf("Process × Syscall (top %d)", totalShown)
+	if sketchEvictions > 0 {
+		title += fmt.Sprintf(" evict:%s", formatCount(int64(sketchEvictions)))
+	}
 	legend := d.summaryBarLegend()
 
 	if globalStats.count > 0 {

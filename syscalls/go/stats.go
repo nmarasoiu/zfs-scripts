@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/DataDog/sketches-go/ddsketch"
+	"github.com/hashicorp/golang-lru/v2/simplelru"
 )
 
 // commIntern interns process comm strings to avoid 80K allocations/s.
@@ -140,12 +141,19 @@ func sketchPercentiles(sketch *ddsketch.DDSketch) percentiles {
 	}
 }
 
+// sketchKey is the flat composite key for the LRU sketch cache.
+type sketchKey struct {
+	proc    string
+	syscall uint32
+}
+
 // State holds all per-process and per-syscall stats
 type State struct {
 	mu sync.Mutex
 
-	// Per-(process, syscall) stats for all processes
-	procSyscallStats map[string]map[uint32]*syscallStats
+	// Per-(process, syscall) stats, capped by LRU eviction.
+	sketches        *simplelru.LRU[sketchKey, *syscallStats]
+	sketchEvictions uint64
 
 	// Global lifetime sketch across all processes and syscalls
 	globalSketch *ddsketch.DDSketch
@@ -154,14 +162,36 @@ type State struct {
 	startTime time.Time
 }
 
-func newState() *State {
+func newState(maxSketches int) *State {
 	sketch, _ := ddsketch.NewDefaultDDSketch(0.01)
-	return &State{
-		procSyscallStats: make(map[string]map[uint32]*syscallStats),
-		globalSketch:     sketch,
-		globalStats:      newSimpleStats(),
-		startTime:        time.Now(),
+	s := &State{
+		globalSketch: sketch,
+		globalStats:  newSimpleStats(),
+		startTime:    time.Now(),
 	}
+	s.sketches, _ = simplelru.NewLRU[sketchKey, *syscallStats](maxSketches, func(_ sketchKey, _ *syscallStats) {
+		s.sketchEvictions++
+	})
+	return s
+}
+
+// snapshotStats builds a nested map view of the LRU for display functions.
+// Must be called while s.mu is held.
+func (s *State) snapshotStats() map[string]map[uint32]*syscallStats {
+	result := make(map[string]map[uint32]*syscallStats)
+	for _, key := range s.sketches.Keys() {
+		val, ok := s.sketches.Peek(key)
+		if !ok {
+			continue
+		}
+		fm := result[key.proc]
+		if fm == nil {
+			fm = make(map[uint32]*syscallStats)
+			result[key.proc] = fm
+		}
+		fm[key.syscall] = val
+	}
+	return result
 }
 
 type pendingEvent struct {
@@ -174,15 +204,11 @@ func (s *State) RecordBatch(batch []pendingEvent) {
 	s.mu.Lock()
 	for i := range batch {
 		e := &batch[i]
-		fm, ok := s.procSyscallStats[e.comm]
-		if !ok {
-			fm = make(map[uint32]*syscallStats)
-			s.procSyscallStats[e.comm] = fm
-		}
-		ss, ok := fm[e.syscallID]
+		key := sketchKey{e.comm, e.syscallID}
+		ss, ok := s.sketches.Get(key) // Get promotes to most-recent
 		if !ok {
 			ss = newSyscallStats()
-			fm[e.syscallID] = ss
+			s.sketches.Add(key, ss) // evicts LRU if over cap
 		}
 		ss.Record(e.latencyUs)
 		s.globalSketch.Add(float64(e.latencyUs))

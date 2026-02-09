@@ -12,6 +12,7 @@ require (
 replace github.com/nmarasoiu/zfs-scripts/ringpoll => ../../ringpoll
 
 require (
+	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
 	golang.org/x/exp v0.0.0-20230224173230-c95f2b4c22f2 // indirect
 	google.golang.org/protobuf v1.28.0 // indirect
 )

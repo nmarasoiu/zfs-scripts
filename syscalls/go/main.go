@@ -47,6 +47,7 @@ var (
 	cleanupInterval = flag.Duration("cleanup-interval", 5*time.Second, "how often to scan BPF hash map for stale entries")
 	staleAge        = flag.Duration("stale-age", 10*time.Second, "age threshold to count an in-flight entry as stale")
 	evictAge        = flag.Duration("evict-age", 60*time.Second, "age threshold to evict (delete) a stale entry")
+	maxSketches     = flag.Int("max-sketches", 4096, "max process×syscall sketches to keep (LRU eviction)")
 )
 
 // parseFocusList parses the -c flag into a deduplicated list of process names,
@@ -171,7 +172,7 @@ func main() {
 	}
 	defer rd.Cleanup()
 
-	state := newState()
+	state := newState(*maxSketches)
 	interactive := !*batch && isTerminal(int(os.Stdin.Fd())) && isTerminal(int(os.Stdout.Fd()))
 	display := &Display{
 		batchMode:      *batch,
