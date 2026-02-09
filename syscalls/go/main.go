@@ -123,12 +123,19 @@ func snapshotRingStats(rd *ringpoll.Reader, ra *ringAvg) *ringStats {
 }
 
 func main() {
+	if err := run(); err != nil {
+		fmt.Fprintf(os.Stderr, "syscall-latency: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
 	flag.Parse()
 	focusList := parseFocusList()
 
 	// Remove memlock limit for eBPF
 	if err := rlimit.RemoveMemlock(); err != nil {
-		log.Fatalf("Failed to remove memlock limit: %v", err)
+		return fmt.Errorf("remove memlock limit: %w", err)
 	}
 
 	// Load eBPF spec and rewrite constants before loading into kernel.
@@ -136,40 +143,42 @@ func main() {
 	// the comm filter branch — zero overhead in the hot path.
 	spec, err := loadBpf()
 	if err != nil {
-		log.Fatalf("Failed to load eBPF spec: %v", err)
+		return fmt.Errorf("load eBPF spec: %w", err)
 	}
 	if len(focusList) > 0 {
 		if err := spec.RewriteConstants(map[string]interface{}{
 			"use_comm_filter": uint8(1),
 		}); err != nil {
-			log.Fatalf("Failed to rewrite BPF constants: %v", err)
+			return fmt.Errorf("rewrite BPF constants: %w", err)
 		}
 	}
 	objs := bpfObjects{}
 	if err := spec.LoadAndAssign(&objs, nil); err != nil {
-		log.Fatalf("Failed to load eBPF objects: %v", err)
+		return fmt.Errorf("load eBPF objects: %w", err)
 	}
 	defer objs.Close()
 
-	configureBPFFilters(&objs, focusList)
+	if err := configureBPFFilters(&objs, focusList); err != nil {
+		return err
+	}
 
 	// Attach tracepoints
 	tpEnter, err := link.Tracepoint("raw_syscalls", "sys_enter", objs.TraceSyscallEnter, nil)
 	if err != nil {
-		log.Fatalf("Failed to attach sys_enter: %v", err)
+		return fmt.Errorf("attach sys_enter: %w", err)
 	}
 	defer tpEnter.Close()
 
 	tpExit, err := link.Tracepoint("raw_syscalls", "sys_exit", objs.TraceSyscallExit, nil)
 	if err != nil {
-		log.Fatalf("Failed to attach sys_exit: %v", err)
+		return fmt.Errorf("attach sys_exit: %w", err)
 	}
 	defer tpExit.Close()
 
 	// Open ring buffer (busy-poll reader — no epoll)
 	rd, err := ringpoll.NewReader(objs.Events, *pollSleep)
 	if err != nil {
-		log.Fatalf("Failed to open ring buffer: %v", err)
+		return fmt.Errorf("open ring buffer: %w", err)
 	}
 	defer rd.Cleanup()
 
@@ -289,5 +298,6 @@ func main() {
 
 	readDropCount(objs.DropCount, &metrics.drops)
 	display.render(state, metrics.drops.Load(), snapshotMapStats(metrics, mapMaxVal), snapshotRingStats(rd, &ringAvg{}))
+	return nil
 }
 

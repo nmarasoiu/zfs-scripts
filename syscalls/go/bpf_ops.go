@@ -1,7 +1,7 @@
 package main
 
 import (
-	"log"
+	"fmt"
 	"sort"
 	"sync/atomic"
 	"time"
@@ -10,15 +10,16 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func configureBPFFilters(objs *bpfObjects, focusList []string) {
+func configureBPFFilters(objs *bpfObjects, focusList []string) error {
 	for _, name := range focusList {
 		var comm [16]byte
 		copy(comm[:], name)
 		var val uint8 = 1
 		if err := objs.TargetComms.Put(comm, val); err != nil {
-			log.Fatalf("Failed to add comm filter %q: %v", name, err)
+			return fmt.Errorf("add comm filter %q: %w", name, err)
 		}
 	}
+	return nil
 }
 
 // ktimeNow returns the current CLOCK_MONOTONIC time in nanoseconds,

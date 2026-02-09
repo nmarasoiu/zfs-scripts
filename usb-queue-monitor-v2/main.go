@@ -618,7 +618,8 @@ func main() {
 
 	p50Index := findP50Index()
 	if p50Index == -1 {
-		log.Fatal("P50 must be present in percentiles array")
+		fmt.Fprintln(os.Stderr, "P50 must be present in percentiles array")
+		os.Exit(1)
 	}
 
 	// Get device sizes at startup

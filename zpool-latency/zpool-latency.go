@@ -12,7 +12,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -505,10 +504,12 @@ func main() {
 	cmd := exec.Command("zpool", "iostat", "-wvv", pool, fmt.Sprintf("%d", *interval))
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		log.Fatal(err)
+		fmt.Fprintf(os.Stderr, "zpool-latency: %v\n", err)
+		os.Exit(1)
 	}
 	if err := cmd.Start(); err != nil {
-		log.Fatal(err)
+		fmt.Fprintf(os.Stderr, "zpool-latency: %v\n", err)
+		os.Exit(1)
 	}
 
 	go parser.Parse(stdout)

@@ -593,23 +593,30 @@ func (d *Display) render(state *State, intervalDur time.Duration, drops uint64) 
 }
 
 func main() {
+	if err := run(); err != nil {
+		fmt.Fprintf(os.Stderr, "blk-latency: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
 	flag.Parse()
 
 	// Parse device filter
 	filterDevs, err := parseDeviceFilter(*devices)
 	if err != nil {
-		log.Fatalf("Invalid device filter: %v", err)
+		return fmt.Errorf("invalid device filter: %w", err)
 	}
 
 	// Remove memlock limit for eBPF
 	if err := rlimit.RemoveMemlock(); err != nil {
-		log.Fatalf("Failed to remove memlock limit: %v", err)
+		return fmt.Errorf("remove memlock limit: %w", err)
 	}
 
 	// Load eBPF objects
 	objs := bpfObjects{}
 	if err := loadBpfObjects(&objs, nil); err != nil {
-		log.Fatalf("Failed to load eBPF objects: %v", err)
+		return fmt.Errorf("load eBPF objects: %w", err)
 	}
 	defer objs.Close()
 
@@ -618,12 +625,12 @@ func main() {
 		var key uint32 = 0
 		var enabled uint8 = 1
 		if err := objs.LatConfig.Put(key, enabled); err != nil {
-			log.Fatalf("Failed to enable filter: %v", err)
+			return fmt.Errorf("enable device filter: %w", err)
 		}
 		for _, dev := range filterDevs {
 			var val uint8 = 1
 			if err := objs.DevFilter.Put(dev, val); err != nil {
-				log.Fatalf("Failed to add device to filter: %v", err)
+				return fmt.Errorf("add device to filter: %w", err)
 			}
 		}
 		log.Printf("Filtering %d device(s)", len(filterDevs))
@@ -634,7 +641,7 @@ func main() {
 		Program: objs.BlockRqIssue,
 	})
 	if err != nil {
-		log.Fatalf("Failed to attach block_rq_issue: %v", err)
+		return fmt.Errorf("attach block_rq_issue: %w", err)
 	}
 	defer tpIssue.Close()
 
@@ -642,14 +649,14 @@ func main() {
 		Program: objs.BlockRqComplete,
 	})
 	if err != nil {
-		log.Fatalf("Failed to attach block_rq_complete: %v", err)
+		return fmt.Errorf("attach block_rq_complete: %w", err)
 	}
 	defer tpComplete.Close()
 
 	// Open ring buffer (busy-poll reader -- no epoll)
 	rd, err := ringpoll.NewReader(objs.Events, *pollSleep)
 	if err != nil {
-		log.Fatalf("Failed to open ring buffer: %v", err)
+		return fmt.Errorf("open ring buffer: %w", err)
 	}
 	defer rd.Cleanup()
 
@@ -752,6 +759,7 @@ func main() {
 
 	readDropCount(objs.DropCount, &totalDrops)
 	display.render(state, *interval, totalDrops.Load())
+	return nil
 }
 
 func readDropCount(m *ebpf.Map, dst *atomic.Uint64) {
