@@ -246,14 +246,15 @@ func (d *Display) renderFooter(buf *strings.Builder, elapsed time.Duration, nPro
 	}
 	ringInfo := ""
 	if rs != nil {
-		avgPct := float64(rs.pending) / float64(rs.capBytes) * 100
+		avgPct := float64(rs.avgPending) / float64(rs.capBytes) * 100
 		maxPct := float64(rs.maxPending) / float64(rs.capBytes) * 100
 		last0Str := "-"
 		if rs.last0 > 0 {
 			last0Str = formatMicro(rs.last0)
 		}
-		ringInfo = fmt.Sprintf(" | Ring avg: %6s/%s (%5.1f%%)  max: %6s/%s (%5.1f%%)  avg1:%-6.0f avg0:%-8.1f last1:%-6s last0:%-8s",
-			formatBytes(int64(rs.pending)), formatBytes(int64(rs.capBytes)), avgPct,
+		ringInfo = fmt.Sprintf(" | Ring avg: %6s/%s (%5.1f%%)  cur: %6s  max: %6s/%s (%5.1f%%)  avg1:%-6.0f avg0:%-8.1f last1:%-6s last0:%-8s",
+			formatBytes(rs.avgPending), formatBytes(int64(rs.capBytes)), avgPct,
+			formatBytes(int64(rs.pending)),
 			formatBytes(rs.maxPending), formatBytes(int64(rs.capBytes)), maxPct,
 			rs.avg1, rs.avg0, formatCount(rs.last1), last0Str)
 	}

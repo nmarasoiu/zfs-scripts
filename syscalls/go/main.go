@@ -101,13 +101,16 @@ func runReader(rd *ringpoll.Reader, state *State) {
 	}
 }
 
-func snapshotRingStats(rd *ringpoll.Reader) *ringStats {
+func snapshotRingStats(rd *ringpoll.Reader, ra *ringAvg) *ringStats {
 	if rd == nil {
 		return nil
 	}
+	pending := rd.Pending()
+	ra.add(pending)
 	avg1, avg0, last1, last0 := rd.PollStats()
 	return &ringStats{
-		pending:    rd.Pending(),
+		pending:    pending,
+		avgPending: ra.avg(),
 		capBytes:   rd.BufSize(),
 		maxPending: rd.MaxPending(),
 		avg1:       avg1,
@@ -227,13 +230,14 @@ func main() {
 	displayTicker := time.NewTicker(displayInterval)
 	go func() {
 		defer displayTicker.Stop()
+		var ra ringAvg
 		for {
 			select {
 			case <-done:
 				return
 			case <-displayTicker.C:
 				readDropCount(objs.DropCount, &metrics.drops)
-				display.render(state, metrics, mapMaxVal, snapshotRingStats(rd))
+				display.render(state, metrics, mapMaxVal, snapshotRingStats(rd, &ra))
 			case ev := <-keyCh:
 				if display.handleKey(ev) {
 					// 'q' pressed — trigger shutdown via signal
@@ -241,7 +245,7 @@ func main() {
 					return
 				}
 				readDropCount(objs.DropCount, &metrics.drops)
-				display.render(state, metrics, mapMaxVal, snapshotRingStats(rd))
+				display.render(state, metrics, mapMaxVal, snapshotRingStats(rd, &ra))
 			}
 		}
 	}()
@@ -284,6 +288,6 @@ func main() {
 	readerDone.Wait()
 
 	readDropCount(objs.DropCount, &metrics.drops)
-	display.render(state, metrics, mapMaxVal, snapshotRingStats(rd))
+	display.render(state, metrics, mapMaxVal, snapshotRingStats(rd, &ringAvg{}))
 }
 

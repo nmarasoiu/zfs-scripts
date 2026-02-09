@@ -258,12 +258,32 @@ type runtimeMetrics struct {
 // decoupling display from the ringpoll.Reader type.
 type ringStats struct {
 	pending    int
+	avgPending int64 // running average of pending bytes
 	capBytes   int
 	maxPending int64
 	avg1       float64
 	avg0       float64
 	last1      int64
 	last0      time.Duration
+}
+
+// ringAvg accumulates ring pending samples across display ticks
+// to compute a true running average (like mapSumUsed/mapSamples).
+type ringAvg struct {
+	sum     int64
+	samples int64
+}
+
+func (ra *ringAvg) add(pending int) {
+	ra.sum += int64(pending)
+	ra.samples++
+}
+
+func (ra *ringAvg) avg() int64 {
+	if ra.samples == 0 {
+		return 0
+	}
+	return ra.sum / ra.samples
 }
 
 type processSummary struct {
