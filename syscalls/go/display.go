@@ -161,7 +161,7 @@ func (d *Display) render(state *State, metrics *runtimeMetrics, mapCap int64, rs
 	var output strings.Builder
 
 	if showPanel {
-		panelMaxRows := d.topN + 1
+		panelMaxRows := d.topN + 3
 		var panelMatchedProcs map[string]bool
 		if d.mode == modeFilter && d.filterText != "" {
 			panelMatchedProcs = make(map[string]bool, len(viewStats))
