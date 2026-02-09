@@ -77,7 +77,7 @@ func parseFocusList() []string {
 func runReader(rd *ringpoll.Reader, state *State) {
 	var rec ringpoll.Record
 	eventSize := int(unsafe.Sizeof(bpfLatencyEvent{}))
-	batch := make([]pendingEvent, 0, flushSize)
+	pending := make([]pendingEvent, 0, flushSize)
 	lastFlush := time.Now()
 
 	for rd.ReadInto(&rec) {
@@ -89,17 +89,17 @@ func runReader(rd *ringpoll.Reader, state *State) {
 		if latencyUs < 1 {
 			latencyUs = 1
 		}
-		batch = append(batch, pendingEvent{commString(event.Comm), event.SyscallId, latencyUs})
+		pending = append(pending, pendingEvent{commString(event.Comm), event.SyscallId, latencyUs})
 
-		if len(batch) >= flushSize || time.Since(lastFlush) >= flushInterval {
-			state.RecordBatch(batch)
+		if len(pending) >= flushSize || time.Since(lastFlush) >= flushInterval {
+			state.RecordBatch(pending)
 			rd.Commit()
-			batch = batch[:0]
+			pending = pending[:0]
 			lastFlush = time.Now()
 		}
 	}
-	if len(batch) > 0 {
-		state.RecordBatch(batch)
+	if len(pending) > 0 {
+		state.RecordBatch(pending)
 		rd.Commit()
 	}
 }
