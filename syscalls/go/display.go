@@ -2,9 +2,99 @@ package main
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 )
+
+// --- Display data transforms (turn State into renderable structures) ---
+
+type processSummary struct {
+	name  string
+	count uint64
+	rate  float64
+}
+
+type tableEntry struct {
+	label string
+	ss    *syscallStats
+}
+
+// collectEntries builds a sorted list of table entries from per-process stats.
+// When alwaysPrefix is true, labels are always "proc/syscall"; otherwise the
+// proc prefix is omitted when there is exactly one process.
+func collectEntries(procStats map[string]map[uint32]*syscallStats, alwaysPrefix bool) []tableEntry {
+	singleProc := !alwaysPrefix && len(procStats) == 1
+
+	var entries []tableEntry
+	for proc, fm := range procStats {
+		for id, ss := range fm {
+			label := syscallName(id)
+			if !singleProc {
+				label = proc + "/" + label
+			}
+			entries = append(entries, tableEntry{label, ss})
+		}
+	}
+
+	sort.Slice(entries, func(i, j int) bool {
+		ci := entries[i].ss.stats.count
+		cj := entries[j].ss.stats.count
+		if ci != cj {
+			return ci > cj
+		}
+		return entries[i].label < entries[j].label
+	})
+
+	return entries
+}
+
+// filterStatsGeneral returns a filtered copy of procStats where entries match
+// the text against process name or syscall name (case-insensitive substring).
+// Process name matches include all syscalls; syscall matches are per-entry.
+func filterStatsGeneral(procStats map[string]map[uint32]*syscallStats, text string) map[string]map[uint32]*syscallStats {
+	lower := strings.ToLower(text)
+	filtered := make(map[string]map[uint32]*syscallStats)
+	for proc, fm := range procStats {
+		if strings.HasPrefix(strings.ToLower(proc), lower) {
+			filtered[proc] = fm
+			continue
+		}
+		matched := make(map[uint32]*syscallStats)
+		for id, ss := range fm {
+			if strings.HasPrefix(syscallName(id), lower) {
+				matched[id] = ss
+			}
+		}
+		if len(matched) > 0 {
+			filtered[proc] = matched
+		}
+	}
+	return filtered
+}
+
+// collectProcessSummaries aggregates per-process totals.
+func collectProcessSummaries(procStats map[string]map[uint32]*syscallStats, elapsedSecs float64) []processSummary {
+	summaries := make([]processSummary, 0, len(procStats))
+	for proc, fm := range procStats {
+		var total uint64
+		for _, ss := range fm {
+			total += ss.stats.count
+		}
+		rate := float64(0)
+		if elapsedSecs > 0 {
+			rate = float64(total) / elapsedSecs
+		}
+		summaries = append(summaries, processSummary{name: proc, count: total, rate: rate})
+	}
+	sort.Slice(summaries, func(i, j int) bool {
+		if summaries[i].count != summaries[j].count {
+			return summaries[i].count > summaries[j].count
+		}
+		return summaries[i].name < summaries[j].name
+	})
+	return summaries
+}
 
 const (
 	procPanelWidth      = 34
@@ -95,7 +185,7 @@ func (d *Display) summaryBarLegend() string {
 	return ""
 }
 
-func (d *Display) render(state *State, metrics *runtimeMetrics, mapCap int64, rs *ringStats) {
+func (d *Display) render(state *State, drops uint64, ms *mapStats, rs *ringStats) {
 	var mainBuf strings.Builder
 	var elapsed time.Duration
 	var nProcs int
@@ -133,7 +223,7 @@ func (d *Display) render(state *State, metrics *runtimeMetrics, mapCap int64, rs
 
 	// Build footer
 	var footerBuf strings.Builder
-	d.renderFooter(&footerBuf, elapsed, nProcs, metrics, mapCap, rs)
+	d.renderFooter(&footerBuf, elapsed, nProcs, drops, ms, rs)
 
 	// Compose main content with top-processes panel when terminal is wide enough.
 	// Panel display is independent of interactive mode — --cols enables it in batch too.
@@ -235,42 +325,27 @@ func (d *Display) handleKey(ev keyEvent) bool {
 	return false
 }
 
-func (d *Display) renderFooter(buf *strings.Builder, elapsed time.Duration, nProcs int, metrics *runtimeMetrics, mapCap int64, rs *ringStats) {
-	drops := metrics.drops.Load()
-	evicted := metrics.evicted.Load()
-	mapStale := metrics.mapStale.Load()
-
+func (d *Display) renderFooter(buf *strings.Builder, elapsed time.Duration, nProcs int, drops uint64, ms *mapStats, rs *ringStats) {
 	dropRate := float64(0)
 	if elapsed.Seconds() > 0 {
 		dropRate = float64(drops) / elapsed.Seconds()
 	}
 	ringInfo := ""
 	if rs != nil {
-		avgPct := float64(rs.avgPending) / float64(rs.capBytes) * 100
-		maxPct := float64(rs.maxPending) / float64(rs.capBytes) * 100
 		last0Str := "-"
 		if rs.last0 > 0 {
 			last0Str = formatMicro(rs.last0)
 		}
-		ringInfo = fmt.Sprintf(" | Ring avg: %6s/%s (%5.1f%%)  cur: %6s  max: %6s/%s (%5.1f%%)  avg1:%-6.0f avg0:%-8.1f last1:%-6s last0:%-8s",
-			formatBytes(rs.avgPending), formatBytes(int64(rs.capBytes)), avgPct,
+		ringInfo = fmt.Sprintf(" | Ring %s  cur: %6s  avg1:%-6.0f avg0:%-8.1f last1:%-6s last0:%-8s",
+			rs.formatUsage(formatBytes),
 			formatBytes(int64(rs.pending)),
-			formatBytes(rs.maxPending), formatBytes(int64(rs.capBytes)), maxPct,
 			rs.avg1, rs.avg0, formatCount(rs.last1), last0Str)
 	}
 	mapInfo := ""
-	if mapCap > 0 {
-		mapMax := metrics.mapMaxUsed.Load()
-		var mapAvg int64
-		if n := metrics.mapSamples.Load(); n > 0 {
-			mapAvg = metrics.mapSumUsed.Load() / n
-		}
-		avgPct := float64(mapAvg) / float64(mapCap) * 100
-		maxPct := float64(mapMax) / float64(mapCap) * 100
-		mapInfo = fmt.Sprintf(" | Map avg: %s/%s (%4.1f%%)  max: %s/%s (%4.1f%%) stale:%s evict:%s",
-			formatCount(mapAvg), formatCount(mapCap), avgPct,
-			formatCount(mapMax), formatCount(mapCap), maxPct,
-			formatCount(mapStale), formatCount(int64(evicted)))
+	if ms != nil {
+		mapInfo = fmt.Sprintf(" | Map %s stale:%s evict:%s",
+			ms.formatUsage(formatCount),
+			formatCount(ms.stale), formatCount(int64(ms.evicted)))
 	}
 	fmt.Fprintf(buf, "Processes: %d | Drops: %s (%s/s)%s%s\n",
 		nProcs, formatCount(int64(drops)), formatCount(int64(dropRate)), mapInfo, ringInfo)

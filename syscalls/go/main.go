@@ -109,14 +109,16 @@ func snapshotRingStats(rd *ringpoll.Reader, ra *ringAvg) *ringStats {
 	ra.add(pending)
 	avg1, avg0, last1, last0 := rd.PollStats()
 	return &ringStats{
-		pending:    pending,
-		avgPending: ra.avg(),
-		capBytes:   rd.BufSize(),
-		maxPending: rd.MaxPending(),
-		avg1:       avg1,
-		avg0:       avg0,
-		last1:      last1,
-		last0:      last0,
+		capacityStats: capacityStats{
+			avg: ra.avg(),
+			max: rd.MaxPending(),
+			cap: int64(rd.BufSize()),
+		},
+		pending: pending,
+		avg1:    avg1,
+		avg0:    avg0,
+		last1:   last1,
+		last0:   last0,
 	}
 }
 
@@ -189,6 +191,12 @@ func main() {
 		origTermios = enableRawMode()
 		fmt.Print("\033[?25l") // hide cursor
 	}
+	termCleanup := sync.OnceFunc(func() {
+		if interactive {
+			fmt.Print("\033[?25h") // restore cursor
+		}
+		restoreTermMode(origTermios)
+	})
 
 	// Signal handling
 	done := make(chan struct{})
@@ -198,19 +206,11 @@ func main() {
 	go func() {
 		<-sig
 		signal.Stop(sig) // restore default handler so second Ctrl+C force-kills
-		if interactive {
-			fmt.Print("\033[?25h") // restore cursor
-		}
-		restoreTermMode(origTermios)
+		termCleanup()
 		close(done)
 		rd.Close()
 	}()
-	defer func() {
-		if interactive {
-			fmt.Print("\033[?25h")
-		}
-		restoreTermMode(origTermios)
-	}()
+	defer termCleanup()
 
 	// Reader goroutine: busy-polls ring buffer, batches events, flushes under single Lock
 	var readerDone sync.WaitGroup
@@ -237,7 +237,7 @@ func main() {
 				return
 			case <-displayTicker.C:
 				readDropCount(objs.DropCount, &metrics.drops)
-				display.render(state, metrics, mapMaxVal, snapshotRingStats(rd, &ra))
+				display.render(state, metrics.drops.Load(), snapshotMapStats(metrics, mapMaxVal), snapshotRingStats(rd, &ra))
 			case ev := <-keyCh:
 				if display.handleKey(ev) {
 					// 'q' pressed — trigger shutdown via signal
@@ -245,7 +245,7 @@ func main() {
 					return
 				}
 				readDropCount(objs.DropCount, &metrics.drops)
-				display.render(state, metrics, mapMaxVal, snapshotRingStats(rd, &ra))
+				display.render(state, metrics.drops.Load(), snapshotMapStats(metrics, mapMaxVal), snapshotRingStats(rd, &ra))
 			}
 		}
 	}()
@@ -288,6 +288,6 @@ func main() {
 	readerDone.Wait()
 
 	readDropCount(objs.DropCount, &metrics.drops)
-	display.render(state, metrics, mapMaxVal, snapshotRingStats(rd, &ringAvg{}))
+	display.render(state, metrics.drops.Load(), snapshotMapStats(metrics, mapMaxVal), snapshotRingStats(rd, &ringAvg{}))
 }
 
