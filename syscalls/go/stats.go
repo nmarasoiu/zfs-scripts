@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"math"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -178,4 +179,93 @@ type runtimeMetrics struct {
 	evicted  atomic.Uint64
 	mapUsed  atomic.Int64
 	mapStale atomic.Int64
+}
+
+type processSummary struct {
+	name  string
+	count uint64
+	rate  float64
+}
+
+type tableEntry struct {
+	label string
+	ss    *syscallStats
+}
+
+// collectEntries builds a sorted list of table entries from per-process stats.
+// When alwaysPrefix is true, labels are always "proc/syscall"; otherwise the
+// proc prefix is omitted when there is exactly one process.
+func collectEntries(procStats map[string]map[uint32]*syscallStats, alwaysPrefix bool) []tableEntry {
+	singleProc := !alwaysPrefix && len(procStats) == 1
+
+	var entries []tableEntry
+	for proc, fm := range procStats {
+		for id, ss := range fm {
+			label := syscallName(id)
+			if !singleProc {
+				label = proc + "/" + label
+			}
+			entries = append(entries, tableEntry{label, ss})
+		}
+	}
+
+	sort.Slice(entries, func(i, j int) bool {
+		ci := entries[i].ss.stats.count
+		cj := entries[j].ss.stats.count
+		if ci != cj {
+			return ci > cj
+		}
+		return entries[i].label < entries[j].label
+	})
+
+	return entries
+}
+
+// filterStatsGeneral returns a filtered copy of procStats where entries match
+// the text against process name or syscall name (case-insensitive substring).
+// Process name matches include all syscalls; syscall matches are per-entry.
+// Must be called while state.mu is held.
+func filterStatsGeneral(procStats map[string]map[uint32]*syscallStats, text string) map[string]map[uint32]*syscallStats {
+	lower := strings.ToLower(text)
+	filtered := make(map[string]map[uint32]*syscallStats)
+	for proc, fm := range procStats {
+		if strings.HasPrefix(strings.ToLower(proc), lower) {
+			filtered[proc] = fm
+			continue
+		}
+		matched := make(map[uint32]*syscallStats)
+		for id, ss := range fm {
+			if strings.HasPrefix(syscallName(id), lower) {
+				matched[id] = ss
+			}
+		}
+		if len(matched) > 0 {
+			filtered[proc] = matched
+		}
+	}
+	return filtered
+}
+
+// collectProcessSummaries aggregates per-process totals from procSyscallStats.
+// Must be called while state.mu is held.
+func collectProcessSummaries(procStats map[string]map[uint32]*syscallStats, elapsedSecs float64) []processSummary {
+	summaries := make([]processSummary, 0, len(procStats))
+	for proc, fm := range procStats {
+		var total uint64
+		for _, ss := range fm {
+			total += ss.stats.count
+		}
+		rate := float64(0)
+		if elapsedSecs > 0 {
+			rate = float64(total) / elapsedSecs
+		}
+		summaries = append(summaries, processSummary{name: proc, count: total, rate: rate})
+	}
+	sort.Slice(summaries, func(i, j int) bool {
+		if summaries[i].count != summaries[j].count {
+			return summaries[i].count > summaries[j].count
+		}
+		return summaries[i].name < summaries[j].name
+	})
+	return summaries
 }
