@@ -122,6 +122,24 @@ func (ss *syscallStats) Record(latencyUs int64) {
 	ss.top.Add(latencyUs)
 }
 
+// percentiles holds pre-extracted quantile values (in µs) from a DDSketch.
+type percentiles struct {
+	P25, P50, P75, P90, P99, P999 int64
+}
+
+func sketchPercentiles(sketch *ddsketch.DDSketch) percentiles {
+	p25, _ := sketch.GetValueAtQuantile(0.25)
+	p50, _ := sketch.GetValueAtQuantile(0.50)
+	p75, _ := sketch.GetValueAtQuantile(0.75)
+	p90, _ := sketch.GetValueAtQuantile(0.90)
+	p99, _ := sketch.GetValueAtQuantile(0.99)
+	p999, _ := sketch.GetValueAtQuantile(0.999)
+	return percentiles{
+		P25: int64(p25), P50: int64(p50), P75: int64(p75),
+		P90: int64(p90), P99: int64(p99), P999: int64(p999),
+	}
+}
+
 // State holds all per-process and per-syscall stats
 type State struct {
 	mu sync.Mutex

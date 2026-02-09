@@ -5,7 +5,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/DataDog/sketches-go/ddsketch"
 	"github.com/nmarasoiu/zfs-scripts/ringpoll"
 )
 
@@ -104,7 +103,7 @@ func (d *Display) render(state *State, metrics *runtimeMetrics, mapCap int64) {
 	if len(d.focusProcesses) > 0 {
 		d.renderTable(&mainBuf, viewStats)
 	} else {
-		d.renderSummary(&mainBuf, viewStats, elapsed, state.globalStats, state.globalSketch)
+		d.renderSummary(&mainBuf, viewStats, elapsed, state.globalStats, sketchPercentiles(state.globalSketch))
 	}
 
 	// Totals for footer
@@ -321,42 +320,36 @@ func (d *Display) renderTable(buf *strings.Builder, procStats map[string]map[uin
 	for i := 0; i < shown; i++ {
 		e := entries[i]
 		name := fmt.Sprintf(nameFmt, e.label)
-		renderDetailRow(buf, name, e.ss.stats, e.ss.sketch, e.ss.top)
+		renderDetailRow(buf, name, e.ss.stats, sketchPercentiles(e.ss.sketch), e.ss.top)
 	}
 
 	buf.WriteString("\n")
 }
 
-func renderDetailRow(buf *strings.Builder, name string, st *simpleStats, sketch *ddsketch.DDSketch, top *topN) {
+func renderDetailRow(buf *strings.Builder, name string, st *simpleStats, pcts percentiles, top *topN) {
 	n := st.count
 	if n == 0 {
 		fmt.Fprintf(buf, "%s │ %8s %8s %8s %8s %8s %8s %8s %8s %8s │ %8s %8s %8s %8s %8s │ %9s\n",
 			name, "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "0")
 		return
 	}
-	p25, _ := sketch.GetValueAtQuantile(0.25)
-	p50, _ := sketch.GetValueAtQuantile(0.50)
-	p75, _ := sketch.GetValueAtQuantile(0.75)
-	p90, _ := sketch.GetValueAtQuantile(0.90)
-	p99, _ := sketch.GetValueAtQuantile(0.99)
-	p999, _ := sketch.GetValueAtQuantile(0.999)
 	fmt.Fprintf(buf, "%s │ %s %s %s %s %s %s %s %s %s │ %s │ %9s\n",
 		name,
 		formatLatencyPadded(st.min),
 		formatLatencyPadded(st.Avg()),
-		formatLatencyPadded(int64(p25)),
-		formatLatencyPadded(int64(p50)),
-		formatLatencyPadded(int64(p75)),
-		formatLatencyPadded(int64(p90)),
-		formatLatencyPadded(int64(p99)),
-		formatLatencyPadded(int64(p999)),
+		formatLatencyPadded(pcts.P25),
+		formatLatencyPadded(pcts.P50),
+		formatLatencyPadded(pcts.P75),
+		formatLatencyPadded(pcts.P90),
+		formatLatencyPadded(pcts.P99),
+		formatLatencyPadded(pcts.P999),
 		formatLatencyPadded(st.max),
 		formatTop5(top),
 		formatCount(int64(n)),
 	)
 }
 
-func (d *Display) renderSummary(buf *strings.Builder, procStats map[string]map[uint32]*syscallStats, elapsed time.Duration, globalStats *simpleStats, globalSketch *ddsketch.DDSketch) {
+func (d *Display) renderSummary(buf *strings.Builder, procStats map[string]map[uint32]*syscallStats, elapsed time.Duration, globalStats *simpleStats, globalPcts percentiles) {
 	entries := collectEntries(procStats, true)
 
 	totalSecs := elapsed.Seconds()
@@ -404,13 +397,13 @@ func (d *Display) renderSummary(buf *strings.Builder, procStats map[string]map[u
 		var leftStr, rightStr string
 
 		if i < len(leftSlice) {
-			leftStr = formatSummaryRow(leftSlice[i].label, leftSlice[i].ss.stats, leftSlice[i].ss.sketch, totalSecs)
+			leftStr = formatSummaryRow(leftSlice[i].label, leftSlice[i].ss.stats, sketchPercentiles(leftSlice[i].ss.sketch), totalSecs)
 		} else {
 			leftStr = strings.Repeat(" ", summaryLineWidth)
 		}
 
 		if i < len(rightSlice) {
-			rightStr = formatSummaryRow(rightSlice[i].label, rightSlice[i].ss.stats, rightSlice[i].ss.sketch, totalSecs)
+			rightStr = formatSummaryRow(rightSlice[i].label, rightSlice[i].ss.stats, sketchPercentiles(rightSlice[i].ss.sketch), totalSecs)
 		} else {
 			rightStr = strings.Repeat(" ", summaryLineWidth)
 		}
@@ -419,7 +412,7 @@ func (d *Display) renderSummary(buf *strings.Builder, procStats map[string]map[u
 	}
 
 	if globalStats.count > 0 {
-		globalRow := formatSummaryRow("LIFETIME(all)", globalStats, globalSketch, totalSecs)
+		globalRow := formatSummaryRow("LIFETIME(all)", globalStats, globalPcts, totalSecs)
 		remaining := dualWidth - summaryLineWidth - 1
 		if remaining < 0 {
 			remaining = 0
@@ -431,21 +424,18 @@ func (d *Display) renderSummary(buf *strings.Builder, procStats map[string]map[u
 	}
 }
 
-func formatSummaryRow(name string, st *simpleStats, sketch *ddsketch.DDSketch, secs float64) string {
+func formatSummaryRow(name string, st *simpleStats, pcts percentiles, secs float64) string {
 	n := st.count
 	if n == 0 {
 		return fmt.Sprintf("%-28s │ %8s %8s %8s %8s %8s │ %9s %9s",
 			name, "-", "-", "-", "-", "-", "0", "-")
 	}
-	p50, _ := sketch.GetValueAtQuantile(0.50)
-	p90, _ := sketch.GetValueAtQuantile(0.90)
-	p99, _ := sketch.GetValueAtQuantile(0.99)
 	return fmt.Sprintf("%-28s │ %s %s %s %s %s │ %9s %9s",
 		name,
 		formatLatencyPadded(st.Avg()),
-		formatLatencyPadded(int64(p50)),
-		formatLatencyPadded(int64(p90)),
-		formatLatencyPadded(int64(p99)),
+		formatLatencyPadded(pcts.P50),
+		formatLatencyPadded(pcts.P90),
+		formatLatencyPadded(pcts.P99),
 		formatLatencyPadded(st.max),
 		formatCount(int64(n)),
 		formatRate(n, secs),
