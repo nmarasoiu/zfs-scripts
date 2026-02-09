@@ -442,50 +442,6 @@ func formatSummaryRow(name string, st *simpleStats, pcts percentiles, secs float
 	)
 }
 
-// displayWidth returns the number of display columns a string occupies.
-// Counts each rune as 1 column (works for ASCII + box-drawing chars).
-func displayWidth(s string) int {
-	n := 0
-	for i := 0; i < len(s); {
-		if s[i] < 0x80 {
-			n++
-			i++
-		} else {
-			// Skip continuation bytes of multi-byte UTF-8 sequence
-			// The lead byte counts as 1 display column
-			n++
-			i++
-			for i < len(s) && s[i]&0xC0 == 0x80 {
-				i++
-			}
-		}
-	}
-	return n
-}
-
-// padOrTrunc pads with spaces or truncates to exactly width display columns.
-func padOrTrunc(s string, width int) string {
-	dw := displayWidth(s)
-	if dw >= width {
-		// Truncate to width display columns
-		n := 0
-		i := 0
-		for i < len(s) && n < width {
-			if s[i] < 0x80 {
-				i++
-			} else {
-				i++
-				for i < len(s) && s[i]&0xC0 == 0x80 {
-					i++
-				}
-			}
-			n++
-		}
-		return s[:i]
-	}
-	return s + strings.Repeat(" ", width-dw)
-}
-
 // renderPanel builds the right-side process panel lines.
 // maxRows limits the number of process rows (0 = unlimited).
 func renderPanel(summaries []processSummary, matchedProcs map[string]bool, maxRows int) []string {
