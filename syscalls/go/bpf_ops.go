@@ -29,8 +29,9 @@ func ktimeNow() uint64 {
 }
 
 // cleanStaleEntries iterates start_times, counts entries older than staleAge,
-// and evicts entries older than evictAge.
-// Returns (total entries, stale count, evicted count).
+// and evicts at most one entry older than evictAge per call.
+// Converges naturally over repeated cleanup ticks.
+// Returns (total entries, stale count, evicted count 0 or 1).
 func cleanStaleEntries(startTimes, syscallIds *ebpf.Map, staleAge, evictAge time.Duration) (int, int, int) {
 	now := ktimeNow()
 	staleThresh := now - uint64(staleAge.Nanoseconds())
@@ -38,9 +39,10 @@ func cleanStaleEntries(startTimes, syscallIds *ebpf.Map, staleAge, evictAge time
 
 	var tid uint32
 	var startNs uint64
-	var toDelete []uint32
 	total := 0
 	stale := 0
+	var evictTid uint32
+	evictFound := false
 
 	iter := startTimes.Iterate()
 	for iter.Next(&tid, &startNs) {
@@ -48,16 +50,19 @@ func cleanStaleEntries(startTimes, syscallIds *ebpf.Map, staleAge, evictAge time
 		if startNs < staleThresh {
 			stale++
 		}
-		if startNs < evictThresh {
-			toDelete = append(toDelete, tid)
+		if !evictFound && startNs < evictThresh {
+			evictTid = tid
+			evictFound = true
 		}
 	}
 
-	for _, tid := range toDelete {
-		startTimes.Delete(tid)
-		syscallIds.Delete(tid)
+	evicted := 0
+	if evictFound {
+		startTimes.Delete(evictTid)
+		syscallIds.Delete(evictTid)
+		evicted = 1
 	}
-	return total, stale, len(toDelete)
+	return total, stale, evicted
 }
 
 func readDropCount(m *ebpf.Map, dst *atomic.Uint64) {
