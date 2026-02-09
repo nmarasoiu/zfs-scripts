@@ -145,7 +145,7 @@ func (d *Display) render(state *State, metrics *runtimeMetrics, mapCap int64) {
 	if len(d.focusProcesses) > 0 {
 		d.renderTable(&mainBuf, viewStats)
 	} else {
-		d.renderSummary(&mainBuf, viewStats, elapsed)
+		d.renderSummary(&mainBuf, viewStats, elapsed, state.globalStats, state.globalSketch)
 	}
 
 	// Totals for footer
@@ -397,7 +397,7 @@ func renderDetailRow(buf *strings.Builder, name string, st *simpleStats, sketch 
 	)
 }
 
-func (d *Display) renderSummary(buf *strings.Builder, procStats map[string]map[uint32]*syscallStats, elapsed time.Duration) {
+func (d *Display) renderSummary(buf *strings.Builder, procStats map[string]map[uint32]*syscallStats, elapsed time.Duration, globalStats *simpleStats, globalSketch *ddsketch.DDSketch) {
 	entries := collectEntries(procStats, true)
 
 	totalSecs := elapsed.Seconds()
@@ -459,8 +459,17 @@ func (d *Display) renderSummary(buf *strings.Builder, procStats map[string]map[u
 		fmt.Fprintf(buf, "%s │ %s\n", leftStr, rightStr)
 	}
 
-	buf.WriteString(strings.Repeat("=", dualWidth))
-	buf.WriteString("\n")
+	if globalStats.count > 0 {
+		globalRow := formatSummaryRow("LIFETIME(all)", globalStats, globalSketch, totalSecs)
+		remaining := dualWidth - summaryLineWidth - 1
+		if remaining < 0 {
+			remaining = 0
+		}
+		fmt.Fprintf(buf, "%s %s\n", globalRow, strings.Repeat("=", remaining))
+	} else {
+		buf.WriteString(strings.Repeat("=", dualWidth))
+		buf.WriteString("\n")
+	}
 }
 
 func formatSummaryRow(name string, st *simpleStats, sketch *ddsketch.DDSketch, secs float64) string {

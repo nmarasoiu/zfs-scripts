@@ -128,12 +128,19 @@ type State struct {
 	// Per-(process, syscall) stats for all processes
 	procSyscallStats map[string]map[uint32]*syscallStats
 
+	// Global lifetime sketch across all processes and syscalls
+	globalSketch *ddsketch.DDSketch
+	globalStats  *simpleStats
+
 	startTime time.Time
 }
 
 func newState() *State {
+	sketch, _ := ddsketch.NewDefaultDDSketch(0.01)
 	return &State{
 		procSyscallStats: make(map[string]map[uint32]*syscallStats),
+		globalSketch:     sketch,
+		globalStats:      newSimpleStats(),
 		startTime:        time.Now(),
 	}
 }
@@ -159,6 +166,8 @@ func (s *State) RecordBatch(batch []pendingEvent) {
 			fm[e.syscallID] = ss
 		}
 		ss.Record(e.latencyUs)
+		s.globalSketch.Add(float64(e.latencyUs))
+		s.globalStats.Record(e.latencyUs)
 	}
 	s.mu.Unlock()
 }
