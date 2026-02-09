@@ -33,7 +33,6 @@ import (
 
 const (
 	displayInterval = 100 * time.Millisecond // 10 FPS display refresh
-	maxLatencyUs    = 60_000_000             // 60 seconds in µs - clamp values above this
 	flushSize       = 1024
 	flushInterval   = 10 * time.Millisecond
 )
@@ -86,9 +85,6 @@ func runReader(rd *ringpoll.Reader, state *State) {
 		latencyUs := int64(event.LatencyNs / 1000)
 		if latencyUs < 1 {
 			latencyUs = 1
-		}
-		if latencyUs > maxLatencyUs {
-			latencyUs = maxLatencyUs
 		}
 		batch = append(batch, pendingEvent{commString(event.Comm), event.SyscallId, latencyUs})
 
