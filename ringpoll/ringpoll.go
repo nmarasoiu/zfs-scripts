@@ -49,6 +49,19 @@ type Record struct {
 	RawSample []byte
 }
 
+// PollSnapshot is an atomic point-in-time snapshot of ring poll statistics,
+// published once per ring-empty boundary. A single atomic.Pointer swap
+// replaces 7 separate atomic stores/loads, ensuring consistent reads.
+type PollSnapshot struct {
+	EventSum      int64
+	NonEmptyCount int64
+	PollCount     int64
+	LastNonEmpty  int64         // batch size of most recent non-empty poll
+	LastEmptyNano int64         // UnixNano of most recent empty poll
+	MaxPending    int64         // high-water mark of ring fill (bytes)
+	LastBatch     int64         // events drained in last completed batch
+}
+
 // Reader reads from a BPF ring buffer by busy-polling the mmap'd
 // producer/consumer positions directly, avoiding epoll entirely.
 type Reader struct {
@@ -61,24 +74,17 @@ type Reader struct {
 	pos       uint64 // current consumer position (local copy)
 	closed    atomic.Bool
 	pollSleep time.Duration
+	bufSize   int // ring capacity in bytes
 
-	// Stats (written by reader goroutine, read atomically by display)
-	batchCount int64        // events in current batch (reader goroutine only)
-	lastBatch  atomic.Int64 // events drained in last completed batch
-	bufSize    int          // ring capacity in bytes
+	// Local stats (written only by reader goroutine — no sync needed)
+	batchCount    int64
+	eventSum      int64
+	nonEmptyCount int64
+	pollCount     int64
+	maxPending    int64
 
-	// Poll stats (written by reader goroutine at ring-empty boundaries)
-	eventSum      int64 // running sum of events across non-empty batches
-	nonEmptyCount int64 // number of non-empty batches observed
-	pollCount     int64 // total ring-empty observations (empty + non-empty endings)
-
-	// Atomic copies for display goroutine
-	atomicEventSum      atomic.Int64
-	atomicNonEmptyCount atomic.Int64
-	atomicPollCount     atomic.Int64
-	lastNonEmpty        atomic.Int64 // batch size of most recent non-empty poll (last1)
-	lastEmptyNano       atomic.Int64 // UnixNano of most recent empty poll (last0)
-	maxPending          atomic.Int64 // high-water mark of ring fill (bytes)
+	// Single atomic snapshot published at ring-empty boundaries
+	snapshot atomic.Pointer[PollSnapshot]
 }
 
 // NewReader creates a busy-polling ring buffer reader for the given BPF map.
@@ -141,19 +147,14 @@ func (r *Reader) Pending() int {
 	return int(prod - cons)
 }
 
-// LastBatch returns the number of events drained in the last completed batch.
-func (r *Reader) LastBatch() int64 {
-	return r.lastBatch.Load()
-}
-
 // BufSize returns the ring buffer capacity in bytes.
 func (r *Reader) BufSize() int {
 	return r.bufSize
 }
 
-// MaxPending returns the high-water mark of ring buffer fill in bytes.
-func (r *Reader) MaxPending() int64 {
-	return r.maxPending.Load()
+// Snapshot returns the latest poll statistics snapshot, or nil if none published yet.
+func (r *Reader) Snapshot() *PollSnapshot {
+	return r.snapshot.Load()
 }
 
 // PollStats returns ring poll statistics for display.
@@ -162,22 +163,39 @@ func (r *Reader) MaxPending() int64 {
 //   - last1: batch size of most recent non-empty poll
 //   - last0: time since last empty poll
 func (r *Reader) PollStats() (avg1, avg0 float64, last1 int64, last0 time.Duration) {
-	eSum := r.atomicEventSum.Load()
-	neCount := r.atomicNonEmptyCount.Load()
-	pCount := r.atomicPollCount.Load()
-	last1 = r.lastNonEmpty.Load()
-	lastNano := r.lastEmptyNano.Load()
-
-	if neCount > 0 {
-		avg1 = float64(eSum) / float64(neCount)
+	snap := r.snapshot.Load()
+	if snap == nil {
+		return
 	}
-	if pCount > 0 {
-		avg0 = float64(eSum) / float64(pCount)
+	if snap.NonEmptyCount > 0 {
+		avg1 = float64(snap.EventSum) / float64(snap.NonEmptyCount)
 	}
-	if lastNano > 0 {
-		last0 = time.Since(time.Unix(0, lastNano))
+	if snap.PollCount > 0 {
+		avg0 = float64(snap.EventSum) / float64(snap.PollCount)
+	}
+	last1 = snap.LastNonEmpty
+	if snap.LastEmptyNano > 0 {
+		last0 = time.Since(time.Unix(0, snap.LastEmptyNano))
 	}
 	return
+}
+
+// MaxPending returns the high-water mark of ring buffer fill in bytes.
+func (r *Reader) MaxPending() int64 {
+	snap := r.snapshot.Load()
+	if snap == nil {
+		return 0
+	}
+	return snap.MaxPending
+}
+
+// LastBatch returns the number of events drained in the last completed batch.
+func (r *Reader) LastBatch() int64 {
+	snap := r.snapshot.Load()
+	if snap == nil {
+		return 0
+	}
+	return snap.LastBatch
 }
 
 // Commit publishes the current consumer position to the kernel, freeing
@@ -198,25 +216,30 @@ func (r *Reader) ReadInto(rec *Record) bool {
 		}
 
 		prod := atomic.LoadUint64(r.prodPos)
-		if pending := int64(prod - r.pos); pending > r.maxPending.Load() {
-			r.maxPending.Store(pending)
+		if pending := int64(prod - r.pos); pending > r.maxPending {
+			r.maxPending = pending
 		}
 		if r.pos == prod {
 			// Ring empty — commit before sleeping so kernel sees freed space
 			r.Commit()
 			// Record completed batch and poll stats
 			r.pollCount++
+			lastBatch := r.batchCount
 			if r.batchCount > 0 {
 				r.nonEmptyCount++
 				r.eventSum += r.batchCount
-				r.lastNonEmpty.Store(r.batchCount)
-				r.lastBatch.Store(r.batchCount)
 				r.batchCount = 0
-				r.atomicEventSum.Store(r.eventSum)
-				r.atomicNonEmptyCount.Store(r.nonEmptyCount)
 			}
-			r.atomicPollCount.Store(r.pollCount)
-			r.lastEmptyNano.Store(time.Now().UnixNano())
+			// Publish all stats in a single atomic pointer swap
+			r.snapshot.Store(&PollSnapshot{
+				EventSum:      r.eventSum,
+				NonEmptyCount: r.nonEmptyCount,
+				PollCount:     r.pollCount,
+				LastNonEmpty:  lastBatch,
+				LastEmptyNano: time.Now().UnixNano(),
+				MaxPending:    r.maxPending,
+				LastBatch:     lastBatch,
+			})
 			time.Sleep(r.pollSleep)
 			continue
 		}

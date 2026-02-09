@@ -248,7 +248,6 @@ func (d *Display) handleKey(ev keyEvent) bool {
 func (d *Display) renderFooter(buf *strings.Builder, elapsed time.Duration, nProcs int, metrics *runtimeMetrics, mapCap int64, rs *ringStats) {
 	drops := metrics.drops.Load()
 	evicted := metrics.evicted.Load()
-	mapUsed := metrics.mapUsed.Load()
 	mapStale := metrics.mapStale.Load()
 
 	dropRate := float64(0)
@@ -257,22 +256,29 @@ func (d *Display) renderFooter(buf *strings.Builder, elapsed time.Duration, nPro
 	}
 	ringInfo := ""
 	if rs != nil {
-		pctFull := float64(rs.pending) / float64(rs.capBytes) * 100
+		avgPct := float64(rs.pending) / float64(rs.capBytes) * 100
 		maxPct := float64(rs.maxPending) / float64(rs.capBytes) * 100
 		last0Str := "-"
 		if rs.last0 > 0 {
 			last0Str = formatMicro(rs.last0)
 		}
-		ringInfo = fmt.Sprintf(" | Ring avg: %6s/%s (%5.1f%%)  Ring max: %6s/%s (%5.1f%%)  avg1:%-6.0f avg0:%-8.1f last1:%-6s last0:%-8s",
-			formatBytes(int64(rs.pending)), formatBytes(int64(rs.capBytes)), pctFull,
+		ringInfo = fmt.Sprintf(" | Ring avg: %6s/%s (%5.1f%%)  max: %6s/%s (%5.1f%%)  avg1:%-6.0f avg0:%-8.1f last1:%-6s last0:%-8s",
+			formatBytes(int64(rs.pending)), formatBytes(int64(rs.capBytes)), avgPct,
 			formatBytes(rs.maxPending), formatBytes(int64(rs.capBytes)), maxPct,
 			rs.avg1, rs.avg0, formatCount(rs.last1), last0Str)
 	}
 	mapInfo := ""
 	if mapCap > 0 {
-		pct := float64(mapUsed) / float64(mapCap) * 100
-		mapInfo = fmt.Sprintf(" | Map: %s/%s (%4.1f%%) stale:%s evict:%s",
-			formatCount(mapUsed), formatCount(mapCap), pct,
+		mapMax := metrics.mapMaxUsed.Load()
+		var mapAvg int64
+		if n := metrics.mapSamples.Load(); n > 0 {
+			mapAvg = metrics.mapSumUsed.Load() / n
+		}
+		avgPct := float64(mapAvg) / float64(mapCap) * 100
+		maxPct := float64(mapMax) / float64(mapCap) * 100
+		mapInfo = fmt.Sprintf(" | Map avg: %s/%s (%4.1f%%)  max: %s/%s (%4.1f%%) stale:%s evict:%s",
+			formatCount(mapAvg), formatCount(mapCap), avgPct,
+			formatCount(mapMax), formatCount(mapCap), maxPct,
 			formatCount(mapStale), formatCount(int64(evicted)))
 	}
 	fmt.Fprintf(buf, "Processes: %d | Drops: %s (%s/s)%s%s\n",

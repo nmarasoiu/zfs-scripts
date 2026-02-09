@@ -225,6 +225,11 @@ type runtimeMetrics struct {
 	evicted  atomic.Uint64
 	mapUsed  atomic.Int64
 	mapStale atomic.Int64
+
+	// Map avg/max tracking (updated each cleanup tick)
+	mapMaxUsed atomic.Int64
+	mapSumUsed atomic.Int64
+	mapSamples atomic.Int64
 }
 
 // ringStats is a point-in-time snapshot of ring buffer metrics,
