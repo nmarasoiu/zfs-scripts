@@ -523,7 +523,7 @@ func renderProcPanel(summaries []processSummary, matchedProcs map[string]bool, m
 	var lines []string
 
 	// Header
-	lines = append(lines, padOrTrunc("  PROCESS         RATE    TOTAL", procPanelWidth))
+	lines = append(lines, padOrTrunc(" PROCESS         RATE   TOTAL", procPanelWidth))
 	lines = append(lines, strings.Repeat("─", procPanelWidth))
 
 	n := 0
@@ -540,7 +540,7 @@ func renderProcPanel(summaries []processSummary, matchedProcs map[string]bool, m
 		} else if ps.rate > 0 {
 			rateStr = fmt.Sprintf("%.1f/s", ps.rate)
 		}
-		line := fmt.Sprintf("  %-15s %8s %8s", padOrTrunc(ps.name, 15), rateStr, formatCount(int64(ps.count)))
+		line := fmt.Sprintf(" %-15s %8s %7s", padOrTrunc(ps.name, 15), rateStr, formatCount(int64(ps.count)))
 		lines = append(lines, padOrTrunc(line, procPanelWidth))
 		n++
 	}
