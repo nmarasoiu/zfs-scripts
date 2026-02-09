@@ -7,10 +7,10 @@ import (
 )
 
 const (
-	panelWidth      = 34
-	panelSep        = " │ "
-	panelSepDisplay = 3 // display width of panelSep (│ is 1 column wide)
-	panelOverhead   = panelSepDisplay + panelWidth
+	procPanelWidth      = 34
+	procPanelSep        = " │ "
+	procPanelSepDisplay = 3 // display width of procPanelSep (│ is 1 column wide)
+	procPanelOverhead   = procPanelSepDisplay + procPanelWidth
 )
 
 type interactiveMode int
@@ -114,7 +114,7 @@ func (d *Display) render(state *State, metrics *runtimeMetrics, mapCap int64, rs
 	// Snapshot the LRU as a nested map for display functions
 	procStats := state.snapshotStats()
 
-	// Collect process summaries for the panel (while holding lock)
+	// Collect process summaries for the top-processes panel (while holding lock)
 	d.lastSummaries = collectProcessSummaries(procStats, elapsed.Seconds())
 
 	// Optionally filter for display
@@ -138,7 +138,7 @@ func (d *Display) render(state *State, metrics *runtimeMetrics, mapCap int64, rs
 	var footerBuf strings.Builder
 	d.renderFooter(&footerBuf, elapsed, nProcs, metrics, mapCap, rs)
 
-	// Compose main content with panel when terminal is wide enough.
+	// Compose main content with top-processes panel when terminal is wide enough.
 	// Panel display is independent of interactive mode — --cols enables it in batch too.
 	mainStr := mainBuf.String()
 	footerStr := footerBuf.String()
@@ -156,23 +156,23 @@ func (d *Display) render(state *State, metrics *runtimeMetrics, mapCap int64, rs
 			maxContentWidth = w
 		}
 	}
-	showPanel := termW >= maxContentWidth+panelOverhead
+	showProcPanel := termW >= maxContentWidth+procPanelOverhead
 
 	var output strings.Builder
 
-	if showPanel {
-		panelMaxRows := d.topN + 3
-		var panelMatchedProcs map[string]bool
+	if showProcPanel {
+		procPanelMaxRows := d.topN + 4
+		var procPanelMatched map[string]bool
 		if d.mode == modeFilter && d.filterText != "" {
-			panelMatchedProcs = make(map[string]bool, len(viewStats))
+			procPanelMatched = make(map[string]bool, len(viewStats))
 			for proc := range viewStats {
-				panelMatchedProcs[proc] = true
+				procPanelMatched[proc] = true
 			}
 		}
-		panelLines := renderPanel(d.lastSummaries, panelMatchedProcs, panelMaxRows)
+		procPanelLines := renderProcPanel(d.lastSummaries, procPanelMatched, procPanelMaxRows)
 
 		// mainColWidth = space allocated to main content (display columns).
-		mainColWidth := termW - panelOverhead
+		mainColWidth := termW - procPanelOverhead
 
 		for i := 0; i < len(mainLines); i++ {
 			left := mainLines[i]
@@ -181,11 +181,11 @@ func (d *Display) render(state *State, metrics *runtimeMetrics, mapCap int64, rs
 				left += strings.Repeat(" ", mainColWidth-displayLen)
 			}
 			right := ""
-			if i < len(panelLines) {
-				right = panelLines[i]
+			if i < len(procPanelLines) {
+				right = procPanelLines[i]
 			}
 			if right != "" {
-				fmt.Fprintf(&output, "%s%s%s\n", left, panelSep, padOrTrunc(right, panelWidth))
+				fmt.Fprintf(&output, "%s%s%s\n", left, procPanelSep, padOrTrunc(right, procPanelWidth))
 			} else {
 				output.WriteString(left)
 				output.WriteByte('\n')
@@ -454,14 +454,14 @@ func formatSummaryRow(name string, st *simpleStats, pcts percentiles, secs float
 	)
 }
 
-// renderPanel builds the right-side process panel lines.
+// renderProcPanel builds the right-side top-processes panel lines.
 // maxRows limits the number of process rows (0 = unlimited).
-func renderPanel(summaries []processSummary, matchedProcs map[string]bool, maxRows int) []string {
+func renderProcPanel(summaries []processSummary, matchedProcs map[string]bool, maxRows int) []string {
 	var lines []string
 
 	// Header
-	lines = append(lines, padOrTrunc("  PROCESS         RATE    TOTAL", panelWidth))
-	lines = append(lines, strings.Repeat("─", panelWidth))
+	lines = append(lines, padOrTrunc("  PROCESS         RATE    TOTAL", procPanelWidth))
+	lines = append(lines, strings.Repeat("─", procPanelWidth))
 
 	n := 0
 	for _, ps := range summaries {
@@ -478,7 +478,7 @@ func renderPanel(summaries []processSummary, matchedProcs map[string]bool, maxRo
 			rateStr = fmt.Sprintf("%.1f/s", ps.rate)
 		}
 		line := fmt.Sprintf("  %-15s %8s %8s", padOrTrunc(ps.name, 15), rateStr, formatCount(int64(ps.count)))
-		lines = append(lines, padOrTrunc(line, panelWidth))
+		lines = append(lines, padOrTrunc(line, procPanelWidth))
 		n++
 	}
 	return lines
