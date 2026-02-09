@@ -130,18 +130,6 @@ func (d *Display) resetCursor() {
 	}
 }
 
-func formatTop5(top *topN) string {
-	vals := top.Get()
-	var parts []string
-	for i := 0; i < 5-len(vals); i++ {
-		parts = append(parts, fmt.Sprintf("%8s", "-"))
-	}
-	for _, v := range vals {
-		parts = append(parts, formatLatencyPadded(v))
-	}
-	return strings.Join(parts, " ")
-}
-
 func sectionHeader(buf *strings.Builder, title string, width int) {
 	displayWidth := 3 + len(title) + 1
 	remaining := width - displayWidth
@@ -367,15 +355,14 @@ func (d *Display) renderTable(buf *strings.Builder, procStats map[string]map[uin
 
 	// Section title
 	title := strings.Join(d.focusProcesses, ",")
-	lineWidth := labelWidth + 142
+	lineWidth := labelWidth + 95
 	sectionHeader(buf, fmt.Sprintf("%s (%d)", title, shown), lineWidth)
 
 	// Column headers
 	nameFmt := fmt.Sprintf("%%-%ds", labelWidth)
-	fmt.Fprintf(buf, "%s │ %8s %8s %8s %8s %8s %8s %8s %8s %8s │ %8s %8s %8s %8s %8s │ %9s\n",
+	fmt.Fprintf(buf, "%s │ %8s %8s %8s %8s %8s %8s %8s %8s %8s │ %9s\n",
 		fmt.Sprintf(nameFmt, "LIFETIME"),
-		"min", "avg", "p25", "p50", "p75", "p90", "p99", "p99.9", "max",
-		"max-4", "max-3", "max-2", "max-1", "max", "samples")
+		"min", "avg", "p25", "p50", "p75", "p90", "p99", "p99.9", "max", "samples")
 	buf.WriteString(strings.Repeat("-", lineWidth))
 	buf.WriteString("\n")
 
@@ -383,20 +370,20 @@ func (d *Display) renderTable(buf *strings.Builder, procStats map[string]map[uin
 	for i := 0; i < shown; i++ {
 		e := entries[i]
 		name := fmt.Sprintf(nameFmt, e.label)
-		renderDetailRow(buf, name, e.ss.stats, sketchPercentiles(e.ss.sketch), e.ss.top)
+		renderDetailRow(buf, name, e.ss.stats, sketchPercentiles(e.ss.sketch))
 	}
 
 	buf.WriteString("\n")
 }
 
-func renderDetailRow(buf *strings.Builder, name string, st *simpleStats, pcts percentiles, top *topN) {
+func renderDetailRow(buf *strings.Builder, name string, st *simpleStats, pcts percentiles) {
 	n := st.count
 	if n == 0 {
-		fmt.Fprintf(buf, "%s │ %8s %8s %8s %8s %8s %8s %8s %8s %8s │ %8s %8s %8s %8s %8s │ %9s\n",
-			name, "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "0")
+		fmt.Fprintf(buf, "%s │ %8s %8s %8s %8s %8s %8s %8s %8s %8s │ %9s\n",
+			name, "-", "-", "-", "-", "-", "-", "-", "-", "-", "0")
 		return
 	}
-	fmt.Fprintf(buf, "%s │ %s %s %s %s %s %s %s %s %s │ %s │ %9s\n",
+	fmt.Fprintf(buf, "%s │ %s %s %s %s %s %s %s %s %s │ %9s\n",
 		name,
 		formatLatencyPadded(st.min),
 		formatLatencyPadded(st.Avg()),
@@ -407,7 +394,6 @@ func renderDetailRow(buf *strings.Builder, name string, st *simpleStats, pcts pe
 		formatLatencyPadded(pcts.P99),
 		formatLatencyPadded(pcts.P999),
 		formatLatencyPadded(st.max),
-		formatTop5(top),
 		formatCount(int64(n)),
 	)
 }

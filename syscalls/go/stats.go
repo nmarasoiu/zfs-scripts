@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"math"
-	"sort"
 	"sync"
 	"time"
 
@@ -31,39 +30,6 @@ func commString(comm [16]int8) string {
 	}
 	commIntern[raw] = raw
 	return raw
-}
-
-// topN tracks the top N maximum values
-type topN struct {
-	values []int64
-	n      int
-}
-
-func newTopN(n int) *topN {
-	return &topN{values: make([]int64, 0, n), n: n}
-}
-
-func (t *topN) Add(v int64) {
-	if len(t.values) < t.n {
-		i := sort.Search(len(t.values), func(i int) bool { return t.values[i] >= v })
-		t.values = append(t.values, 0)
-		copy(t.values[i+1:], t.values[i:])
-		t.values[i] = v
-		return
-	}
-	if v > t.values[0] {
-		i := sort.Search(len(t.values), func(i int) bool { return t.values[i] >= v })
-		if i > 0 {
-			copy(t.values[:i-1], t.values[1:i])
-			t.values[i-1] = v
-		}
-	}
-}
-
-func (t *topN) Get() []int64 {
-	result := make([]int64, len(t.values))
-	copy(result, t.values)
-	return result
 }
 
 // simpleStats tracks min/max/sum/count explicitly (no sketch overhead)
@@ -101,7 +67,6 @@ func (s *simpleStats) Avg() int64 {
 type syscallStats struct {
 	sketch *ddsketch.DDSketch
 	stats  *simpleStats
-	top    *topN
 }
 
 func newSyscallStats() *syscallStats {
@@ -109,14 +74,12 @@ func newSyscallStats() *syscallStats {
 	return &syscallStats{
 		sketch: sketch,
 		stats:  newSimpleStats(),
-		top:    newTopN(5),
 	}
 }
 
 func (ss *syscallStats) Record(latencyUs int64) {
 	ss.sketch.Add(float64(latencyUs))
 	ss.stats.Record(latencyUs)
-	ss.top.Add(latencyUs)
 }
 
 // percentiles holds pre-extracted quantile values (in µs) from a DDSketch.
