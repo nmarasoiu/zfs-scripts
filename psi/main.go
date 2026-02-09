@@ -5,6 +5,8 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 )
 
@@ -18,13 +20,30 @@ func main() {
 	zpRefreshInterval = *zpoolInterval
 
 	loadFd := mustOpen("/proc/loadavg")
+	defer syscall.Close(loadFd)
 	psiFiles := []psiFile{
 		{"CPU", mustOpen("/proc/pressure/cpu")},
 		{"IO", mustOpen("/proc/pressure/io")},
 		{"MEMORY", mustOpen("/proc/pressure/memory")},
 	}
+	defer func() {
+		for _, pf := range psiFiles {
+			syscall.Close(pf.fd)
+		}
+	}()
 	poolFds := discoverPools()
+	defer func() {
+		for _, pf := range poolFds {
+			syscall.Close(pf.fd)
+		}
+	}()
 	cpuSt := newCpuState()
+	if cpuSt != nil {
+		defer syscall.Close(cpuSt.fd)
+	}
+
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 
 	// Main loop ticks at the smallest component interval.
 	tick := *psiInterval
@@ -45,6 +64,9 @@ func main() {
 	}
 	psiReadings := make([]psiReading, len(psiFiles))
 	var lastPsi, lastCpu time.Time
+
+	ticker := time.NewTicker(tick)
+	defer ticker.Stop()
 
 	for i := 0; *batchN == 0 || i < *batchN; i++ {
 		now := time.Now()
@@ -82,6 +104,10 @@ func main() {
 		if *batchN > 0 && i == *batchN-1 {
 			break
 		}
-		time.Sleep(tick)
+		select {
+		case <-sig:
+			return
+		case <-ticker.C:
+		}
 	}
 }
