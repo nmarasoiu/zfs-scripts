@@ -2,6 +2,7 @@ package main
 
 import (
 	"log"
+	"sort"
 	"sync/atomic"
 	"time"
 
@@ -29,27 +30,56 @@ func ktimeNow() uint64 {
 }
 
 // cleanStaleEntries iterates start_times, counts entries older than staleAge,
-// and evicts all entries older than evictAge.
+// evicts entries older than evictAge, and under pressure (>80% capacity)
+// also evicts the oldest entries to get back below the threshold.
+// Safe: BPF sys_exit handles missing entries gracefully (silent skip).
 // Returns (total entries, stale count, evicted count).
-func cleanStaleEntries(startTimes, syscallIds *ebpf.Map, staleAge, evictAge time.Duration) (int, int, int) {
+func cleanStaleEntries(startTimes, syscallIds *ebpf.Map, staleAge, evictAge time.Duration, capacity int64) (int, int, int) {
 	now := ktimeNow()
 	staleThresh := now - uint64(staleAge.Nanoseconds())
 	evictThresh := now - uint64(evictAge.Nanoseconds())
 
+	type entry struct {
+		tid     uint32
+		startNs uint64
+	}
+
+	var all []entry
 	var tid uint32
 	var startNs uint64
-	var toDelete []uint32
-	total := 0
 	stale := 0
 
 	iter := startTimes.Iterate()
 	for iter.Next(&tid, &startNs) {
-		total++
+		all = append(all, entry{tid, startNs})
 		if startNs < staleThresh {
 			stale++
 		}
-		if startNs < evictThresh {
-			toDelete = append(toDelete, tid)
+	}
+	total := len(all)
+
+	// Phase 1: evict entries older than evictAge
+	var toDelete []uint32
+	for i := range all {
+		if all[i].startNs < evictThresh {
+			toDelete = append(toDelete, all[i].tid)
+		}
+	}
+
+	// Phase 2: if above 80% capacity, sort by age and evict oldest
+	remaining := total - len(toDelete)
+	pressureLimit := int(float64(capacity) * 0.8)
+	if remaining > pressureLimit {
+		sort.Slice(all, func(i, j int) bool { return all[i].startNs < all[j].startNs })
+		need := remaining - pressureLimit
+		for _, e := range all {
+			if need <= 0 {
+				break
+			}
+			if e.startNs >= evictThresh { // not already marked
+				toDelete = append(toDelete, e.tid)
+				need--
+			}
 		}
 	}
 

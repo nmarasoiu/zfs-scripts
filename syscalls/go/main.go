@@ -259,7 +259,7 @@ func main() {
 			case <-done:
 				return
 			case <-cleanupTicker.C:
-				total, stale, evicted := cleanStaleEntries(objs.StartTimes, objs.SyscallIds, *staleAge, *evictAge)
+				total, stale, evicted := cleanStaleEntries(objs.StartTimes, objs.SyscallIds, *staleAge, *evictAge, mapMaxVal)
 				metrics.mapUsed.Store(int64(total - evicted))
 				metrics.mapStale.Store(int64(stale - evicted))
 				if evicted > 0 {
