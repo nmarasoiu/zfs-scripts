@@ -33,7 +33,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const defaultPercentiles = "50,90,99"
+const (
+	defaultPercentiles      = "50,90,99"             // summary view (no -c)
+	defaultTablePercentiles = "25,50,75,90,99,99.9"  // table view (with -c)
+)
 
 var (
 	version = "dev"
@@ -319,6 +322,20 @@ func run() error {
 		}
 	}
 	focusList := parseFocusList()
+
+	// When -c is given and user didn't explicitly set -percentiles,
+	// use the full table set (matches old table view defaults).
+	if len(focusList) > 0 {
+		percentilesExplicit := false
+		flag.Visit(func(f *flag.Flag) {
+			if f.Name == "percentiles" {
+				percentilesExplicit = true
+			}
+		})
+		if !percentilesExplicit {
+			quantiles, _ = parsePercentiles(defaultTablePercentiles)
+		}
+	}
 
 	// Remove memlock limit for eBPF
 	if err := rlimit.RemoveMemlock(); err != nil {
