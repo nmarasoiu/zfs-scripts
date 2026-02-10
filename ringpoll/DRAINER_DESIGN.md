@@ -1,9 +1,10 @@
-# Future: Centralized Batch Drainer for ringpoll
+# Centralized Batch Drainer for ringpoll
 
-## Status: Design Notes (not yet implemented)
+## Status: Implemented
 
-The current pattern works well: each consumer uses `Poll()` + client-side sleep
-gated on ring fill level. This document captures a potential future abstraction.
+Poller + Drainer live in `drainer.go`. Consumers call `drainer.Run(fn)` instead
+of reimplementing the poll/batch/sleep loop. See below for the original design
+notes that motivated this.
 
 ## Current Pattern (what consumers do today)
 

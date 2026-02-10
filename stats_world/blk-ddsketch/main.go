@@ -292,62 +292,6 @@ type pendingEvent struct {
 	latencyUs float64
 }
 
-// runReader busy-polls the ring buffer, batches events, and flushes to state.
-// Single goroutine — no contention beyond the state mutex at flush boundaries.
-func runReader(rd *ringpoll.Reader, pollSleep time.Duration, maxBatch int, batchTimeout time.Duration, state *State) {
-	var rec ringpoll.Record
-	eventSize := int(unsafe.Sizeof(bpfLatencyEvent{}))
-	pending := make([]pendingEvent, 0, maxBatch)
-	lastFlush := time.Now()
-
-	for !rd.Closed() {
-		for rd.Poll(&rec) {
-			if len(rec.RawSample) < eventSize {
-				continue
-			}
-			event := *(*bpfLatencyEvent)(unsafe.Pointer(&rec.RawSample[0]))
-			devName := lookupDevName(event.Dev)
-			if !isTrackedDevice(devName) {
-				continue
-			}
-			latencyUs := float64(event.LatencyNs) / 1000.0
-			if latencyUs < 1 {
-				latencyUs = 1
-			}
-			pending = append(pending, pendingEvent{event.Dev, latencyUs})
-
-			if len(pending) >= maxBatch {
-				state.RecordBatch(pending)
-				rd.CommitAndSnap()
-				pending = pending[:0]
-				lastFlush = time.Now()
-			}
-		}
-		// Ring empty or producer mid-write — decide whether to sleep
-		if rd.Pending()*20 <= rd.BufSize() {
-			// Ring quiet (< 5% full): flush, commit, sleep
-			if len(pending) > 0 {
-				state.RecordBatch(pending)
-				pending = pending[:0]
-				lastFlush = time.Now()
-			}
-			rd.CommitAndSnap()
-			time.Sleep(pollSleep)
-		} else if len(pending) > 0 && time.Since(lastFlush) >= batchTimeout {
-			// Ring busy but batch timeout reached: flush without sleeping
-			state.RecordBatch(pending)
-			rd.CommitAndSnap()
-			pending = pending[:0]
-			lastFlush = time.Now()
-		}
-	}
-	// flush remainder
-	if len(pending) > 0 {
-		state.RecordBatch(pending)
-		rd.CommitAndSnap()
-	}
-}
-
 // State holds all device stats with mutex protection
 type State struct {
 	mu        sync.Mutex
@@ -708,11 +652,37 @@ func run() error {
 		rd.Close()
 	}()
 
+	poller := ringpoll.NewPoller(rd)
+	drainer := ringpoll.NewDrainer(poller, ringpoll.DrainOpts{
+		MaxBatch:  1024,
+		PollSleep: *pollSleep,
+	})
+
+	eventSize := int(unsafe.Sizeof(bpfLatencyEvent{}))
 	var readerDone sync.WaitGroup
 	readerDone.Add(1)
 	go func() {
 		defer readerDone.Done()
-		runReader(rd, *pollSleep, 1024, 10*time.Millisecond, state)
+		pending := make([]pendingEvent, 0, 1024)
+		drainer.Run(func(batch []ringpoll.Record) {
+			for i := range batch {
+				if len(batch[i].RawSample) < eventSize {
+					continue
+				}
+				event := *(*bpfLatencyEvent)(unsafe.Pointer(&batch[i].RawSample[0]))
+				devName := lookupDevName(event.Dev)
+				if !isTrackedDevice(devName) {
+					continue
+				}
+				latencyUs := float64(event.LatencyNs) / 1000.0
+				if latencyUs < 1 {
+					latencyUs = 1
+				}
+				pending = append(pending, pendingEvent{event.Dev, latencyUs})
+			}
+			state.RecordBatch(pending)
+			pending = pending[:0]
+		})
 	}()
 
 	// Drop counter: read from kernel map periodically by display goroutine

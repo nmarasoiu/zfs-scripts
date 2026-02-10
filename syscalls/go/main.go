@@ -153,82 +153,6 @@ func parsePercentiles(s string) ([]float64, error) {
 	return quantiles, nil
 }
 
-func allClosed(readers []*ringpoll.Reader) bool {
-	for _, rd := range readers {
-		if !rd.Closed() {
-			return false
-		}
-	}
-	return true
-}
-
-func commitAll(readers []*ringpoll.Reader) {
-	for _, rd := range readers {
-		rd.CommitAndSnap()
-	}
-}
-
-// ringsQuiet reports whether all rings are below 5% capacity,
-// meaning it's safe to take a brief sleep between poll rounds.
-func ringsQuiet(readers []*ringpoll.Reader) bool {
-	for _, rd := range readers {
-		if rd.Pending()*20 > rd.BufSize() {
-			return false
-		}
-	}
-	return true
-}
-
-// runReader busy-polls multiple ring buffers in round-robin, batches events,
-// and flushes to state. Single goroutine — no new contention points.
-func runReader(readers []*ringpoll.Reader, pollSleep time.Duration, maxBatch int, batchTimeout time.Duration, state *State) {
-	var rec ringpoll.Record
-	eventSize := int(unsafe.Sizeof(bpfLatencyEvent{}))
-	pending := make([]pendingEvent, 0, maxBatch)
-	lastFlush := time.Now()
-
-	for !allClosed(readers) {
-		for _, rd := range readers {
-			for rd.Poll(&rec) {
-				if len(rec.RawSample) < eventSize {
-					continue
-				}
-				event := *(*bpfLatencyEvent)(unsafe.Pointer(&rec.RawSample[0]))
-				latencyUs := int64(event.LatencyNs / 1000)
-				if latencyUs < 1 {
-					latencyUs = 1
-				}
-				pending = append(pending, pendingEvent{event.Comm, event.SyscallId, latencyUs})
-
-				if len(pending) >= maxBatch {
-					state.RecordBatch(pending)
-					commitAll(readers)
-					pending = pending[:0]
-					lastFlush = time.Now()
-				}
-			}
-		}
-		if ringsQuiet(readers) {
-			if len(pending) > 0 {
-				state.RecordBatch(pending)
-				pending = pending[:0]
-				lastFlush = time.Now()
-			}
-			commitAll(readers)
-			time.Sleep(pollSleep)
-		} else if len(pending) > 0 && time.Since(lastFlush) >= batchTimeout {
-			state.RecordBatch(pending)
-			commitAll(readers)
-			pending = pending[:0]
-			lastFlush = time.Now()
-		}
-	}
-	// flush remainder
-	if len(pending) > 0 {
-		state.RecordBatch(pending)
-		commitAll(readers)
-	}
-}
 
 func snapshotRingStats(readers []*ringpoll.Reader, acc *ringAvg) *ringStats {
 	// For capacity stats (avg/max/cap), use worst-case ring — each ring
@@ -476,11 +400,33 @@ func run() error {
 	defer termCleanup()
 
 	// Reader goroutine: busy-polls ring buffers, batches events, flushes under single Lock
+	poller := ringpoll.NewPoller(readers...)
+	drainer := ringpoll.NewDrainer(poller, ringpoll.DrainOpts{
+		MaxBatch:  *batchSize,
+		PollSleep: *pollSleep,
+	})
+
+	eventSize := int(unsafe.Sizeof(bpfLatencyEvent{}))
 	var readerDone sync.WaitGroup
 	readerDone.Add(1)
 	go func() {
 		defer readerDone.Done()
-		runReader(readers, *pollSleep, *batchSize, *batchInterval, state)
+		pending := make([]pendingEvent, 0, *batchSize)
+		drainer.Run(func(batch []ringpoll.Record) {
+			for i := range batch {
+				if len(batch[i].RawSample) < eventSize {
+					continue
+				}
+				event := *(*bpfLatencyEvent)(unsafe.Pointer(&batch[i].RawSample[0]))
+				latencyUs := int64(event.LatencyNs / 1000)
+				if latencyUs < 1 {
+					latencyUs = 1
+				}
+				pending = append(pending, pendingEvent{event.Comm, event.SyscallId, latencyUs})
+			}
+			state.RecordBatch(pending)
+			pending = pending[:0]
+		})
 	}()
 
 	// Input goroutine for interactive mode
