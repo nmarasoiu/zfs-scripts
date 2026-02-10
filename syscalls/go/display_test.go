@@ -7,6 +7,11 @@ import (
 
 var defaultQuantiles = []float64{0.50, 0.90, 0.99}
 
+// testDisplay creates a minimal Display for testing sort/collect functions.
+func testDisplay(sortColumn string) *Display {
+	return &Display{sortColumn: sortColumn, quantiles: defaultQuantiles}
+}
+
 // --- collectEntries ---
 
 func TestCollectEntries_SortedByRateDescending(t *testing.T) {
@@ -21,7 +26,7 @@ func TestCollectEntries_SortedByRateDescending(t *testing.T) {
 	}
 
 	// sortByRate=true with elapsed=10s: rates are 20/s, 10/s, 5/s
-	entries := collectEntries(procStats, false, "rate", 10.0, defaultQuantiles)
+	entries := testDisplay("rate").collectEntries(procStats, false, 10.0)
 	if len(entries) != 3 {
 		t.Fatalf("len = %d, want 3", len(entries))
 	}
@@ -48,7 +53,7 @@ func TestCollectEntries_SortedByCountDescending(t *testing.T) {
 	}
 
 	// sortByRate=false: sorted by total count
-	entries := collectEntries(procStats, false, "samples", 10.0, defaultQuantiles)
+	entries := testDisplay("samples").collectEntries(procStats, false, 10.0)
 	if len(entries) != 3 {
 		t.Fatalf("len = %d, want 3", len(entries))
 	}
@@ -69,7 +74,7 @@ func TestCollectEntries_TiesBrokenByLabel(t *testing.T) {
 		"a": {0: statsWithCount(10)},
 	}
 
-	entries := collectEntries(procStats, false, "rate", 10.0, defaultQuantiles)
+	entries := testDisplay("rate").collectEntries(procStats, false, 10.0)
 	if len(entries) != 2 {
 		t.Fatalf("len = %d, want 2", len(entries))
 	}
@@ -83,7 +88,7 @@ func TestCollectEntries_SingleProcOmitsPrefix(t *testing.T) {
 		"tor": {0: statsWithCount(10)}, // syscall 0 = "read"
 	}
 
-	entries := collectEntries(procStats, true, "rate", 10.0, defaultQuantiles)
+	entries := testDisplay("rate").collectEntries(procStats, true, 10.0)
 	if len(entries) != 1 {
 		t.Fatalf("len = %d, want 1", len(entries))
 	}
@@ -98,7 +103,7 @@ func TestCollectEntries_MultiProcIncludesPrefix(t *testing.T) {
 		"sshd": {0: statsWithCount(5)},
 	}
 
-	entries := collectEntries(procStats, false, "rate", 10.0, defaultQuantiles)
+	entries := testDisplay("rate").collectEntries(procStats, false, 10.0)
 	for _, e := range entries {
 		if !strings.Contains(e.label, "/") {
 			t.Errorf("label should include proc prefix, got %q", e.label)
@@ -174,7 +179,7 @@ func TestCollectProcessSummaries_AggregatesAcrossSyscalls(t *testing.T) {
 		},
 	}
 
-	summaries := collectProcessSummaries(procStats, 10.0, "rate")
+	summaries := testDisplay("rate").collectProcessSummaries(procStats, 10.0)
 	if len(summaries) != 1 {
 		t.Fatalf("len = %d, want 1", len(summaries))
 	}
@@ -193,7 +198,7 @@ func TestCollectProcessSummaries_SortedByRateDesc(t *testing.T) {
 		"mid":  {0: statsWithCount(50)},
 	}
 
-	summaries := collectProcessSummaries(procStats, 1.0, "rate")
+	summaries := testDisplay("rate").collectProcessSummaries(procStats, 1.0)
 	if len(summaries) != 3 {
 		t.Fatalf("len = %d, want 3", len(summaries))
 	}
@@ -213,7 +218,7 @@ func TestCollectProcessSummaries_ZeroElapsed(t *testing.T) {
 		"p": {0: statsWithCount(10)},
 	}
 
-	summaries := collectProcessSummaries(procStats, 0, "rate")
+	summaries := testDisplay("rate").collectProcessSummaries(procStats, 0)
 	if summaries[0].rate != 0 {
 		t.Errorf("rate = %f, want 0 when elapsed=0", summaries[0].rate)
 	}
@@ -404,7 +409,7 @@ func TestSummaryBarLegend_FilterMode(t *testing.T) {
 func TestRenderFooter_ContainsDropInfo(t *testing.T) {
 	d := &Display{}
 	var buf strings.Builder
-	d.renderFooter(&buf, 10*1e9, 5, 42, nil, nil)
+	d.renderFooter(&buf, 10*1e9, 5, frameMetrics{drops: 42})
 	s := buf.String()
 	if !strings.Contains(s, "42") {
 		t.Errorf("footer should contain drop count 42, got %q", s)
@@ -421,7 +426,7 @@ func TestRenderFooter_WithRingStats(t *testing.T) {
 		capacityStats: capacityStats{avg: 4096, max: 8192, cap: 8 * 1024 * 1024},
 		pending:       1024,
 	}
-	d.renderFooter(&buf, 10*1e9, 3, 0, nil, rs)
+	d.renderFooter(&buf, 10*1e9, 3, frameMetrics{ringStats: rs})
 	s := buf.String()
 	if !strings.Contains(s, "Ring") {
 		t.Errorf("footer should contain Ring info, got %q", s)
@@ -438,7 +443,7 @@ func TestFormatSummaryRow_NonZero(t *testing.T) {
 		ss.Record(i)
 	}
 	d := &Display{quantiles: testQuantiles}
-	row := d.formatSummaryRow("tor/read", ss.stats, sketchPercentiles(ss.sketch, testQuantiles), 10.0)
+	row := d.formatSummaryRow("tor/read", ss.stats, d.sketchPercentiles(ss.sketch), 10.0)
 	if !strings.Contains(row, "tor/read") {
 		t.Errorf("row should contain name, got %q", row)
 	}
@@ -450,7 +455,7 @@ func TestFormatSummaryRow_NonZero(t *testing.T) {
 func TestFormatSummaryRow_Zero(t *testing.T) {
 	ss := newSyscallStats(0.25)
 	d := &Display{quantiles: testQuantiles}
-	row := d.formatSummaryRow("empty", ss.stats, sketchPercentiles(ss.sketch, testQuantiles), 10.0)
+	row := d.formatSummaryRow("empty", ss.stats, d.sketchPercentiles(ss.sketch), 10.0)
 	if !strings.Contains(row, "-") {
 		t.Errorf("zero row should contain dashes, got %q", row)
 	}
@@ -463,8 +468,9 @@ func TestRenderDetailRow_NonZero(t *testing.T) {
 	for i := int64(1); i <= 50; i++ {
 		ss.Record(i)
 	}
+	d := &Display{quantiles: testQuantiles}
 	var buf strings.Builder
-	renderDetailRow(&buf, "tor/read        ", ss.stats, sketchPercentiles(ss.sketch, testQuantiles))
+	renderDetailRow(&buf, "tor/read        ", ss.stats, d.sketchPercentiles(ss.sketch))
 	s := buf.String()
 	if !strings.Contains(s, "tor/read") {
 		t.Errorf("row should contain name, got %q", s)
@@ -473,8 +479,9 @@ func TestRenderDetailRow_NonZero(t *testing.T) {
 
 func TestRenderDetailRow_Zero(t *testing.T) {
 	ss := newSyscallStats(0.25)
+	d := &Display{quantiles: testQuantiles}
 	var buf strings.Builder
-	renderDetailRow(&buf, "empty           ", ss.stats, sketchPercentiles(ss.sketch, testQuantiles))
+	renderDetailRow(&buf, "empty           ", ss.stats, d.sketchPercentiles(ss.sketch))
 	s := buf.String()
 	if !strings.Contains(s, "-") {
 		t.Errorf("zero row should contain dashes, got %q", s)
@@ -517,7 +524,7 @@ func TestAvailableSortColumns_TableView(t *testing.T) {
 
 func TestEntrySortVal_Rate(t *testing.T) {
 	ss := statsWithCount(100)
-	val := entrySortVal(ss, "rate", 10.0, defaultQuantiles)
+	val := testDisplay("rate").entrySortVal(ss, 10.0)
 	if val != 10.0 {
 		t.Errorf("rate sortVal = %f, want 10.0", val)
 	}
@@ -525,7 +532,7 @@ func TestEntrySortVal_Rate(t *testing.T) {
 
 func TestEntrySortVal_Samples(t *testing.T) {
 	ss := statsWithCount(100)
-	val := entrySortVal(ss, "samples", 10.0, defaultQuantiles)
+	val := testDisplay("samples").entrySortVal(ss, 10.0)
 	if val != 100.0 {
 		t.Errorf("samples sortVal = %f, want 100.0", val)
 	}
@@ -533,7 +540,7 @@ func TestEntrySortVal_Samples(t *testing.T) {
 
 func TestEntrySortVal_Avg(t *testing.T) {
 	ss := statsWithCount(100)
-	val := entrySortVal(ss, "avg", 10.0, defaultQuantiles)
+	val := testDisplay("avg").entrySortVal(ss, 10.0)
 	expected := float64(ss.stats.Avg())
 	if val != expected {
 		t.Errorf("avg sortVal = %f, want %f", val, expected)
@@ -542,8 +549,8 @@ func TestEntrySortVal_Avg(t *testing.T) {
 
 func TestEntrySortVal_MinMax(t *testing.T) {
 	ss := statsWithCount(100)
-	minVal := entrySortVal(ss, "min", 10.0, defaultQuantiles)
-	maxVal := entrySortVal(ss, "max", 10.0, defaultQuantiles)
+	minVal := testDisplay("min").entrySortVal(ss, 10.0)
+	maxVal := testDisplay("max").entrySortVal(ss, 10.0)
 	if minVal != float64(ss.stats.min) {
 		t.Errorf("min sortVal = %f, want %f", minVal, float64(ss.stats.min))
 	}
@@ -554,7 +561,7 @@ func TestEntrySortVal_MinMax(t *testing.T) {
 
 func TestEntrySortVal_Percentile(t *testing.T) {
 	ss := statsWithCount(100)
-	val := entrySortVal(ss, "p99", 10.0, defaultQuantiles)
+	val := testDisplay("p99").entrySortVal(ss, 10.0)
 	if val <= 0 {
 		t.Errorf("p99 sortVal = %f, want > 0", val)
 	}
@@ -578,7 +585,7 @@ func TestCollectEntries_SortedByPercentile(t *testing.T) {
 		"b": {0: ssHigh},
 	}
 
-	entries := collectEntries(procStats, false, "p99", 10.0, defaultQuantiles)
+	entries := testDisplay("p99").collectEntries(procStats, false, 10.0)
 	if len(entries) != 2 {
 		t.Fatalf("len = %d, want 2", len(entries))
 	}

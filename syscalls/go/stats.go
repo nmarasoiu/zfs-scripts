@@ -71,17 +71,6 @@ func (ss *syscallStats) Record(latencyUs int64) {
 	ss.stats.Record(latencyUs)
 }
 
-// sketchPercentiles extracts the given quantiles from a DDSketch.
-// quantiles are in 0.0–1.0 form (e.g. 0.50, 0.99). Returns values in µs.
-func sketchPercentiles(sketch *ddsketch.DDSketch, quantiles []float64) []int64 {
-	result := make([]int64, len(quantiles))
-	for i, q := range quantiles {
-		v, _ := sketch.GetValueAtQuantile(q)
-		result[i] = int64(v)
-	}
-	return result
-}
-
 // sketchKey is the flat composite key for the LRU sketch cache.
 // Uses [16]int8 (value type, no pointers) so the hot path avoids heap allocations.
 type sketchKey struct {
@@ -146,12 +135,12 @@ func (s *State) Read(fn func(StateView)) {
 			continue
 		}
 		name := commToString(key.comm)
-		fm := procStats[name]
-		if fm == nil {
-			fm = make(map[uint32]*syscallStats)
-			procStats[name] = fm
+		syscalls := procStats[name]
+		if syscalls == nil {
+			syscalls = make(map[uint32]*syscallStats)
+			procStats[name] = syscalls
 		}
-		fm[key.syscall] = val
+		syscalls[key.syscall] = val
 	}
 
 	fn(StateView{
@@ -173,17 +162,17 @@ type pendingEvent struct {
 func (s *State) RecordBatch(batch []pendingEvent) {
 	s.mu.Lock()
 	for i := range batch {
-		e := &batch[i]
-		key := sketchKey{e.comm, e.syscallID}
+		ev := &batch[i]
+		key := sketchKey{ev.comm, ev.syscallID}
 
 		ss, ok := s.sketches.Get(key) // Get promotes to most-recent
 		if !ok {
 			ss = newSyscallStats(s.alpha)
 			s.sketches.Add(key, ss) // evicts LRU if over cap
 		}
-		ss.Record(e.latencyUs)
-		s.globalSketch.Add(float64(e.latencyUs))
-		s.globalStats.Record(e.latencyUs)
+		ss.Record(ev.latencyUs)
+		s.globalSketch.Add(float64(ev.latencyUs))
+		s.globalStats.Record(ev.latencyUs)
 	}
 	s.mu.Unlock()
 }

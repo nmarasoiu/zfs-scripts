@@ -5,6 +5,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/DataDog/sketches-go/ddsketch"
 )
 
 // --- Display data transforms (turn State into renderable structures) ---
@@ -22,8 +24,8 @@ type tableEntry struct {
 }
 
 // entrySortVal extracts the sort value for a given column from a syscallStats entry.
-func entrySortVal(ss *syscallStats, col string, elapsedSecs float64, quantiles []float64) float64 {
-	switch col {
+func (d *Display) entrySortVal(ss *syscallStats, elapsedSecs float64) float64 {
+	switch d.sortColumn {
 	case "min":
 		return float64(ss.stats.min)
 	case "avg":
@@ -39,8 +41,8 @@ func entrySortVal(ss *syscallStats, col string, elapsedSecs float64, quantiles [
 		return 0
 	default:
 		// percentile column: match against quantile headers
-		for _, q := range quantiles {
-			if col == quantileHeader(q) {
+		for _, q := range d.quantiles {
+			if d.sortColumn == quantileHeader(q) {
 				v, _ := ss.sketch.GetValueAtQuantile(q)
 				return v
 			}
@@ -51,18 +53,18 @@ func entrySortVal(ss *syscallStats, col string, elapsedSecs float64, quantiles [
 
 // collectEntries builds a sorted list of table entries from per-process stats.
 // When singleProc is true, the proc prefix is omitted from labels.
-// Entries are sorted descending by the given sortColumn.
-func collectEntries(procStats map[string]map[uint32]*syscallStats, singleProc bool, sortColumn string, elapsedSecs float64, quantiles []float64) []tableEntry {
+// Entries are sorted descending by d.sortColumn.
+func (d *Display) collectEntries(procStats map[string]map[uint32]*syscallStats, singleProc bool, elapsedSecs float64) []tableEntry {
 
 	var entries []tableEntry
-	for proc, fm := range procStats {
-		for id, ss := range fm {
+	for proc, syscalls := range procStats {
+		for id, ss := range syscalls {
 			label := syscallName(id)
 			if !singleProc {
 				label = proc + "/" + label
 			}
-			sv := entrySortVal(ss, sortColumn, elapsedSecs, quantiles)
-			entries = append(entries, tableEntry{label, ss, sv})
+			sortVal := d.entrySortVal(ss, elapsedSecs)
+			entries = append(entries, tableEntry{label, ss, sortVal})
 		}
 	}
 
@@ -82,13 +84,13 @@ func collectEntries(procStats map[string]map[uint32]*syscallStats, singleProc bo
 func filterStatsGeneral(procStats map[string]map[uint32]*syscallStats, text string) map[string]map[uint32]*syscallStats {
 	lower := strings.ToLower(text)
 	filtered := make(map[string]map[uint32]*syscallStats)
-	for proc, fm := range procStats {
+	for proc, syscalls := range procStats {
 		if strings.HasPrefix(strings.ToLower(proc), lower) {
-			filtered[proc] = fm
+			filtered[proc] = syscalls
 			continue
 		}
 		matched := make(map[uint32]*syscallStats)
-		for id, ss := range fm {
+		for id, ss := range syscalls {
 			if strings.HasPrefix(syscallName(id), lower) {
 				matched[id] = ss
 			}
@@ -100,14 +102,13 @@ func filterStatsGeneral(procStats map[string]map[uint32]*syscallStats, text stri
 	return filtered
 }
 
-// collectProcessSummaries aggregates per-process totals.
-// When sortByRate is true, summaries are sorted by rate/sec; otherwise by total count.
-func collectProcessSummaries(procStats map[string]map[uint32]*syscallStats, elapsedSecs float64, sortColumn string) []processSummary {
-	sortByRate := sortColumn == "rate"
+// collectProcessSummaries aggregates per-process totals, sorted by d.sortColumn.
+func (d *Display) collectProcessSummaries(procStats map[string]map[uint32]*syscallStats, elapsedSecs float64) []processSummary {
+	sortByRate := d.sortColumn == "rate"
 	summaries := make([]processSummary, 0, len(procStats))
-	for proc, fm := range procStats {
+	for proc, syscalls := range procStats {
 		var total uint64
-		for _, ss := range fm {
+		for _, ss := range syscalls {
 			total += ss.stats.count
 		}
 		rate := float64(0)
@@ -169,6 +170,17 @@ type Display struct {
 // quantileHeader formats a quantile as a column header (e.g. 0.50 → "p50", 0.999 → "p99.9").
 func quantileHeader(q float64) string {
 	return fmt.Sprintf("p%g", q*100)
+}
+
+// sketchPercentiles extracts d.quantiles from a DDSketch.
+// Returns values in µs. Only called at display rate.
+func (d *Display) sketchPercentiles(sketch *ddsketch.DDSketch) []int64 {
+	result := make([]int64, len(d.quantiles))
+	for i, q := range d.quantiles {
+		v, _ := sketch.GetValueAtQuantile(q)
+		result[i] = int64(v)
+	}
+	return result
 }
 
 // availableSortColumns returns the valid sort column names for the current view.
@@ -274,7 +286,7 @@ func (d *Display) summaryBarLegend() string {
 	return ""
 }
 
-func (d *Display) render(state *State, drops uint64, ms *mapStats, rs *ringStats) {
+func (d *Display) render(state *State, frame frameMetrics) {
 	var mainBuf strings.Builder
 	var elapsed time.Duration
 	var nProcs int
@@ -290,7 +302,7 @@ func (d *Display) render(state *State, drops uint64, ms *mapStats, rs *ringStats
 		fmt.Fprintf(&mainBuf, "Syscall Latency Monitor - %s (uptime: %s) -- %d sketches × 2KB ≈ %.1fMB  evict:%s\n",
 			now.Format("15:04:05"), formatDuration(elapsed), v.NSketches, totalMB, formatCount(int64(v.SketchEvictions)))
 
-		d.lastSummaries = collectProcessSummaries(v.ProcStats, elapsed.Seconds(), d.sortColumn)
+		d.lastSummaries = d.collectProcessSummaries(v.ProcStats, elapsed.Seconds())
 
 		viewStats := v.ProcStats
 		if d.mode == modeFilter && d.filterText != "" {
@@ -304,7 +316,7 @@ func (d *Display) render(state *State, drops uint64, ms *mapStats, rs *ringStats
 		if len(d.focusProcesses) > 0 {
 			d.renderTable(&mainBuf, viewStats, elapsed.Seconds())
 		} else {
-			d.renderSummary(&mainBuf, viewStats, elapsed, v.GlobalStats, sketchPercentiles(v.GlobalSketch, d.quantiles))
+			d.renderSummary(&mainBuf, viewStats, elapsed, v.GlobalStats, d.sketchPercentiles(v.GlobalSketch))
 		}
 
 		nProcs = len(v.ProcStats)
@@ -312,15 +324,15 @@ func (d *Display) render(state *State, drops uint64, ms *mapStats, rs *ringStats
 
 	// Build footer
 	var footerBuf strings.Builder
-	d.renderFooter(&footerBuf, elapsed, nProcs, drops, ms, rs)
+	d.renderFooter(&footerBuf, elapsed, nProcs, frame)
 
 	// Compose main content with top-processes panel when terminal is wide enough.
 	// Panel display is independent of interactive mode — --cols enables it in batch too.
 	mainStr := mainBuf.String()
 	footerStr := footerBuf.String()
-	termW, _ := termSize()
+	termWidth, _ := termSize()
 	if d.colsOverride > 0 {
-		termW = d.colsOverride
+		termWidth = d.colsOverride
 	}
 
 	mainLines := strings.Split(strings.TrimRight(mainStr, "\n"), "\n")
@@ -332,7 +344,7 @@ func (d *Display) render(state *State, drops uint64, ms *mapStats, rs *ringStats
 			maxContentWidth = w
 		}
 	}
-	showProcPanel := termW >= maxContentWidth+procPanelOverhead
+	showProcPanel := termWidth >= maxContentWidth+procPanelOverhead
 
 	var output strings.Builder
 
@@ -341,7 +353,7 @@ func (d *Display) render(state *State, drops uint64, ms *mapStats, rs *ringStats
 		procPanelLines := renderProcPanel(d.lastSummaries, filterMatched, procPanelMaxRows)
 
 		// mainColWidth = space allocated to main content (display columns).
-		mainColWidth := termW - procPanelOverhead
+		mainColWidth := termWidth - procPanelOverhead
 
 		for i := 0; i < len(mainLines); i++ {
 			left := mainLines[i]
@@ -454,24 +466,24 @@ func (d *Display) tryAutoSelectSort() {
 	}
 }
 
-func (d *Display) renderFooter(buf *strings.Builder, elapsed time.Duration, nProcs int, drops uint64, ms *mapStats, rs *ringStats) {
+func (d *Display) renderFooter(buf *strings.Builder, elapsed time.Duration, nProcs int, frame frameMetrics) {
 	dropRate := float64(0)
 	if elapsed.Seconds() > 0 {
-		dropRate = float64(drops) / elapsed.Seconds()
+		dropRate = float64(frame.drops) / elapsed.Seconds()
 	}
 	mapInfo := ""
-	if ms != nil {
-		mapInfo = fmt.Sprintf(" | Map %s", ms.formatUsage(formatCount))
+	if frame.mapStats != nil {
+		mapInfo = fmt.Sprintf(" | Map %s", frame.mapStats.formatUsage(formatCount))
 	}
 	ringInfo := ""
-	if rs != nil {
+	if frame.ringStats != nil {
 		ringInfo = fmt.Sprintf(" | Ring %s  cur: %6s  avg1:%-6.0f avg0:%-8.1f last1:%-6s last0:%-8s",
-			rs.formatUsage(formatBytes),
-			formatBytes(int64(rs.pending)),
-			rs.avg1, rs.avg0, formatCount(rs.last1), formatMicro(rs.last0))
+			frame.ringStats.formatUsage(formatBytes),
+			formatBytes(int64(frame.ringStats.pending)),
+			frame.ringStats.avg1, frame.ringStats.avg0, formatCount(frame.ringStats.last1), formatMicro(frame.ringStats.last0))
 	}
 	fmt.Fprintf(buf, "Processes: %d | Drops: %s (%s/s)%s%s\n",
-		nProcs, formatCount(int64(drops)), formatCount(int64(dropRate)), mapInfo, ringInfo)
+		nProcs, formatCount(int64(frame.drops)), formatCount(int64(dropRate)), mapInfo, ringInfo)
 
 	if d.batchMode {
 		buf.WriteString("\n")
@@ -479,7 +491,7 @@ func (d *Display) renderFooter(buf *strings.Builder, elapsed time.Duration, nPro
 }
 
 func (d *Display) renderTable(buf *strings.Builder, procStats map[string]map[uint32]*syscallStats, elapsedSecs float64) {
-	entries := collectEntries(procStats, len(procStats) == 1, d.sortColumn, elapsedSecs, d.quantiles)
+	entries := d.collectEntries(procStats, len(procStats) == 1, elapsedSecs)
 
 	if len(entries) == 0 {
 		return
@@ -521,19 +533,19 @@ func (d *Display) renderTable(buf *strings.Builder, procStats map[string]map[uin
 	for i := 0; i < shown; i++ {
 		e := entries[i]
 		name := fmt.Sprintf(nameFmt, e.label)
-		renderDetailRow(buf, name, e.ss.stats, sketchPercentiles(e.ss.sketch, d.quantiles))
+		renderDetailRow(buf, name, e.ss.stats, d.sketchPercentiles(e.ss.sketch))
 	}
 
 	buf.WriteString("\n")
 }
 
-func renderDetailRow(buf *strings.Builder, name string, st *simpleStats, pcts []int64) {
-	n := st.count
+func renderDetailRow(buf *strings.Builder, name string, stats *simpleStats, percentiles []int64) {
+	n := stats.count
 	if n == 0 {
 		buf.WriteString(name)
 		buf.WriteString(" │")
-		// min + avg + pcts + max = 3 + len(pcts) dashes
-		for i := 0; i < 3+len(pcts); i++ {
+		// min + avg + percentiles + max = 3 + len(percentiles) dashes
+		for i := 0; i < 3+len(percentiles); i++ {
 			fmt.Fprintf(buf, " %8s", "-")
 		}
 		fmt.Fprintf(buf, " │ %9s\n", "0")
@@ -541,48 +553,48 @@ func renderDetailRow(buf *strings.Builder, name string, st *simpleStats, pcts []
 	}
 	buf.WriteString(name)
 	buf.WriteString(" │")
-	fmt.Fprintf(buf, " %s %s", formatLatencyPadded(st.min), formatLatencyPadded(st.Avg()))
-	for _, p := range pcts {
-		fmt.Fprintf(buf, " %s", formatLatencyPadded(p))
+	fmt.Fprintf(buf, " %s %s", formatLatencyPadded(stats.min), formatLatencyPadded(stats.Avg()))
+	for _, pct := range percentiles {
+		fmt.Fprintf(buf, " %s", formatLatencyPadded(pct))
 	}
-	fmt.Fprintf(buf, " %s │ %9s\n", formatLatencyPadded(st.max), formatCount(int64(n)))
+	fmt.Fprintf(buf, " %s │ %9s\n", formatLatencyPadded(stats.max), formatCount(int64(n)))
 }
 
-func (d *Display) renderSummary(buf *strings.Builder, procStats map[string]map[uint32]*syscallStats, elapsed time.Duration, globalStats *simpleStats, globalPcts []int64) {
-	entries := collectEntries(procStats, false, d.sortColumn, elapsed.Seconds(), d.quantiles)
+func (d *Display) renderSummary(buf *strings.Builder, procStats map[string]map[uint32]*syscallStats, elapsed time.Duration, globalStats *simpleStats, globalPercentiles []int64) {
+	entries := d.collectEntries(procStats, false, elapsed.Seconds())
 
 	totalSecs := elapsed.Seconds()
-	nPerCol := d.topN // rows per column
-	if nPerCol <= 0 {
-		nPerCol = (len(entries) + 1) / 2
+	rowsPerCol := d.topN // rows per column
+	if rowsPerCol <= 0 {
+		rowsPerCol = (len(entries) + 1) / 2
 	}
-	totalShown := nPerCol * 2
+	totalShown := rowsPerCol * 2
 	if totalShown > len(entries) {
 		totalShown = len(entries)
 	}
 
-	slw := summaryLineWidth(len(d.quantiles))
-	dualWidth := slw + 3 + slw
+	colWidth := summaryLineWidth(len(d.quantiles))
+	dualWidth := colWidth + 3 + colWidth
 
 	// Column headers: LIFETIME │ avg [pcts...] max │ samples rate
-	var hdr strings.Builder
-	fmt.Fprintf(&hdr, "%-28s │", "LIFETIME")
-	fmt.Fprintf(&hdr, " %s", d.sortIndicator("avg", 8))
+	var header strings.Builder
+	fmt.Fprintf(&header, "%-28s │", "LIFETIME")
+	fmt.Fprintf(&header, " %s", d.sortIndicator("avg", 8))
 	for _, q := range d.quantiles {
-		fmt.Fprintf(&hdr, " %s", d.sortIndicator(quantileHeader(q), 8))
+		fmt.Fprintf(&header, " %s", d.sortIndicator(quantileHeader(q), 8))
 	}
-	fmt.Fprintf(&hdr, " %s │ %s %s", d.sortIndicator("max", 8), d.sortIndicator("samples", 9), d.sortIndicator("rate", 9))
-	hdrStr := hdr.String()
-	fmt.Fprintf(buf, "%s │ %s\n", hdrStr, hdrStr)
+	fmt.Fprintf(&header, " %s │ %s %s", d.sortIndicator("max", 8), d.sortIndicator("samples", 9), d.sortIndicator("rate", 9))
+	headerStr := header.String()
+	fmt.Fprintf(buf, "%s │ %s\n", headerStr, headerStr)
 	buf.WriteString(strings.Repeat("-", dualWidth))
 	buf.WriteString("\n")
 
-	leftEnd := nPerCol
+	leftEnd := rowsPerCol
 	if leftEnd > len(entries) {
 		leftEnd = len(entries)
 	}
-	rightStart := nPerCol
-	rightEnd := nPerCol * 2
+	rightStart := rowsPerCol
+	rightEnd := rowsPerCol * 2
 	if rightEnd > len(entries) {
 		rightEnd = len(entries)
 	}
@@ -602,15 +614,15 @@ func (d *Display) renderSummary(buf *strings.Builder, procStats map[string]map[u
 		var leftStr, rightStr string
 
 		if i < len(leftSlice) {
-			leftStr = d.formatSummaryRow(leftSlice[i].label, leftSlice[i].ss.stats, sketchPercentiles(leftSlice[i].ss.sketch, d.quantiles), totalSecs)
+			leftStr = d.formatSummaryRow(leftSlice[i].label, leftSlice[i].ss.stats, d.sketchPercentiles(leftSlice[i].ss.sketch), totalSecs)
 		} else {
-			leftStr = strings.Repeat(" ", slw)
+			leftStr = strings.Repeat(" ", colWidth)
 		}
 
 		if i < len(rightSlice) {
-			rightStr = d.formatSummaryRow(rightSlice[i].label, rightSlice[i].ss.stats, sketchPercentiles(rightSlice[i].ss.sketch, d.quantiles), totalSecs)
+			rightStr = d.formatSummaryRow(rightSlice[i].label, rightSlice[i].ss.stats, d.sketchPercentiles(rightSlice[i].ss.sketch), totalSecs)
 		} else {
-			rightStr = strings.Repeat(" ", slw)
+			rightStr = strings.Repeat(" ", colWidth)
 		}
 
 		fmt.Fprintf(buf, "%s │ %s\n", leftStr, rightStr)
@@ -620,33 +632,33 @@ func (d *Display) renderSummary(buf *strings.Builder, procStats map[string]map[u
 	title := fmt.Sprintf("Process × Syscall (top %d)", totalShown)
 	legend := d.summaryBarLegend()
 
-	globalRow := d.formatSummaryRow("LIFETIME(all)", globalStats, globalPcts, totalSecs)
-	remaining := dualWidth - slw - 1
+	globalRow := d.formatSummaryRow("LIFETIME(all)", globalStats, globalPercentiles, totalSecs)
+	remaining := dualWidth - colWidth - 1
 	if remaining < 0 {
 		remaining = 0
 	}
 	fmt.Fprintf(buf, "%s %s\n", globalRow, buildSepLine(remaining, title, legend))
 }
 
-func (d *Display) formatSummaryRow(name string, st *simpleStats, pcts []int64, secs float64) string {
-	var b strings.Builder
-	n := st.count
+func (d *Display) formatSummaryRow(name string, stats *simpleStats, percentiles []int64, secs float64) string {
+	var buf strings.Builder
+	n := stats.count
 	if n == 0 {
-		fmt.Fprintf(&b, "%-28s │", name)
-		// avg + pcts + max = 2 + len(pcts) dashes
-		for i := 0; i < 2+len(pcts); i++ {
-			fmt.Fprintf(&b, " %8s", "-")
+		fmt.Fprintf(&buf, "%-28s │", name)
+		// avg + percentiles + max = 2 + len(percentiles) dashes
+		for i := 0; i < 2+len(percentiles); i++ {
+			fmt.Fprintf(&buf, " %8s", "-")
 		}
-		fmt.Fprintf(&b, " │ %9s %9s", "0", "-")
-		return b.String()
+		fmt.Fprintf(&buf, " │ %9s %9s", "0", "-")
+		return buf.String()
 	}
-	fmt.Fprintf(&b, "%-28s │", name)
-	fmt.Fprintf(&b, " %s", formatLatencyPadded(st.Avg()))
-	for _, p := range pcts {
-		fmt.Fprintf(&b, " %s", formatLatencyPadded(p))
+	fmt.Fprintf(&buf, "%-28s │", name)
+	fmt.Fprintf(&buf, " %s", formatLatencyPadded(stats.Avg()))
+	for _, pct := range percentiles {
+		fmt.Fprintf(&buf, " %s", formatLatencyPadded(pct))
 	}
-	fmt.Fprintf(&b, " %s │ %9s %9s", formatLatencyPadded(st.max), formatCount(int64(n)), formatRate(n, secs))
-	return b.String()
+	fmt.Fprintf(&buf, " %s │ %9s %9s", formatLatencyPadded(stats.max), formatCount(int64(n)), formatRate(n, secs))
+	return buf.String()
 }
 
 // renderProcPanel builds the right-side top-processes panel lines.
@@ -659,20 +671,20 @@ func renderProcPanel(summaries []processSummary, matchedProcs map[string]bool, m
 	lines = append(lines, strings.Repeat("─", procPanelWidth))
 
 	n := 0
-	for _, ps := range summaries {
-		if matchedProcs != nil && !matchedProcs[ps.name] {
+	for _, summary := range summaries {
+		if matchedProcs != nil && !matchedProcs[summary.name] {
 			continue
 		}
 		if maxRows > 0 && n >= maxRows {
 			break
 		}
 		rateStr := "-"
-		if ps.rate >= 1 {
-			rateStr = formatCount(int64(ps.rate)) + "/s"
-		} else if ps.rate > 0 {
-			rateStr = fmt.Sprintf("%.1f/s", ps.rate)
+		if summary.rate >= 1 {
+			rateStr = formatCount(int64(summary.rate)) + "/s"
+		} else if summary.rate > 0 {
+			rateStr = fmt.Sprintf("%.1f/s", summary.rate)
 		}
-		line := fmt.Sprintf(" %-15s %8s %7s", padOrTrunc(ps.name, 15), rateStr, formatCount(int64(ps.count)))
+		line := fmt.Sprintf(" %-15s %8s %7s", padOrTrunc(summary.name, 15), rateStr, formatCount(int64(summary.count)))
 		lines = append(lines, padOrTrunc(line, procPanelWidth))
 		n++
 	}

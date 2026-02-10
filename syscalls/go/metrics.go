@@ -13,13 +13,13 @@ type capacityStats struct {
 	cap int64
 }
 
-// formatUsage returns "avg: V/C (P%)  max: V/C (P%)" using fmtVal for values.
-func (cs capacityStats) formatUsage(fmtVal func(int64) string) string {
+// formatUsage returns "avg: V/C (P%)  max: V/C (P%)" using formatVal for values.
+func (cs capacityStats) formatUsage(formatVal func(int64) string) string {
 	avgPct := float64(cs.avg) / float64(cs.cap) * 100
 	maxPct := float64(cs.max) / float64(cs.cap) * 100
 	return fmt.Sprintf("avg: %6s/%s (%4.1f%%)  max: %6s/%s (%4.1f%%)",
-		fmtVal(cs.avg), fmtVal(cs.cap), avgPct,
-		fmtVal(cs.max), fmtVal(cs.cap), maxPct)
+		formatVal(cs.avg), formatVal(cs.cap), avgPct,
+		formatVal(cs.max), formatVal(cs.cap), maxPct)
 }
 
 // runtimeMetrics groups atomic counters shared between goroutines.
@@ -63,6 +63,14 @@ type ringStats struct {
 	avg0    float64
 	last1   int64
 	last0   time.Duration
+}
+
+// frameMetrics bundles the per-frame runtime metrics passed to render.
+// Passed by value (24 bytes, no heap escape).
+type frameMetrics struct {
+	drops     uint64
+	mapStats  *mapStats
+	ringStats *ringStats
 }
 
 // ringAvg accumulates ring pending samples across display ticks

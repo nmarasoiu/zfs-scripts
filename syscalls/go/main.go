@@ -170,10 +170,10 @@ func commitAll(readers []*ringpoll.Reader) {
 
 // runReader busy-polls multiple ring buffers in round-robin, batches events,
 // and flushes to state. Single goroutine — no new contention points.
-func runReader(readers []*ringpoll.Reader, pollSleep time.Duration, batchSz int, batchIntv time.Duration, state *State) {
+func runReader(readers []*ringpoll.Reader, pollSleep time.Duration, maxBatch int, batchTimeout time.Duration, state *State) {
 	var rec ringpoll.Record
 	eventSize := int(unsafe.Sizeof(bpfLatencyEvent{}))
-	pending := make([]pendingEvent, 0, batchSz)
+	pending := make([]pendingEvent, 0, maxBatch)
 	lastFlush := time.Now()
 
 	for !allClosed(readers) {
@@ -191,7 +191,7 @@ func runReader(readers []*ringpoll.Reader, pollSleep time.Duration, batchSz int,
 				pending = append(pending, pendingEvent{event.Comm, event.SyscallId, latencyUs})
 				gotAny = true
 
-				if len(pending) >= batchSz {
+				if len(pending) >= maxBatch {
 					state.RecordBatch(pending)
 					commitAll(readers)
 					pending = pending[:0]
@@ -202,7 +202,7 @@ func runReader(readers []*ringpoll.Reader, pollSleep time.Duration, batchSz int,
 		if !gotAny {
 			commitAll(readers)
 			time.Sleep(pollSleep)
-		} else if time.Since(lastFlush) >= batchIntv {
+		} else if time.Since(lastFlush) >= batchTimeout {
 			state.RecordBatch(pending)
 			commitAll(readers)
 			pending = pending[:0]
@@ -216,7 +216,7 @@ func runReader(readers []*ringpoll.Reader, pollSleep time.Duration, batchSz int,
 	}
 }
 
-func snapshotRingStats(readers []*ringpoll.Reader, ra *ringAvg) *ringStats {
+func snapshotRingStats(readers []*ringpoll.Reader, acc *ringAvg) *ringStats {
 	// For capacity stats (avg/max/cap), use worst-case ring — each ring
 	// drops independently, so the most-filled ring is what matters.
 	var worstPending int
@@ -226,9 +226,9 @@ func snapshotRingStats(readers []*ringpoll.Reader, ra *ringAvg) *ringStats {
 	var latestEmptyNano int64
 
 	for _, rd := range readers {
-		p := rd.Pending()
-		if p > worstPending {
-			worstPending = p
+		pending := rd.Pending()
+		if pending > worstPending {
+			worstPending = pending
 		}
 		perRingCap = int64(rd.BufSize()) // all rings same size
 		snap := rd.Snapshot()
@@ -246,7 +246,7 @@ func snapshotRingStats(readers []*ringpoll.Reader, ra *ringAvg) *ringStats {
 		}
 	}
 
-	ra.add(worstPending)
+	acc.add(worstPending)
 
 	var avg1, avg0 float64
 	if totalNonEmpty > 0 {
@@ -262,7 +262,7 @@ func snapshotRingStats(readers []*ringpoll.Reader, ra *ringAvg) *ringStats {
 
 	return &ringStats{
 		capacityStats: capacityStats{
-			avg: ra.avg(),
+			avg: acc.avg(),
 			max: worstMaxPending,
 			cap: perRingCap,
 		},
@@ -498,14 +498,18 @@ func run() error {
 	displayTicker := time.NewTicker(*displayRefreshInterval)
 	go func() {
 		defer displayTicker.Stop()
-		var ra ringAvg
+		var ringAcc ringAvg
 		for {
 			select {
 			case <-done:
 				return
 			case <-displayTicker.C:
 				readDropCount(objs.DropCount, &metrics.drops)
-				display.render(state, metrics.drops.Load(), snapshotMapStats(metrics, mapCap), snapshotRingStats(readers, &ra))
+				display.render(state, frameMetrics{
+					drops:     metrics.drops.Load(),
+					mapStats:  snapshotMapStats(metrics, mapCap),
+					ringStats: snapshotRingStats(readers, &ringAcc),
+				})
 			case ev := <-keyCh:
 				if display.handleKey(ev) {
 					// 'q' pressed — trigger shutdown via signal
@@ -513,7 +517,11 @@ func run() error {
 					return
 				}
 				readDropCount(objs.DropCount, &metrics.drops)
-				display.render(state, metrics.drops.Load(), snapshotMapStats(metrics, mapCap), snapshotRingStats(readers, &ra))
+				display.render(state, frameMetrics{
+					drops:     metrics.drops.Load(),
+					mapStats:  snapshotMapStats(metrics, mapCap),
+					ringStats: snapshotRingStats(readers, &ringAcc),
+				})
 			}
 		}
 	}()
@@ -530,6 +538,10 @@ func run() error {
 	readerDone.Wait()
 
 	readDropCount(objs.DropCount, &metrics.drops)
-	display.render(state, metrics.drops.Load(), snapshotMapStats(metrics, mapCap), snapshotRingStats(readers, &ringAvg{}))
+	display.render(state, frameMetrics{
+		drops:     metrics.drops.Load(),
+		mapStats:  snapshotMapStats(metrics, mapCap),
+		ringStats: snapshotRingStats(readers, &ringAvg{}),
+	})
 	return nil
 }
