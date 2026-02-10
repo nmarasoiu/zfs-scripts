@@ -153,51 +153,48 @@ func parsePercentiles(s string) ([]float64, error) {
 }
 
 
-// runReader busy-polls multiple ring buffers in round-robin, batches events,
+// runReader busy-polls ring buffers via Group round-robin, batches events,
 // and flushes to state. Single goroutine — no new contention points.
-func runReader(readers []*ringpoll.Reader, pollSleep time.Duration, maxBatch int, state *State) {
+func runReader(rings *ringpoll.Group, pollSleep time.Duration, maxBatch int, state *State) {
 	var rec ringpoll.Record
 	eventSize := int(unsafe.Sizeof(bpfLatencyEvent{}))
 	pending := make([]pendingEvent, 0, maxBatch)
 
-	for !ringpoll.AllClosed(readers) {
-		for _, rd := range readers {
-			for rd.Poll(&rec) {
-				if len(rec.RawSample) < eventSize {
-					continue
-				}
-				event := *(*bpfLatencyEvent)(unsafe.Pointer(&rec.RawSample[0]))
-				latencyUs := int64(event.LatencyNs / 1000)
-				if latencyUs < 1 {
-					latencyUs = 1
-				}
-				pending = append(pending, pendingEvent{event.Comm, event.SyscallId, latencyUs})
+	for !rings.Closed() {
+		for rings.Poll(&rec) {
+			if len(rec.RawSample) < eventSize {
+				continue
+			}
+			event := *(*bpfLatencyEvent)(unsafe.Pointer(&rec.RawSample[0]))
+			latencyUs := int64(event.LatencyNs / 1000)
+			if latencyUs < 1 {
+				latencyUs = 1
+			}
+			pending = append(pending, pendingEvent{event.Comm, event.SyscallId, latencyUs})
 
-				if len(pending) >= maxBatch {
-					state.RecordBatch(pending)
-					ringpoll.CommitAll(readers)
-					pending = pending[:0]
-				}
+			if len(pending) >= maxBatch {
+				state.RecordBatch(pending)
+				rings.Commit()
+				pending = pending[:0]
 			}
 		}
 		if len(pending) > 0 {
 			state.RecordBatch(pending)
 			pending = pending[:0]
 		}
-		ringpoll.CommitAll(readers)
-		if ringpoll.RingsQuiet(readers) {
+		rings.Commit()
+		if rings.Quiet() {
 			time.Sleep(pollSleep)
 		}
 	}
-	// flush remainder
 	if len(pending) > 0 {
 		state.RecordBatch(pending)
-		ringpoll.CommitAll(readers)
+		rings.Commit()
 	}
 }
 
-func snapshotRingStats(readers []*ringpoll.Reader, acc *ringAvg) *ringStats {
-	g := ringpoll.SnapshotGroup(readers)
+func snapshotRingStats(rings *ringpoll.Group, acc *ringAvg) *ringStats {
+	g := rings.Snapshot()
 	acc.add(g.Pending)
 
 	var avg1, avg0 float64
@@ -344,23 +341,11 @@ func run() error {
 
 	// Open per-CPU ring buffers (busy-poll readers — no epoll)
 	ringMaps := []*ebpf.Map{objs.Events0, objs.Events1, objs.Events2, objs.Events3}
-	readers := make([]*ringpoll.Reader, len(ringMaps))
-	for i, m := range ringMaps {
-		rd, err := ringpoll.NewReader(m)
-		if err != nil {
-			// Clean up already-opened readers
-			for j := 0; j < i; j++ {
-				readers[j].Cleanup()
-			}
-			return fmt.Errorf("open ring buffer %d: %w", i, err)
-		}
-		readers[i] = rd
+	rings, err := ringpoll.NewGroup(ringMaps)
+	if err != nil {
+		return err
 	}
-	defer func() {
-		for _, rd := range readers {
-			rd.Cleanup()
-		}
-	}()
+	defer rings.Cleanup()
 
 	state := newState(*maxSketches, *alphaFlag)
 	mapCap := int64(objs.StartTimes.MaxEntries())
@@ -403,9 +388,7 @@ func run() error {
 		signal.Stop(sig) // restore default handler so second Ctrl+C force-kills
 		termCleanup()
 		close(done)
-		for _, rd := range readers {
-			rd.Close()
-		}
+		rings.Close()
 	}()
 	defer termCleanup()
 
@@ -414,7 +397,7 @@ func run() error {
 	readerDone.Add(1)
 	go func() {
 		defer readerDone.Done()
-		runReader(readers, *pollSleep, *batchSize, state)
+		runReader(rings, *pollSleep, *batchSize, state)
 	}()
 
 	// Input goroutine for interactive mode
@@ -456,7 +439,7 @@ func run() error {
 				display.render(state, frameMetrics{
 					drops:     metrics.drops.Load(),
 					mapStats:  snapshotMapStats(metrics, mapCap),
-					ringStats: snapshotRingStats(readers, &ringAcc),
+					ringStats: snapshotRingStats(rings, &ringAcc),
 				})
 			case ev := <-keyCh:
 				if display.handleKey(ev) {
@@ -468,7 +451,7 @@ func run() error {
 				display.render(state, frameMetrics{
 					drops:     metrics.drops.Load(),
 					mapStats:  snapshotMapStats(metrics, mapCap),
-					ringStats: snapshotRingStats(readers, &ringAcc),
+					ringStats: snapshotRingStats(rings, &ringAcc),
 				})
 			}
 		}
@@ -489,7 +472,7 @@ func run() error {
 	display.render(state, frameMetrics{
 		drops:     metrics.drops.Load(),
 		mapStats:  snapshotMapStats(metrics, mapCap),
-		ringStats: snapshotRingStats(readers, &ringAvg{}),
+		ringStats: snapshotRingStats(rings, &ringAvg{}),
 	})
 	return nil
 }

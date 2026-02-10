@@ -555,51 +555,48 @@ func (d *Display) render(state *State, intervalDur time.Duration, a float64, dro
 }
 
 
-// runReader busy-polls multiple ring buffers in round-robin, batches events,
+// runReader busy-polls ring buffers via Group round-robin, batches events,
 // and flushes to state. Single goroutine — no contention.
-func runReader(readers []*ringpoll.Reader, sleep time.Duration, state *State) {
+func runReader(rings *ringpoll.Group, sleep time.Duration, state *State) {
 	const maxBatch = 1024
 	var rec ringpoll.Record
 	eventSize := int(unsafe.Sizeof(bpfLatencyEvent{}))
 	pending := make([]pendingEvent, 0, maxBatch)
 
-	for !ringpoll.AllClosed(readers) {
-		for _, rd := range readers {
-			for rd.Poll(&rec) {
-				if len(rec.RawSample) < eventSize {
-					continue
-				}
-				event := *(*bpfLatencyEvent)(unsafe.Pointer(&rec.RawSample[0]))
-				devName := lookupDevName(event.Dev)
-				if !isTrackedDevice(devName) {
-					continue
-				}
-				latencyUs := float64(event.LatencyNs) / 1000.0
-				if latencyUs < 1 {
-					latencyUs = 1
-				}
-				pending = append(pending, pendingEvent{event.Dev, latencyUs})
+	for !rings.Closed() {
+		for rings.Poll(&rec) {
+			if len(rec.RawSample) < eventSize {
+				continue
+			}
+			event := *(*bpfLatencyEvent)(unsafe.Pointer(&rec.RawSample[0]))
+			devName := lookupDevName(event.Dev)
+			if !isTrackedDevice(devName) {
+				continue
+			}
+			latencyUs := float64(event.LatencyNs) / 1000.0
+			if latencyUs < 1 {
+				latencyUs = 1
+			}
+			pending = append(pending, pendingEvent{event.Dev, latencyUs})
 
-				if len(pending) >= maxBatch {
-					state.RecordBatch(pending)
-					ringpoll.CommitAll(readers)
-					pending = pending[:0]
-				}
+			if len(pending) >= maxBatch {
+				state.RecordBatch(pending)
+				rings.Commit()
+				pending = pending[:0]
 			}
 		}
 		if len(pending) > 0 {
 			state.RecordBatch(pending)
 			pending = pending[:0]
 		}
-		ringpoll.CommitAll(readers)
-		if ringpoll.RingsQuiet(readers) {
+		rings.Commit()
+		if rings.Quiet() {
 			time.Sleep(sleep)
 		}
 	}
-	// flush remainder (shouldn't happen, but defensive)
 	if len(pending) > 0 {
 		state.RecordBatch(pending)
-		ringpoll.CommitAll(readers)
+		rings.Commit()
 	}
 }
 
@@ -683,22 +680,11 @@ func run() error {
 
 	// Open per-CPU ring buffers (busy-poll readers — no epoll)
 	ringMaps := []*ebpf.Map{objs.Events0, objs.Events1, objs.Events2, objs.Events3}
-	readers := make([]*ringpoll.Reader, len(ringMaps))
-	for i, m := range ringMaps {
-		rd, err := ringpoll.NewReader(m)
-		if err != nil {
-			for j := 0; j < i; j++ {
-				readers[j].Cleanup()
-			}
-			return fmt.Errorf("open ring buffer %d: %w", i, err)
-		}
-		readers[i] = rd
+	rings, err := ringpoll.NewGroup(ringMaps)
+	if err != nil {
+		return err
 	}
-	defer func() {
-		for _, rd := range readers {
-			rd.Cleanup()
-		}
-	}()
+	defer rings.Cleanup()
 
 	state := newState(*alpha)
 	display := &Display{batchMode: *batch}
@@ -712,9 +698,7 @@ func run() error {
 		<-sig
 		signal.Stop(sig) // restore default handler so second Ctrl+C force-kills
 		close(done)
-		for _, rd := range readers {
-			rd.Close()
-		}
+		rings.Close()
 	}()
 
 	// Reader goroutine: busy-polls ring buffers, batches events, flushes under single Lock
@@ -722,7 +706,7 @@ func run() error {
 	readerDone.Add(1)
 	go func() {
 		defer readerDone.Done()
-		runReader(readers, *pollSleep, state)
+		runReader(rings, *pollSleep, state)
 	}()
 
 	// Drop counter: read from kernel map periodically by display goroutine
@@ -738,7 +722,7 @@ func run() error {
 				return
 			case <-displayTicker.C:
 				readDropCount(objs.DropCount, &totalDrops)
-				display.render(state, *interval, *alpha, totalDrops.Load(), ringpoll.SnapshotGroup(readers))
+				display.render(state, *interval, *alpha, totalDrops.Load(), rings.Snapshot())
 			}
 		}
 	}()
@@ -764,7 +748,7 @@ func run() error {
 	readerDone.Wait()
 
 	readDropCount(objs.DropCount, &totalDrops)
-	display.render(state, *interval, *alpha, totalDrops.Load(), ringpoll.SnapshotGroup(readers))
+	display.render(state, *interval, *alpha, totalDrops.Load(), rings.Snapshot())
 	return nil
 }
 

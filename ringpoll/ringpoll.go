@@ -13,19 +13,15 @@
 // Kernel side: pair this with bpf_ringbuf_submit(data, BPF_RB_NO_WAKEUP)
 // to suppress wakeup notifications that would otherwise fire on every submit.
 //
-// Usage (multi-ring drain loop):
+// Usage:
 //
-//	readers := make([]*ringpoll.Reader, 4)
-//	for i, m := range ringMaps {
-//	    readers[i], _ = ringpoll.NewReader(m)
-//	}
+//	rings, _ := ringpoll.NewGroup(ringMaps)
+//	defer rings.Cleanup()
 //	var rec ringpoll.Record
-//	for !allClosed(readers) {
-//	    for _, rd := range readers {
-//	        for rd.Poll(&rec) { /* process rec.RawSample */ }
-//	    }
-//	    commitAll(readers)
-//	    if ringsQuiet(readers) { time.Sleep(3*time.Millisecond) }
+//	for !rings.Closed() {
+//	    for rings.Poll(&rec) { /* process rec.RawSample */ }
+//	    rings.Commit()
+//	    if rings.Quiet() { time.Sleep(3*time.Millisecond) }
 //	}
 package ringpoll
 
@@ -232,8 +228,8 @@ func (r *Reader) CommitAndSnap() {
 	})
 }
 
-// AllClosed reports whether every reader in the slice has been closed.
-func AllClosed(readers []*Reader) bool {
+// allClosed reports whether every reader in the slice has been closed.
+func allClosed(readers []*Reader) bool {
 	for _, rd := range readers {
 		if !rd.Closed() {
 			return false
@@ -242,16 +238,16 @@ func AllClosed(readers []*Reader) bool {
 	return true
 }
 
-// CommitAll calls CommitAndSnap on every reader in the slice.
-func CommitAll(readers []*Reader) {
+// commitAll calls CommitAndSnap on every reader in the slice.
+func commitAll(readers []*Reader) {
 	for _, rd := range readers {
 		rd.CommitAndSnap()
 	}
 }
 
-// RingsQuiet reports whether all rings are below 5% capacity,
+// ringsQuiet reports whether all rings are below 5% capacity,
 // meaning it's safe to take a brief sleep between poll rounds.
-func RingsQuiet(readers []*Reader) bool {
+func ringsQuiet(readers []*Reader) bool {
 	for _, rd := range readers {
 		if rd.Pending()*20 > rd.BufSize() {
 			return false
@@ -272,9 +268,9 @@ type GroupSnapshot struct {
 	LastEmpty  time.Duration // time since most recent empty poll (any ring)
 }
 
-// SnapshotGroup aggregates stats across multiple ring buffer readers.
+// snapshotGroup aggregates stats across multiple ring buffer readers.
 // Capacity metrics use worst-case; counters are summed; timestamps use most recent.
-func SnapshotGroup(readers []*Reader) GroupSnapshot {
+func snapshotGroup(readers []*Reader) GroupSnapshot {
 	var g GroupSnapshot
 	var latestEmptyNano int64
 	for _, rd := range readers {
@@ -301,6 +297,78 @@ func SnapshotGroup(readers []*Reader) GroupSnapshot {
 		g.LastEmpty = time.Since(time.Unix(0, latestEmptyNano))
 	}
 	return g
+}
+
+// Group manages multiple ring buffer readers, providing a single polling
+// interface with round-robin drain across all rings.
+type Group struct {
+	readers []*Reader
+	cur     int // round-robin index
+}
+
+// NewGroup creates a Group of busy-polling readers, one per map.
+// On partial failure, already-opened readers are cleaned up.
+func NewGroup(maps []*ebpf.Map) (*Group, error) {
+	readers := make([]*Reader, len(maps))
+	for i, m := range maps {
+		rd, err := NewReader(m)
+		if err != nil {
+			for j := 0; j < i; j++ {
+				readers[j].Cleanup()
+			}
+			return nil, fmt.Errorf("open ring buffer %d: %w", i, err)
+		}
+		readers[i] = rd
+	}
+	return &Group{readers: readers}, nil
+}
+
+// Poll reads one record from the ring buffers in round-robin order.
+// Returns true if a record was read. Returns false only after a full
+// rotation finds every ring empty, catching events that arrived in
+// earlier rings while later ones were draining.
+func (g *Group) Poll(rec *Record) bool {
+	for i := 0; i < len(g.readers); i++ {
+		if g.readers[g.cur].Poll(rec) {
+			return true
+		}
+		g.cur = (g.cur + 1) % len(g.readers)
+	}
+	return false
+}
+
+// Commit publishes consumer positions and snapshots stats for all readers.
+func (g *Group) Commit() {
+	commitAll(g.readers)
+}
+
+// Quiet reports whether all rings are below 5% capacity.
+func (g *Group) Quiet() bool {
+	return ringsQuiet(g.readers)
+}
+
+// Closed reports whether all readers have been closed.
+func (g *Group) Closed() bool {
+	return allClosed(g.readers)
+}
+
+// Snapshot returns aggregated stats across all ring buffer readers.
+func (g *Group) Snapshot() GroupSnapshot {
+	return snapshotGroup(g.readers)
+}
+
+// Close signals all readers to stop.
+func (g *Group) Close() {
+	for _, rd := range g.readers {
+		rd.Close()
+	}
+}
+
+// Cleanup unmaps shared memory for all readers.
+func (g *Group) Cleanup() {
+	for _, rd := range g.readers {
+		rd.Cleanup()
+	}
 }
 
 // Poll is a non-blocking read from the ring buffer. Returns true if a
