@@ -50,7 +50,7 @@ var (
 	devices     = flag.String("d", "", "comma-separated device filter (e.g., sdc,sdd or 8:32,8:48)")
 	batch       = flag.Bool("batch", false, "batch mode (no screen clearing)")
 	alpha       = flag.Float64("alpha", 0.01, "DDSketch relative accuracy (0.01 = 1%)")
-	pollSleep   = flag.Duration("poll-sleep", 50*time.Microsecond, "ring buffer poll sleep when empty")
+	pollSleep   = flag.Duration("poll-sleep", 3*time.Millisecond, "ring buffer poll sleep when empty")
 	showVersion = flag.Bool("version", false, "print version and exit")
 )
 
@@ -631,7 +631,7 @@ func run() error {
 	defer tpComplete.Close()
 
 	// Open ring buffer (busy-poll reader -- no epoll)
-	rd, err := ringpoll.NewReader(objs.Events, *pollSleep)
+	rd, err := ringpoll.NewReader(objs.Events)
 	if err != nil {
 		return fmt.Errorf("open ring buffer: %w", err)
 	}
@@ -652,9 +652,11 @@ func run() error {
 		rd.Close()
 	}()
 
-	// Reader goroutine: busy-polls ring buffer, batches events, flushes under single Lock
+	// Reader goroutine: busy-polls ring buffer, batches events, flushes under single Lock.
+	// Uses Poll() (non-blocking) + client-side sleep gated on ring fill level,
+	// same pattern as syscalls/go. Only sleeps when ring is below 5% capacity.
 	const flushSize = 1024
-	const flushInterval = 10 * time.Millisecond
+	const batchTimeout = 10 * time.Millisecond
 
 	var readerDone sync.WaitGroup
 	readerDone.Add(1)
@@ -665,31 +667,51 @@ func run() error {
 		pending := make([]pendingEvent, 0, flushSize)
 		lastFlush := time.Now()
 
-		for rd.ReadInto(&rec) {
-			if len(rec.RawSample) < eventSize {
-				continue
-			}
-			event := *(*bpfLatencyEvent)(unsafe.Pointer(&rec.RawSample[0]))
-			devName := lookupDevName(event.Dev)
-			if !isTrackedDevice(devName) {
-				continue
-			}
-			latencyUs := float64(event.LatencyNs) / 1000.0
-			if latencyUs < 1 {
-				latencyUs = 1
-			}
-			pending = append(pending, pendingEvent{event.Dev, latencyUs})
+		for !rd.Closed() {
+			for rd.Poll(&rec) {
+				if len(rec.RawSample) < eventSize {
+					continue
+				}
+				event := *(*bpfLatencyEvent)(unsafe.Pointer(&rec.RawSample[0]))
+				devName := lookupDevName(event.Dev)
+				if !isTrackedDevice(devName) {
+					continue
+				}
+				latencyUs := float64(event.LatencyNs) / 1000.0
+				if latencyUs < 1 {
+					latencyUs = 1
+				}
+				pending = append(pending, pendingEvent{event.Dev, latencyUs})
 
-			if len(pending) >= flushSize || time.Since(lastFlush) >= flushInterval {
+				if len(pending) >= flushSize {
+					state.RecordBatch(pending)
+					rd.CommitAndSnap()
+					pending = pending[:0]
+					lastFlush = time.Now()
+				}
+			}
+			// Ring empty or producer mid-write — decide whether to sleep
+			if rd.Pending()*20 <= rd.BufSize() {
+				// Ring quiet (< 5% full): flush, commit, sleep
+				if len(pending) > 0 {
+					state.RecordBatch(pending)
+					pending = pending[:0]
+					lastFlush = time.Now()
+				}
+				rd.CommitAndSnap()
+				time.Sleep(*pollSleep)
+			} else if len(pending) > 0 && time.Since(lastFlush) >= batchTimeout {
+				// Ring busy but batch timeout reached: flush without sleeping
 				state.RecordBatch(pending)
-				rd.Commit()
+				rd.CommitAndSnap()
 				pending = pending[:0]
 				lastFlush = time.Now()
 			}
 		}
+		// flush remainder
 		if len(pending) > 0 {
 			state.RecordBatch(pending)
-			rd.Commit()
+			rd.CommitAndSnap()
 		}
 	}()
 

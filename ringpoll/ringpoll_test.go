@@ -2,7 +2,6 @@ package ringpoll
 
 import (
 	"testing"
-	"time"
 
 	"github.com/cilium/ebpf"
 )
@@ -20,7 +19,7 @@ func TestNewReader_RejectsNonRingBuf(t *testing.T) {
 	}
 	defer m.Close()
 
-	_, err = NewReader(m, 50*time.Microsecond)
+	_, err = NewReader(m)
 	if err == nil {
 		t.Fatal("expected error for non-RingBuf map, got nil")
 	}
@@ -37,7 +36,7 @@ func TestNewReader_RingBuf(t *testing.T) {
 	}
 	defer m.Close()
 
-	rd, err := NewReader(m, 50*time.Microsecond)
+	rd, err := NewReader(m)
 	if err != nil {
 		t.Fatalf("NewReader: %v", err)
 	}
@@ -73,27 +72,17 @@ func TestClose(t *testing.T) {
 	}
 	defer m.Close()
 
-	rd, err := NewReader(m, 1*time.Millisecond)
+	rd, err := NewReader(m)
 	if err != nil {
 		t.Fatalf("NewReader: %v", err)
 	}
 	defer rd.Cleanup()
 
-	// Close before reading — ReadInto should return false promptly
+	// Close before polling — Poll should return false immediately
 	rd.Close()
 
-	done := make(chan bool, 1)
-	go func() {
-		var rec Record
-		done <- rd.ReadInto(&rec)
-	}()
-
-	select {
-	case got := <-done:
-		if got {
-			t.Error("ReadInto returned true after Close")
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("ReadInto did not return within 2s after Close")
+	var rec Record
+	if rd.Poll(&rec) {
+		t.Error("Poll returned true after Close")
 	}
 }

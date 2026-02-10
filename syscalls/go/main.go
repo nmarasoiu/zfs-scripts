@@ -412,7 +412,7 @@ func run() error {
 	ringMaps := []*ebpf.Map{objs.Events0, objs.Events1, objs.Events2, objs.Events3}
 	readers := make([]*ringpoll.Reader, len(ringMaps))
 	for i, m := range ringMaps {
-		rd, err := ringpoll.NewReader(m, *pollSleep)
+		rd, err := ringpoll.NewReader(m)
 		if err != nil {
 			// Clean up already-opened readers
 			for j := 0; j < i; j++ {
