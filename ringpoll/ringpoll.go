@@ -19,9 +19,10 @@
 //	defer rings.Cleanup()
 //	var rec ringpoll.Record
 //	for !rings.Closed() {
+//	    quiet := rings.MaxFill() < 0.05  // snapshot lag before draining
 //	    for rings.Poll(&rec) { /* process rec.RawSample */ }
 //	    rings.Commit()
-//	    if rings.Quiet() { time.Sleep(3*time.Millisecond) }
+//	    if quiet { time.Sleep(3*time.Millisecond) }
 //	}
 package ringpoll
 
@@ -245,17 +246,6 @@ func commitAll(readers []*Reader) {
 	}
 }
 
-// ringsQuiet reports whether all rings are below 5% capacity,
-// meaning it's safe to take a brief sleep between poll rounds.
-func ringsQuiet(readers []*Reader) bool {
-	for _, rd := range readers {
-		if rd.Pending()*20 > rd.BufSize() {
-			return false
-		}
-	}
-	return true
-}
-
 // GroupSnapshot holds aggregated stats across multiple ring buffer readers.
 type GroupSnapshot struct {
 	Pending    int           // worst-case across rings
@@ -342,9 +332,18 @@ func (g *Group) Commit() {
 	commitAll(g.readers)
 }
 
-// Quiet reports whether all rings are below 5% capacity.
-func (g *Group) Quiet() bool {
-	return ringsQuiet(g.readers)
+// MaxFill returns the maximum fill fraction (0.0–1.0) across all rings.
+// Call before draining to capture pre-drain lag; use the result after
+// draining to decide whether to sleep.
+func (g *Group) MaxFill() float64 {
+	var max float64
+	for _, rd := range g.readers {
+		fill := float64(rd.Pending()) / float64(rd.BufSize())
+		if fill > max {
+			max = fill
+		}
+	}
+	return max
 }
 
 // Closed reports whether all readers have been closed.

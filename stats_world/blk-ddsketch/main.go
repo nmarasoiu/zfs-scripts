@@ -564,6 +564,7 @@ func runReader(rings *ringpoll.Group, sleep time.Duration, state *State) {
 	pending := make([]pendingEvent, 0, maxBatch)
 
 	for !rings.Closed() {
+		quiet := rings.MaxFill() < 0.05
 		for rings.Poll(&rec) {
 			if len(rec.RawSample) < eventSize {
 				continue
@@ -590,7 +591,7 @@ func runReader(rings *ringpoll.Group, sleep time.Duration, state *State) {
 			pending = pending[:0]
 		}
 		rings.Commit()
-		if rings.Quiet() {
+		if quiet {
 			time.Sleep(sleep)
 		}
 	}
