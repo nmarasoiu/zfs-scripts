@@ -51,13 +51,8 @@ func TestNewReader_RingBuf(t *testing.T) {
 	if rd.MaxPending() != 0 {
 		t.Errorf("MaxPending = %d, want 0 on fresh reader", rd.MaxPending())
 	}
-	if rd.LastBatch() != 0 {
-		t.Errorf("LastBatch = %d, want 0 on fresh reader", rd.LastBatch())
-	}
-
-	avg1, avg0, last1, _ := rd.PollStats()
-	if avg1 != 0 || avg0 != 0 || last1 != 0 {
-		t.Errorf("PollStats = (%f, %f, %d), want all zeros on fresh reader", avg1, avg0, last1)
+	if snap := rd.Snapshot(); snap != nil {
+		t.Errorf("Snapshot = %+v, want nil on fresh reader", snap)
 	}
 }
 

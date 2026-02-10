@@ -477,10 +477,10 @@ func (d *Display) renderFooter(buf *strings.Builder, elapsed time.Duration, nPro
 	}
 	ringInfo := ""
 	if frame.ringStats != nil {
-		ringInfo = fmt.Sprintf(" | Ring %s  cur: %6s  avg1:%-6.0f avg0:%-8.1f last1:%-6s last0:%-8s",
+		ringInfo = fmt.Sprintf(" | Ring %s  cur: %6s  avg1:%-6.0f avg0:%-6.1f",
 			frame.ringStats.formatUsage(formatBytes),
 			formatBytes(int64(frame.ringStats.pending)),
-			frame.ringStats.avg1, frame.ringStats.avg0, formatCount(frame.ringStats.last1), formatMicro(frame.ringStats.last0))
+			frame.ringStats.avg1, frame.ringStats.avg0)
 	}
 	fmt.Fprintf(buf, "Processes: %d | Drops: %s (%s/s)%s%s\n",
 		nProcs, formatCount(int64(frame.drops)), formatCount(int64(dropRate)), mapInfo, ringInfo)

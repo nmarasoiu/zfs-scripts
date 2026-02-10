@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"sync/atomic"
-	"time"
 )
 
 // capacityStats captures avg/max occupancy of a bounded resource.
@@ -59,10 +58,8 @@ func snapshotMapStats(metrics *runtimeMetrics, mapCap int64) *mapStats {
 type ringStats struct {
 	capacityStats
 	pending int     // current pending bytes
-	avg1    float64 // poll stats
-	avg0    float64
-	last1   int64
-	last0   time.Duration
+	avg1    float64 // avg batch size (non-empty polls)
+	avg0    float64 // avg batch size (all polls)
 }
 
 // frameMetrics bundles the per-frame runtime metrics passed to render.

@@ -32,7 +32,6 @@ import (
 	"os"
 	"sync/atomic"
 	"syscall"
-	"time"
 	"unsafe"
 
 	"github.com/cilium/ebpf"
@@ -51,15 +50,12 @@ type Record struct {
 
 // PollSnapshot is an atomic point-in-time snapshot of ring poll statistics,
 // published once per ring-empty boundary. A single atomic.Pointer swap
-// replaces 7 separate atomic stores/loads, ensuring consistent reads.
+// replaces separate atomic stores/loads, ensuring consistent reads.
 type PollSnapshot struct {
 	EventSum      int64
 	NonEmptyCount int64
 	PollCount     int64
-	LastNonEmpty  int64         // batch size of most recent non-empty poll
-	LastEmptyNano int64         // UnixNano of most recent empty poll
-	MaxPending    int64         // high-water mark of ring fill (bytes)
-	LastBatch     int64         // events drained in last completed batch
+	MaxPending    int64 // high-water mark of ring fill (bytes)
 }
 
 // Reader reads from a BPF ring buffer by busy-polling the mmap'd
@@ -159,29 +155,6 @@ func (r *Reader) Snapshot() *PollSnapshot {
 	return r.snapshot.Load()
 }
 
-// PollStats returns ring poll statistics for display.
-//   - avg1: average batch size of non-empty polls
-//   - avg0: average batch size of all polls (including empty)
-//   - last1: batch size of most recent non-empty poll
-//   - last0: time since last empty poll
-func (r *Reader) PollStats() (avg1, avg0 float64, last1 int64, last0 time.Duration) {
-	snap := r.snapshot.Load()
-	if snap == nil {
-		return
-	}
-	if snap.NonEmptyCount > 0 {
-		avg1 = float64(snap.EventSum) / float64(snap.NonEmptyCount)
-	}
-	if snap.PollCount > 0 {
-		avg0 = float64(snap.EventSum) / float64(snap.PollCount)
-	}
-	last1 = snap.LastNonEmpty
-	if snap.LastEmptyNano > 0 {
-		last0 = time.Since(time.Unix(0, snap.LastEmptyNano))
-	}
-	return
-}
-
 // MaxPending returns the high-water mark of ring buffer fill in bytes.
 func (r *Reader) MaxPending() int64 {
 	snap := r.snapshot.Load()
@@ -189,15 +162,6 @@ func (r *Reader) MaxPending() int64 {
 		return 0
 	}
 	return snap.MaxPending
-}
-
-// LastBatch returns the number of events drained in the last completed batch.
-func (r *Reader) LastBatch() int64 {
-	snap := r.snapshot.Load()
-	if snap == nil {
-		return 0
-	}
-	return snap.LastBatch
 }
 
 // Commit publishes the current consumer position to the kernel, freeing
@@ -212,7 +176,6 @@ func (r *Reader) Commit() {
 func (r *Reader) CommitAndSnap() {
 	r.Commit()
 	r.pollCount++
-	lastBatch := r.batchCount
 	if r.batchCount > 0 {
 		r.nonEmptyCount++
 		r.eventSum += r.batchCount
@@ -222,10 +185,7 @@ func (r *Reader) CommitAndSnap() {
 		EventSum:      r.eventSum,
 		NonEmptyCount: r.nonEmptyCount,
 		PollCount:     r.pollCount,
-		LastNonEmpty:  lastBatch,
-		LastEmptyNano: time.Now().UnixNano(),
 		MaxPending:    r.maxPending,
-		LastBatch:     lastBatch,
 	})
 }
 
@@ -248,21 +208,18 @@ func commitAll(readers []*Reader) {
 
 // GroupSnapshot holds aggregated stats across multiple ring buffer readers.
 type GroupSnapshot struct {
-	Pending    int           // worst-case across rings
-	MaxPending int64         // worst-case high-water mark
-	Cap        int64         // per-ring capacity (all same size)
-	EventSum   int64         // sum across rings
-	NonEmpty   int64         // sum across rings
-	PollCount  int64         // sum across rings
-	LastBatch  int64         // sum across rings
-	LastEmpty  time.Duration // time since most recent empty poll (any ring)
+	Pending    int   // worst-case across rings
+	MaxPending int64 // worst-case high-water mark
+	Cap        int64 // per-ring capacity (all same size)
+	EventSum   int64 // sum across rings
+	NonEmpty   int64 // sum across rings
+	PollCount  int64 // sum across rings
 }
 
 // snapshotGroup aggregates stats across multiple ring buffer readers.
-// Capacity metrics use worst-case; counters are summed; timestamps use most recent.
+// Capacity metrics use worst-case; counters are summed.
 func snapshotGroup(readers []*Reader) GroupSnapshot {
 	var g GroupSnapshot
-	var latestEmptyNano int64
 	for _, rd := range readers {
 		if pending := rd.Pending(); pending > g.Pending {
 			g.Pending = pending
@@ -278,13 +235,6 @@ func snapshotGroup(readers []*Reader) GroupSnapshot {
 		g.EventSum += snap.EventSum
 		g.NonEmpty += snap.NonEmptyCount
 		g.PollCount += snap.PollCount
-		g.LastBatch += snap.LastNonEmpty
-		if snap.LastEmptyNano > latestEmptyNano {
-			latestEmptyNano = snap.LastEmptyNano
-		}
-	}
-	if latestEmptyNano > 0 {
-		g.LastEmpty = time.Since(time.Unix(0, latestEmptyNano))
 	}
 	return g
 }

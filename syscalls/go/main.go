@@ -48,7 +48,7 @@ var (
 	topProcs    = flag.Int("n", 0, "top N rows to display (0=all)")
 	batch       = flag.Bool("batch", false, "batch mode (no screen clearing)")
 	colsFlag    = flag.Int("cols", 0, "override terminal width (enables panel in batch mode)")
-	pollSleep   = flag.Duration("poll-sleep", 20*time.Millisecond, "ring buffer poll sleep when all rings are empty")
+	pollSleep   = flag.Duration("poll-sleep", 900*time.Millisecond, "ring buffer poll sleep when all rings are empty")
 	maxSketches = flag.Int("max-sketches", 0, "max process×syscall sketches to keep (LRU eviction; 0=auto: 4×n)")
 	sortFlag    = flag.String("sort", "rate", "sort column (e.g. rate, samples, avg, p99, max, min)")
 	showVersion = flag.Bool("version", false, "print version and exit")
@@ -215,8 +215,6 @@ func snapshotRingStats(rings *ringpoll.Group, acc *ringAvg) *ringStats {
 		pending: g.Pending,
 		avg1:    avg1,
 		avg0:    avg0,
-		last1:   g.LastBatch,
-		last0:   g.LastEmpty,
 	}
 }
 

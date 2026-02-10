@@ -117,17 +117,6 @@ func formatBytes(n int64) string {
 	return fmt.Sprintf("%dB", n)
 }
 
-func formatMicro(d time.Duration) string {
-	us := d.Microseconds()
-	if us < 1000 {
-		return fmt.Sprintf("%dus", us)
-	}
-	if us < 1000000 {
-		return fmt.Sprintf("%.1fms", float64(us)/1000)
-	}
-	return fmt.Sprintf("%.1fs", d.Seconds())
-}
-
 func devToMajorMinor(dev uint32) (uint32, uint32) {
 	return dev >> 20, dev & 0xFFFFF
 }
@@ -532,14 +521,10 @@ func (d *Display) render(state *State, intervalDur time.Duration, a float64, dro
 		if ringSnap.PollCount > 0 {
 			avg0 = float64(ringSnap.EventSum) / float64(ringSnap.PollCount)
 		}
-		last0Str := "-"
-		if ringSnap.LastEmpty > 0 {
-			last0Str = formatMicro(ringSnap.LastEmpty)
-		}
-		ringInfo = fmt.Sprintf(" | Ring: %s/%s (%.1f%%) max: %s/%s (%.1f%%) avg1:%.0f avg0:%.1f last1:%d last0:%s",
+		ringInfo = fmt.Sprintf(" | Ring: %s/%s (%.1f%%) max: %s/%s (%.1f%%) avg1:%.0f avg0:%.1f",
 			formatBytes(int64(ringSnap.Pending)), formatBytes(ringSnap.Cap), pctFull,
 			formatBytes(ringSnap.MaxPending), formatBytes(ringSnap.Cap), maxPct,
-			avg1, avg0, ringSnap.LastBatch, last0Str)
+			avg1, avg0)
 	}
 
 	fmt.Fprintf(&buf, "Total: %s samples | Rate: %s/s | Devices: %d | Drops: %s (%s/s) | DDSketch: ~2-10KB/dev (a=%.2f%%)%s\n",
