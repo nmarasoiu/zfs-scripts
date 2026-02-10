@@ -168,6 +168,17 @@ func commitAll(readers []*ringpoll.Reader) {
 	}
 }
 
+// ringsQuiet reports whether all rings are below 5% capacity,
+// meaning it's safe to take a brief sleep between poll rounds.
+func ringsQuiet(readers []*ringpoll.Reader) bool {
+	for _, rd := range readers {
+		if rd.Pending()*20 > rd.BufSize() {
+			return false
+		}
+	}
+	return true
+}
+
 // runReader busy-polls multiple ring buffers in round-robin, batches events,
 // and flushes to state. Single goroutine — no new contention points.
 func runReader(readers []*ringpoll.Reader, pollSleep time.Duration, maxBatch int, batchTimeout time.Duration, state *State) {
@@ -177,7 +188,6 @@ func runReader(readers []*ringpoll.Reader, pollSleep time.Duration, maxBatch int
 	lastFlush := time.Now()
 
 	for !allClosed(readers) {
-		gotAny := false
 		for _, rd := range readers {
 			for rd.Poll(&rec) {
 				if len(rec.RawSample) < eventSize {
@@ -189,7 +199,6 @@ func runReader(readers []*ringpoll.Reader, pollSleep time.Duration, maxBatch int
 					latencyUs = 1
 				}
 				pending = append(pending, pendingEvent{event.Comm, event.SyscallId, latencyUs})
-				gotAny = true
 
 				if len(pending) >= maxBatch {
 					state.RecordBatch(pending)
@@ -199,10 +208,15 @@ func runReader(readers []*ringpoll.Reader, pollSleep time.Duration, maxBatch int
 				}
 			}
 		}
-		if !gotAny {
+		if ringsQuiet(readers) {
+			if len(pending) > 0 {
+				state.RecordBatch(pending)
+				pending = pending[:0]
+				lastFlush = time.Now()
+			}
 			commitAll(readers)
 			time.Sleep(pollSleep)
-		} else if time.Since(lastFlush) >= batchTimeout {
+		} else if len(pending) > 0 && time.Since(lastFlush) >= batchTimeout {
 			state.RecordBatch(pending)
 			commitAll(readers)
 			pending = pending[:0]
