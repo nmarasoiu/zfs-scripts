@@ -13,6 +13,7 @@ blk-latency/blk-latency
 stats_world/blk-ddsketch/blk-ddsketch
 softnet/softnet
 duty_cycle_limiter/dutycycle
+duty_cycle_limiter/duty_cycle_limiter
 zpool_iostat/zpool_iostat
 zpool_iostat/zpool_iostat_wv
 zpool_iostat/main
