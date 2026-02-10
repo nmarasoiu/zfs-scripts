@@ -374,7 +374,7 @@ func TestSummaryBarLegend_FilterMode(t *testing.T) {
 func TestRenderFooter_ContainsDropInfo(t *testing.T) {
 	d := &Display{}
 	var buf strings.Builder
-	d.renderFooter(&buf, 10*1e9, 5, 42, nil)
+	d.renderFooter(&buf, 10*1e9, 5, 42, nil, nil)
 	s := buf.String()
 	if !strings.Contains(s, "42") {
 		t.Errorf("footer should contain drop count 42, got %q", s)
@@ -391,7 +391,7 @@ func TestRenderFooter_WithRingStats(t *testing.T) {
 		capacityStats: capacityStats{avg: 4096, max: 8192, cap: 8 * 1024 * 1024},
 		pending:       1024,
 	}
-	d.renderFooter(&buf, 10*1e9, 3, 0, rs)
+	d.renderFooter(&buf, 10*1e9, 3, 0, nil, rs)
 	s := buf.String()
 	if !strings.Contains(s, "Ring") {
 		t.Errorf("footer should contain Ring info, got %q", s)

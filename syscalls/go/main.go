@@ -195,6 +195,7 @@ func run() error {
 	defer rd.Cleanup()
 
 	state := newState(*maxSketches)
+	mapCap := int64(objs.StartTimes.MaxEntries())
 	interactive := !*batch && isTerminal(int(os.Stdin.Fd())) && isTerminal(int(os.Stdout.Fd()))
 	display := &Display{
 		batchMode:      *batch,
@@ -246,6 +247,25 @@ func run() error {
 		go runInput(keyCh)
 	}
 
+	// Map occupancy goroutine (counts entries in BPF LRU hash every 2s)
+	mapTicker := time.NewTicker(2 * time.Second)
+	go func() {
+		defer mapTicker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-mapTicker.C:
+				used := countMapEntries(objs.StartTimes)
+				metrics.mapSumUsed.Add(used)
+				metrics.mapSamples.Add(1)
+				if cur := metrics.mapMaxUsed.Load(); used > cur {
+					metrics.mapMaxUsed.Store(used)
+				}
+			}
+		}
+	}()
+
 	// Display goroutine (10 FPS)
 	displayTicker := time.NewTicker(displayInterval)
 	go func() {
@@ -257,7 +277,7 @@ func run() error {
 				return
 			case <-displayTicker.C:
 				readDropCount(objs.DropCount, &metrics.drops)
-				display.render(state, metrics.drops.Load(), snapshotRingStats(rd, &ra))
+				display.render(state, metrics.drops.Load(), snapshotMapStats(metrics, mapCap), snapshotRingStats(rd, &ra))
 			case ev := <-keyCh:
 				if display.handleKey(ev) {
 					// 'q' pressed — trigger shutdown via signal
@@ -265,7 +285,7 @@ func run() error {
 					return
 				}
 				readDropCount(objs.DropCount, &metrics.drops)
-				display.render(state, metrics.drops.Load(), snapshotRingStats(rd, &ra))
+				display.render(state, metrics.drops.Load(), snapshotMapStats(metrics, mapCap), snapshotRingStats(rd, &ra))
 			}
 		}
 	}()
@@ -282,6 +302,6 @@ func run() error {
 	readerDone.Wait()
 
 	readDropCount(objs.DropCount, &metrics.drops)
-	display.render(state, metrics.drops.Load(), snapshotRingStats(rd, &ringAvg{}))
+	display.render(state, metrics.drops.Load(), snapshotMapStats(metrics, mapCap), snapshotRingStats(rd, &ringAvg{}))
 	return nil
 }

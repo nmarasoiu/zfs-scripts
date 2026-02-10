@@ -13,18 +13,45 @@ type capacityStats struct {
 	cap int64
 }
 
-// formatUsage returns "avg: V/C (P%)  max: V/C (P%)".
-func (cs capacityStats) formatUsage() string {
+// formatUsage returns "avg: V/C (P%)  max: V/C (P%)" using fmtVal for values.
+func (cs capacityStats) formatUsage(fmtVal func(int64) string) string {
 	avgPct := float64(cs.avg) / float64(cs.cap) * 100
 	maxPct := float64(cs.max) / float64(cs.cap) * 100
 	return fmt.Sprintf("avg: %6s/%s (%4.1f%%)  max: %6s/%s (%4.1f%%)",
-		formatBytes(cs.avg), formatBytes(cs.cap), avgPct,
-		formatBytes(cs.max), formatBytes(cs.cap), maxPct)
+		fmtVal(cs.avg), fmtVal(cs.cap), avgPct,
+		fmtVal(cs.max), fmtVal(cs.cap), maxPct)
 }
 
 // runtimeMetrics groups atomic counters shared between goroutines.
 type runtimeMetrics struct {
 	drops atomic.Uint64
+
+	// Map avg/max tracking (updated each map-count tick)
+	mapMaxUsed atomic.Int64
+	mapSumUsed atomic.Int64
+	mapSamples atomic.Int64
+}
+
+// mapStats is a point-in-time snapshot of BPF LRU hash map occupancy.
+type mapStats struct {
+	capacityStats
+}
+
+func snapshotMapStats(metrics *runtimeMetrics, mapCap int64) *mapStats {
+	if mapCap <= 0 {
+		return nil
+	}
+	var avg int64
+	if n := metrics.mapSamples.Load(); n > 0 {
+		avg = metrics.mapSumUsed.Load() / n
+	}
+	return &mapStats{
+		capacityStats: capacityStats{
+			avg: avg,
+			max: metrics.mapMaxUsed.Load(),
+			cap: mapCap,
+		},
+	}
 }
 
 // ringStats is a point-in-time snapshot of ring buffer metrics,

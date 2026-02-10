@@ -36,7 +36,7 @@ func TestRingAvg_MultipleSamples(t *testing.T) {
 
 func TestCapacityStats_FormatUsage(t *testing.T) {
 	cs := capacityStats{avg: 4096, max: 8192, cap: 8 * 1024 * 1024}
-	s := cs.formatUsage()
+	s := cs.formatUsage(formatBytes)
 	if !strings.Contains(s, "avg:") {
 		t.Errorf("missing 'avg:' in %q", s)
 	}

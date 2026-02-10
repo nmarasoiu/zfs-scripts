@@ -26,3 +26,16 @@ func readDropCount(m *ebpf.Map, dst *atomic.Uint64) {
 		dst.Store(val)
 	}
 }
+
+// countMapEntries iterates a BPF hash/LRU map and returns the number of entries.
+func countMapEntries(m *ebpf.Map) int64 {
+	var count int64
+	var key, nextKey uint32
+	err := m.NextKey(nil, &nextKey)
+	for err == nil {
+		count++
+		key = nextKey
+		err = m.NextKey(key, &nextKey)
+	}
+	return count
+}
