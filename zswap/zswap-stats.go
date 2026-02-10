@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"fmt"
 	"os"
 	"os/signal"
@@ -48,33 +47,85 @@ func (m *minMax) update(v int64) {
 	}
 }
 
-func readInt64(path string) int64 {
-	data, err := os.ReadFile(path)
+// ── long-lived FDs ──────────────────────────────────────────────
+
+type zswapFds struct {
+	storedPages   int
+	poolSize      int
+	writtenBack   int
+	rejectPoor    int
+	rejectReclaim int
+	sameFilled    int
+	maxPoolPct    int
+	meminfo       int
+	writeback     int
+	shrinker      int
+}
+
+func tryOpen(path string) int {
+	fd, err := syscall.Open(path, syscall.O_RDONLY, 0)
 	if err != nil {
+		return -1
+	}
+	return fd
+}
+
+func openZswapFds() zswapFds {
+	return zswapFds{
+		storedPages:   tryOpen(zswapDebug + "/stored_pages"),
+		poolSize:      tryOpen(zswapDebug + "/pool_total_size"),
+		writtenBack:   tryOpen(zswapDebug + "/written_back_pages"),
+		rejectPoor:    tryOpen(zswapDebug + "/reject_compress_poor"),
+		rejectReclaim: tryOpen(zswapDebug + "/reject_reclaim_fail"),
+		sameFilled:    tryOpen(zswapDebug + "/same_filled_pages"),
+		maxPoolPct:    tryOpen(zswapParam + "/max_pool_percent"),
+		meminfo:       tryOpen("/proc/meminfo"),
+		writeback:     tryOpen(zswapParam + "/writeback"),
+		shrinker:      tryOpen(zswapParam + "/shrinker_enabled"),
+	}
+}
+
+func (fds *zswapFds) close() {
+	for _, fd := range []int{fds.storedPages, fds.poolSize, fds.writtenBack,
+		fds.rejectPoor, fds.rejectReclaim, fds.sameFilled, fds.maxPoolPct,
+		fds.meminfo, fds.writeback, fds.shrinker} {
+		if fd >= 0 {
+			syscall.Close(fd)
+		}
+	}
+}
+
+func pread(fd int, buf []byte) int {
+	n, _ := syscall.Pread(fd, buf, 0)
+	return n
+}
+
+// ── reading ─────────────────────────────────────────────────────
+
+func readInt64(fd int, buf []byte) int64 {
+	n := pread(fd, buf)
+	if n <= 0 {
 		return 0
 	}
-	v, _ := strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
+	v, _ := strconv.ParseInt(strings.TrimSpace(string(buf[:n])), 10, 64)
 	return v
 }
 
-func readBool(path string) bool {
-	data, err := os.ReadFile(path)
-	if err != nil {
+func readBool(fd int, buf []byte) bool {
+	n := pread(fd, buf)
+	if n <= 0 {
 		return false
 	}
-	s := strings.TrimSpace(string(data))
+	s := strings.TrimSpace(string(buf[:n]))
 	return s == "Y" || s == "1" || s == "y" || s == "yes"
 }
 
-func getTotalRAM() int64 {
-	f, err := os.Open("/proc/meminfo")
-	if err != nil {
+func getTotalRAM(fd int, buf []byte) int64 {
+	n := pread(fd, buf)
+	if n <= 0 {
 		return 0
 	}
-	defer f.Close()
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := scanner.Text()
+	for _, line := range strings.Split(string(buf[:n]), "\n") {
 		if strings.HasPrefix(line, "MemTotal:") {
 			fields := strings.Fields(line)
 			if len(fields) >= 2 {
@@ -86,20 +137,22 @@ func getTotalRAM() int64 {
 	return 0
 }
 
-func readStats() stats {
+func readStats(fds *zswapFds, buf []byte) stats {
 	return stats{
-		storedPages:      readInt64(zswapDebug + "/stored_pages"),
-		poolSize:         readInt64(zswapDebug + "/pool_total_size"),
-		writtenBack:      readInt64(zswapDebug + "/written_back_pages"),
-		rejectPoor:       readInt64(zswapDebug + "/reject_compress_poor"),
-		rejectReclaim:    readInt64(zswapDebug + "/reject_reclaim_fail"),
-		sameFilled:       readInt64(zswapDebug + "/same_filled_pages"),
-		maxPoolPct:       readInt64(zswapParam + "/max_pool_percent"),
-		totalRAM:         getTotalRAM(),
-		writebackEnabled: readBool(zswapParam + "/writeback"),
-		shrinkerEnabled:  readBool(zswapParam + "/shrinker_enabled"),
+		storedPages:      readInt64(fds.storedPages, buf),
+		poolSize:         readInt64(fds.poolSize, buf),
+		writtenBack:      readInt64(fds.writtenBack, buf),
+		rejectPoor:       readInt64(fds.rejectPoor, buf),
+		rejectReclaim:    readInt64(fds.rejectReclaim, buf),
+		sameFilled:       readInt64(fds.sameFilled, buf),
+		maxPoolPct:       readInt64(fds.maxPoolPct, buf),
+		totalRAM:         getTotalRAM(fds.meminfo, buf),
+		writebackEnabled: readBool(fds.writeback, buf),
+		shrinkerEnabled:  readBool(fds.shrinker, buf),
 	}
 }
+
+// ── formatting ──────────────────────────────────────────────────
 
 func humanBytes(b int64) string {
 	const unit = 1024
@@ -121,8 +174,14 @@ func fmtDelta(d int64) string {
 	return fmt.Sprintf("+%d", d)
 }
 
+// ── main ────────────────────────────────────────────────────────
+
 func main() {
-	initial := readStats()
+	fds := openZswapFds()
+	defer fds.close()
+	buf := make([]byte, 4096)
+
+	initial := readStats(&fds, buf)
 	startTime := time.Now()
 
 	// Track min/max for each counter
@@ -140,7 +199,7 @@ func main() {
 	defer ticker.Stop()
 
 	render := func() {
-		s := readStats()
+		s := readStats(&fds, buf)
 
 		// Update min/max trackers
 		writtenBackMM.update(s.writtenBack)

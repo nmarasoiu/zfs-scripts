@@ -11,7 +11,6 @@
 package main
 
 import (
-	"bufio"
 	"flag"
 	"fmt"
 	"os"
@@ -33,6 +32,20 @@ var (
 	showHelp    = flag.Bool("help", false, "show detailed help")
 	showVersion = flag.Bool("version", false, "print version and exit")
 )
+
+func pread(fd int, buf []byte) int {
+	n, _ := syscall.Pread(fd, buf, 0)
+	return n
+}
+
+func mustOpen(path string) int {
+	fd, err := syscall.Open(path, syscall.O_RDONLY, 0)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "open %s: %v\n", path, err)
+		os.Exit(1)
+	}
+	return fd
+}
 
 // ── data types ──────────────────────────────────────────────────
 
@@ -78,17 +91,14 @@ type snap struct {
 
 // ── parsing ─────────────────────────────────────────────────────
 
-func readSoftnet() []cpuSoftnet {
-	f, err := os.Open("/proc/net/softnet_stat")
-	if err != nil {
+func readSoftnet(fd int, buf []byte) []cpuSoftnet {
+	n := pread(fd, buf)
+	if n <= 0 {
 		return nil
 	}
-	defer f.Close()
-
 	var cpus []cpuSoftnet
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		fields := strings.Fields(scanner.Text())
+	for _, line := range strings.Split(string(buf[:n]), "\n") {
+		fields := strings.Fields(line)
 		if len(fields) < 3 {
 			continue
 		}
@@ -109,27 +119,16 @@ func parseHex(s string) uint64 {
 // parseSnmpTable parses /proc/net/snmp or /proc/net/netstat.
 // These files have pairs of lines: header then values, both with same prefix.
 // Returns map[prefix]map[column_name]value.
-func parseSnmpTable(path string) map[string]map[string]uint64 {
-	f, err := os.Open(path)
-	if err != nil {
+func parseSnmpTable(fd int, buf []byte) map[string]map[string]uint64 {
+	n := pread(fd, buf)
+	if n <= 0 {
 		return nil
 	}
-	defer f.Close()
-
 	result := make(map[string]map[string]uint64)
-	scanner := bufio.NewScanner(f)
-	// need bigger buffer for the long TcpExt lines
-	scanner.Buffer(make([]byte, 0, 64*1024), 64*1024)
-
-	for scanner.Scan() {
-		headerLine := scanner.Text()
-		if !scanner.Scan() {
-			break
-		}
-		valueLine := scanner.Text()
-
-		headers := strings.Fields(headerLine)
-		values := strings.Fields(valueLine)
+	lines := strings.Split(string(buf[:n]), "\n")
+	for i := 0; i+1 < len(lines); i += 2 {
+		headers := strings.Fields(lines[i])
+		values := strings.Fields(lines[i+1])
 		if len(headers) < 2 || len(values) < 2 {
 			continue
 		}
@@ -138,18 +137,18 @@ func parseSnmpTable(path string) map[string]map[string]uint64 {
 		if result[prefix] == nil {
 			result[prefix] = make(map[string]uint64)
 		}
-		for i := 1; i < len(headers) && i < len(values); i++ {
-			v, _ := strconv.ParseUint(values[i], 10, 64)
-			result[prefix][headers[i]] = v
+		for j := 1; j < len(headers) && j < len(values); j++ {
+			v, _ := strconv.ParseUint(values[j], 10, 64)
+			result[prefix][headers[j]] = v
 		}
 	}
 	return result
 }
 
-func readSnap() snap {
-	s := snap{ts: time.Now(), cpus: readSoftnet()}
+func readSnap(softnetFd, snmpFd, netstatFd int, buf []byte) snap {
+	s := snap{ts: time.Now(), cpus: readSoftnet(softnetFd, buf)}
 
-	snmp := parseSnmpTable("/proc/net/snmp")
+	snmp := parseSnmpTable(snmpFd, buf)
 	if tcp, ok := snmp["Tcp"]; ok {
 		s.tcp = tcpCounters{
 			activeOpens:  tcp["ActiveOpens"],
@@ -171,7 +170,7 @@ func readSnap() snap {
 		}
 	}
 
-	netstat := parseSnmpTable("/proc/net/netstat")
+	netstat := parseSnmpTable(netstatFd, buf)
 	if ext, ok := netstat["TcpExt"]; ok {
 		s.ext = tcpExtCounters{
 			listenOverflows: ext["ListenOverflows"],
@@ -404,14 +403,22 @@ func main() {
 		return
 	}
 
+	softnetFd := mustOpen("/proc/net/softnet_stat")
+	defer syscall.Close(softnetFd)
+	snmpFd := mustOpen("/proc/net/snmp")
+	defer syscall.Close(snmpFd)
+	netstatFd := mustOpen("/proc/net/netstat")
+	defer syscall.Close(netstatFd)
+	buf := make([]byte, 64*1024)
+
 	start := time.Now()
-	prev := readSnap()
+	prev := readSnap(softnetFd, snmpFd, netstatFd, buf)
 	time.Sleep(*interval)
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
-	cur := readSnap()
+	cur := readSnap(softnetFd, snmpFd, netstatFd, buf)
 	render(prev, cur, start)
 	prev = cur
 
@@ -421,7 +428,7 @@ func main() {
 	for {
 		select {
 		case <-ticker.C:
-			cur = readSnap()
+			cur = readSnap(softnetFd, snmpFd, netstatFd, buf)
 			render(prev, cur, start)
 			prev = cur
 		case <-sigCh:

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"flag"
 	"fmt"
 	"os"
@@ -55,12 +54,19 @@ const (
 	SortMbps
 )
 
+type poolFd struct {
+	name string
+	fd   int
+}
+
 type App struct {
-	pools      []string
-	interval   time.Duration
-	txgCount   int
-	sortCol    SortColumn
-	sortRev    bool
+	pools    []string
+	poolFds  []poolFd
+	readBuf  []byte
+	interval time.Duration
+	txgCount int
+	sortCol  SortColumn
+	sortRev  bool
 	pageOffset int
 	totalTxgs  int
 	bootEpoch  int64
@@ -109,6 +115,8 @@ func main() {
 		sortCol:  SortNone,
 	}
 	app.computeBootEpoch()
+	app.openPoolFds()
+	defer app.closePoolFds()
 	app.run()
 }
 
@@ -140,6 +148,31 @@ Interactive Keys (lowercase=ascending, UPPERCASE=descending):
   q     Quit
 
 `)
+}
+
+func pread(fd int, buf []byte) int {
+	n, _ := syscall.Pread(fd, buf, 0)
+	return n
+}
+
+func (app *App) openPoolFds() {
+	app.readBuf = make([]byte, 256*1024)
+	for _, pool := range app.pools {
+		path := fmt.Sprintf("/proc/spl/kstat/zfs/%s/txgs", pool)
+		fd, err := syscall.Open(path, syscall.O_RDONLY, 0)
+		if err != nil {
+			fd = -1
+		}
+		app.poolFds = append(app.poolFds, poolFd{name: pool, fd: fd})
+	}
+}
+
+func (app *App) closePoolFds() {
+	for _, pf := range app.poolFds {
+		if pf.fd >= 0 {
+			syscall.Close(pf.fd)
+		}
+	}
 }
 
 func (app *App) computeBootEpoch() {
@@ -347,10 +380,10 @@ func (app *App) render() {
 	sb.WriteString(fmt.Sprintf("%sKeys: [t/T]xg [d/D]irty [r/R]ead [w/W]ritten [o/O]pen q[u/U]eue w[a/A]it [s/S]ync [m/M]b/s  [n]one  [q]uit  [↑/↓]page%s\n",
 		colorDim, colorReset))
 
-	for _, pool := range app.pools {
-		txgs, err := app.readTxgs(pool)
+	for _, pf := range app.poolFds {
+		txgs, err := app.readTxgs(pf.fd)
 		if err != nil {
-			sb.WriteString(fmt.Sprintf("%sPool '%s' not found%s\n", colorRed, pool, colorReset))
+			sb.WriteString(fmt.Sprintf("%sPool '%s' not found%s\n", colorRed, pf.name, colorReset))
 			continue
 		}
 
@@ -360,7 +393,7 @@ func (app *App) render() {
 		displayTxgs := app.sortAndPaginate(txgs)
 
 		// Header
-		app.writePoolHeader(&sb, pool)
+		app.writePoolHeader(&sb, pf.name)
 
 		// TXG rows
 		for _, txg := range displayTxgs {
@@ -404,19 +437,17 @@ func (app *App) getSortInfo() string {
 	return ""
 }
 
-func (app *App) readTxgs(pool string) ([]TXG, error) {
-	path := fmt.Sprintf("/proc/spl/kstat/zfs/%s/txgs", pool)
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, err
+func (app *App) readTxgs(fd int) ([]TXG, error) {
+	if fd < 0 {
+		return nil, fmt.Errorf("not available")
 	}
-	defer file.Close()
-
+	n := pread(fd, app.readBuf)
+	if n <= 0 {
+		return nil, fmt.Errorf("read failed")
+	}
 	var txgs []TXG
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.HasPrefix(line, "txg") {
+	for _, line := range strings.Split(string(app.readBuf[:n]), "\n") {
+		if len(line) == 0 || strings.HasPrefix(line, "txg") {
 			continue
 		}
 		txg := app.parseTxgLine(line)
