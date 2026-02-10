@@ -13,16 +13,19 @@
 // Kernel side: pair this with bpf_ringbuf_submit(data, BPF_RB_NO_WAKEUP)
 // to suppress wakeup notifications that would otherwise fire on every submit.
 //
-// Usage:
+// Usage (multi-ring drain loop):
 //
-//	rd, err := ringpoll.NewReader(objs.Events, 50*time.Microsecond)
-//	if err != nil { log.Fatal(err) }
-//	defer rd.Close()
-//	defer rd.Cleanup()
-//
+//	readers := make([]*ringpoll.Reader, 4)
+//	for i, m := range ringMaps {
+//	    readers[i], _ = ringpoll.NewReader(m)
+//	}
 //	var rec ringpoll.Record
-//	for rd.ReadInto(&rec) {
-//	    // process rec.RawSample
+//	for !allClosed(readers) {
+//	    for _, rd := range readers {
+//	        for rd.Poll(&rec) { /* process rec.RawSample */ }
+//	    }
+//	    commitAll(readers)
+//	    if ringsQuiet(readers) { time.Sleep(3*time.Millisecond) }
 //	}
 package ringpoll
 
@@ -72,9 +75,8 @@ type Reader struct {
 	ring      []byte  // data region (double-mapped, so no wrap logic needed)
 	mask      uint64
 	pos       uint64 // current consumer position (local copy)
-	closed    atomic.Bool
-	pollSleep time.Duration
-	bufSize   int // ring capacity in bytes
+	closed  atomic.Bool
+	bufSize int // ring capacity in bytes
 
 	// Local stats (written only by reader goroutine — no sync needed)
 	batchCount    int64
@@ -88,9 +90,8 @@ type Reader struct {
 }
 
 // NewReader creates a busy-polling ring buffer reader for the given BPF map.
-// The map must be of type RingBuf. pollSleep controls how long the reader
-// sleeps when the ring is empty (50us is a good starting point).
-func NewReader(m *ebpf.Map, pollSleep time.Duration) (*Reader, error) {
+// The map must be of type RingBuf. The caller controls sleep timing via Poll.
+func NewReader(m *ebpf.Map) (*Reader, error) {
 	if m.Type() != ebpf.RingBuf {
 		return nil, fmt.Errorf("ringpoll: expected RingBuf map, got %s", m.Type())
 	}
@@ -116,15 +117,14 @@ func NewReader(m *ebpf.Map, pollSleep time.Duration) (*Reader, error) {
 	prodPos := (*uint64)(unsafe.Pointer(&prod[0]))
 
 	return &Reader{
-		consMmap:  cons,
-		prodMmap:  prod,
-		consPos:   consPos,
-		prodPos:   prodPos,
-		ring:      prod[pageSize:],
-		mask:      uint64(size - 1),
-		pos:       atomic.LoadUint64(consPos),
-		pollSleep: pollSleep,
-		bufSize:   size,
+		consMmap: cons,
+		prodMmap: prod,
+		consPos:  consPos,
+		prodPos:  prodPos,
+		ring:     prod[pageSize:],
+		mask:     uint64(size - 1),
+		pos:      atomic.LoadUint64(consPos),
+		bufSize:  size,
 	}, nil
 }
 
@@ -284,78 +284,3 @@ func (r *Reader) Poll(rec *Record) bool {
 	}
 }
 
-// ReadInto polls the ring buffer for the next committed record.
-// Does NOT advance the kernel-visible consumer position — call Commit()
-// after processing a batch to free ring space.
-// Sleeps briefly when the ring is empty (commits before sleeping so the
-// kernel sees freed space). Returns true on success, false when closed.
-func (r *Reader) ReadInto(rec *Record) bool {
-	for {
-		if r.closed.Load() {
-			return false
-		}
-
-		prod := atomic.LoadUint64(r.prodPos)
-		if pending := int64(prod - r.pos); pending > r.maxPending {
-			r.maxPending = pending
-		}
-		if r.pos == prod {
-			// Ring empty — commit before sleeping so kernel sees freed space
-			r.Commit()
-			// Record completed batch and poll stats
-			r.pollCount++
-			lastBatch := r.batchCount
-			if r.batchCount > 0 {
-				r.nonEmptyCount++
-				r.eventSum += r.batchCount
-				r.batchCount = 0
-			}
-			// Publish all stats in a single atomic pointer swap
-			r.snapshot.Store(&PollSnapshot{
-				EventSum:      r.eventSum,
-				NonEmptyCount: r.nonEmptyCount,
-				PollCount:     r.pollCount,
-				LastNonEmpty:  lastBatch,
-				LastEmptyNano: time.Now().UnixNano(),
-				MaxPending:    r.maxPending,
-				LastBatch:     lastBatch,
-			})
-			time.Sleep(r.pollSleep)
-			continue
-		}
-
-		// Read 8-byte header
-		off := r.pos & r.mask
-		hdrLen := binary.LittleEndian.Uint32(r.ring[off:])
-
-		if hdrLen&bpfRingbufBusyBit != 0 {
-			// Producer reserved but hasn't committed yet
-			time.Sleep(r.pollSleep)
-			continue
-		}
-
-		r.pos += ringbufHdrSize
-
-		dataLen := hdrLen & ^uint32(bpfRingbufBusyBit|bpfRingbufDiscardBit)
-		dataAligned := (uint64(dataLen) + 7) &^ 7
-
-		if hdrLen&bpfRingbufDiscardBit != 0 {
-			r.pos += dataAligned
-			continue
-		}
-
-		// Copy data out of the ring
-		start := r.pos & r.mask
-		if cap(rec.RawSample) < int(dataLen) {
-			rec.RawSample = make([]byte, dataLen)
-		} else {
-			rec.RawSample = rec.RawSample[:dataLen]
-		}
-		copy(rec.RawSample, r.ring[start:start+uint64(dataLen)])
-
-		r.pos += dataAligned
-
-		r.batchCount++
-		return true
-	}
-}

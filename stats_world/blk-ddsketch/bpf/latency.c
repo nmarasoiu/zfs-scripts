@@ -25,11 +25,26 @@ struct {
     __type(value, __u64);
 } req_start SEC(".maps");
 
-// Ring buffer for latency samples
+// Per-CPU ring buffers for latency samples (4 × 2MB = 8MB total)
 struct {
     __uint(type, BPF_MAP_TYPE_RINGBUF);
-    __uint(max_entries, 8 * 1024 * 1024); // 8MB
-} events SEC(".maps");
+    __uint(max_entries, 2 * 1024 * 1024);
+} events0 SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_RINGBUF);
+    __uint(max_entries, 2 * 1024 * 1024);
+} events1 SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_RINGBUF);
+    __uint(max_entries, 2 * 1024 * 1024);
+} events2 SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_RINGBUF);
+    __uint(max_entries, 2 * 1024 * 1024);
+} events3 SEC(".maps");
 
 // Optional device filter (0 = disabled)
 struct {
@@ -105,7 +120,16 @@ int BPF_PROG(block_rq_complete, struct request *rq, blk_status_t error, unsigned
     if (dev == 0)
         return 0;
 
-    struct latency_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
+    // Dispatch to per-CPU ring buffer
+    void *rb;
+    switch (bpf_get_smp_processor_id() % 4) {
+    case 0: rb = &events0; break;
+    case 1: rb = &events1; break;
+    case 2: rb = &events2; break;
+    default: rb = &events3; break;
+    }
+
+    struct latency_event *e = bpf_ringbuf_reserve(rb, sizeof(*e), 0);
     if (!e) {
         __u32 zero = 0;
         __u64 *cnt = bpf_map_lookup_elem(&drop_count, &zero);

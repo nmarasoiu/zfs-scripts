@@ -69,7 +69,10 @@ type bpfProgramSpecs struct {
 type bpfMapSpecs struct {
 	DevFilter *ebpf.MapSpec `ebpf:"dev_filter"`
 	DropCount *ebpf.MapSpec `ebpf:"drop_count"`
-	Events    *ebpf.MapSpec `ebpf:"events"`
+	Events0   *ebpf.MapSpec `ebpf:"events0"`
+	Events1   *ebpf.MapSpec `ebpf:"events1"`
+	Events2   *ebpf.MapSpec `ebpf:"events2"`
+	Events3   *ebpf.MapSpec `ebpf:"events3"`
 	LatConfig *ebpf.MapSpec `ebpf:"lat_config"`
 	ReqStart  *ebpf.MapSpec `ebpf:"req_start"`
 }
@@ -95,7 +98,10 @@ func (o *bpfObjects) Close() error {
 type bpfMaps struct {
 	DevFilter *ebpf.Map `ebpf:"dev_filter"`
 	DropCount *ebpf.Map `ebpf:"drop_count"`
-	Events    *ebpf.Map `ebpf:"events"`
+	Events0   *ebpf.Map `ebpf:"events0"`
+	Events1   *ebpf.Map `ebpf:"events1"`
+	Events2   *ebpf.Map `ebpf:"events2"`
+	Events3   *ebpf.Map `ebpf:"events3"`
 	LatConfig *ebpf.Map `ebpf:"lat_config"`
 	ReqStart  *ebpf.Map `ebpf:"req_start"`
 }
@@ -104,7 +110,10 @@ func (m *bpfMaps) Close() error {
 	return _BpfClose(
 		m.DevFilter,
 		m.DropCount,
-		m.Events,
+		m.Events0,
+		m.Events1,
+		m.Events2,
+		m.Events3,
 		m.LatConfig,
 		m.ReqStart,
 	)

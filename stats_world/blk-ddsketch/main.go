@@ -50,7 +50,7 @@ var (
 	devices     = flag.String("d", "", "comma-separated device filter (e.g., sdc,sdd or 8:32,8:48)")
 	batch       = flag.Bool("batch", false, "batch mode (no screen clearing)")
 	alpha       = flag.Float64("alpha", 0.01, "DDSketch relative accuracy (0.01 = 1%)")
-	pollSleep   = flag.Duration("poll-sleep", 50*time.Microsecond, "ring buffer poll sleep when empty")
+	pollSleep   = flag.Duration("poll-sleep", 3*time.Millisecond, "ring buffer poll sleep when all rings are empty")
 	showVersion = flag.Bool("version", false, "print version and exit")
 )
 
@@ -337,7 +337,7 @@ func (s *State) ResetIntervals() {
 // Display handles rendering
 type Display struct {
 	batchMode bool
-	ring      *ringpoll.Reader
+	rings     []*ringpoll.Reader
 }
 
 func (d *Display) resetCursor() {
@@ -523,21 +523,55 @@ func (d *Display) render(state *State, intervalDur time.Duration, a float64, dro
 	}
 
 	ringInfo := ""
-	if d.ring != nil {
-		pending := d.ring.Pending()
-		capBytes := d.ring.BufSize()
-		maxPend := d.ring.MaxPending()
-		pctFull := float64(pending) / float64(capBytes) * 100
-		maxPct := float64(maxPend) / float64(capBytes) * 100
-		avg1, avg0, last1, last0 := d.ring.PollStats()
+	if len(d.rings) > 0 {
+		// Aggregate across all rings: worst-case for capacity, sum for throughput
+		var worstPending int
+		var perRingCap int64
+		var worstMaxPending int64
+		var totalEventSum, totalNonEmpty, totalPollCount, totalLastNonEmpty int64
+		var latestEmptyNano int64
+
+		for _, rd := range d.rings {
+			pending := rd.Pending()
+			if pending > worstPending {
+				worstPending = pending
+			}
+			perRingCap = int64(rd.BufSize())
+			snap := rd.Snapshot()
+			if snap != nil {
+				if snap.MaxPending > worstMaxPending {
+					worstMaxPending = snap.MaxPending
+				}
+				totalEventSum += snap.EventSum
+				totalNonEmpty += snap.NonEmptyCount
+				totalPollCount += snap.PollCount
+				totalLastNonEmpty += snap.LastNonEmpty
+				if snap.LastEmptyNano > latestEmptyNano {
+					latestEmptyNano = snap.LastEmptyNano
+				}
+			}
+		}
+
+		pctFull := float64(worstPending) / float64(perRingCap) * 100
+		maxPct := float64(worstMaxPending) / float64(perRingCap) * 100
+		var avg1, avg0 float64
+		if totalNonEmpty > 0 {
+			avg1 = float64(totalEventSum) / float64(totalNonEmpty)
+		}
+		if totalPollCount > 0 {
+			avg0 = float64(totalEventSum) / float64(totalPollCount)
+		}
 		last0Str := "-"
-		if last0 > 0 {
-			last0Str = formatMicro(last0)
+		if latestEmptyNano > 0 {
+			last0 := time.Since(time.Unix(0, latestEmptyNano))
+			if last0 > 0 {
+				last0Str = formatMicro(last0)
+			}
 		}
 		ringInfo = fmt.Sprintf(" | Ring: %s/%s (%.1f%%) max: %s/%s (%.1f%%) avg1:%.0f avg0:%.1f last1:%d last0:%s",
-			formatBytes(int64(pending)), formatBytes(int64(capBytes)), pctFull,
-			formatBytes(maxPend), formatBytes(int64(capBytes)), maxPct,
-			avg1, avg0, last1, last0Str)
+			formatBytes(int64(worstPending)), formatBytes(perRingCap), pctFull,
+			formatBytes(worstMaxPending), formatBytes(perRingCap), maxPct,
+			avg1, avg0, totalLastNonEmpty, last0Str)
 	}
 
 	fmt.Fprintf(&buf, "Total: %s samples | Rate: %s/s | Devices: %d | Drops: %s (%s/s) | DDSketch: ~2-10KB/dev (a=%.2f%%)%s\n",
@@ -550,6 +584,79 @@ func (d *Display) render(state *State, intervalDur time.Duration, a float64, dro
 
 	d.resetCursor()
 	fmt.Print(buf.String())
+}
+
+func allClosed(readers []*ringpoll.Reader) bool {
+	for _, rd := range readers {
+		if !rd.Closed() {
+			return false
+		}
+	}
+	return true
+}
+
+func commitAll(readers []*ringpoll.Reader) {
+	for _, rd := range readers {
+		rd.CommitAndSnap()
+	}
+}
+
+// ringsQuiet reports whether all rings are below 5% capacity.
+func ringsQuiet(readers []*ringpoll.Reader) bool {
+	for _, rd := range readers {
+		if rd.Pending()*20 > rd.BufSize() {
+			return false
+		}
+	}
+	return true
+}
+
+// runReader busy-polls multiple ring buffers in round-robin, batches events,
+// and flushes to state. Single goroutine — no contention.
+func runReader(readers []*ringpoll.Reader, sleep time.Duration, state *State) {
+	const maxBatch = 1024
+	var rec ringpoll.Record
+	eventSize := int(unsafe.Sizeof(bpfLatencyEvent{}))
+	pending := make([]pendingEvent, 0, maxBatch)
+
+	for !allClosed(readers) {
+		for _, rd := range readers {
+			for rd.Poll(&rec) {
+				if len(rec.RawSample) < eventSize {
+					continue
+				}
+				event := *(*bpfLatencyEvent)(unsafe.Pointer(&rec.RawSample[0]))
+				devName := lookupDevName(event.Dev)
+				if !isTrackedDevice(devName) {
+					continue
+				}
+				latencyUs := float64(event.LatencyNs) / 1000.0
+				if latencyUs < 1 {
+					latencyUs = 1
+				}
+				pending = append(pending, pendingEvent{event.Dev, latencyUs})
+
+				if len(pending) >= maxBatch {
+					state.RecordBatch(pending)
+					commitAll(readers)
+					pending = pending[:0]
+				}
+			}
+		}
+		if len(pending) > 0 {
+			state.RecordBatch(pending)
+			pending = pending[:0]
+		}
+		commitAll(readers)
+		if ringsQuiet(readers) {
+			time.Sleep(sleep)
+		}
+	}
+	// flush remainder (shouldn't happen, but defensive)
+	if len(pending) > 0 {
+		state.RecordBatch(pending)
+		commitAll(readers)
+	}
 }
 
 func main() {
@@ -630,15 +737,27 @@ func run() error {
 	}
 	defer tpComplete.Close()
 
-	// Open ring buffer (busy-poll reader -- no epoll)
-	rd, err := ringpoll.NewReader(objs.Events, *pollSleep)
-	if err != nil {
-		return fmt.Errorf("open ring buffer: %w", err)
+	// Open per-CPU ring buffers (busy-poll readers — no epoll)
+	ringMaps := []*ebpf.Map{objs.Events0, objs.Events1, objs.Events2, objs.Events3}
+	readers := make([]*ringpoll.Reader, len(ringMaps))
+	for i, m := range ringMaps {
+		rd, err := ringpoll.NewReader(m)
+		if err != nil {
+			for j := 0; j < i; j++ {
+				readers[j].Cleanup()
+			}
+			return fmt.Errorf("open ring buffer %d: %w", i, err)
+		}
+		readers[i] = rd
 	}
-	defer rd.Cleanup()
+	defer func() {
+		for _, rd := range readers {
+			rd.Cleanup()
+		}
+	}()
 
 	state := newState(*alpha)
-	display := &Display{batchMode: *batch, ring: rd}
+	display := &Display{batchMode: *batch, rings: readers}
 
 	// Signal handling
 	done := make(chan struct{})
@@ -649,48 +768,17 @@ func run() error {
 		<-sig
 		signal.Stop(sig) // restore default handler so second Ctrl+C force-kills
 		close(done)
-		rd.Close()
+		for _, rd := range readers {
+			rd.Close()
+		}
 	}()
 
-	// Reader goroutine: busy-polls ring buffer, batches events, flushes under single Lock
-	const flushSize = 1024
-	const flushInterval = 10 * time.Millisecond
-
+	// Reader goroutine: busy-polls ring buffers, batches events, flushes under single Lock
 	var readerDone sync.WaitGroup
 	readerDone.Add(1)
 	go func() {
 		defer readerDone.Done()
-		var rec ringpoll.Record
-		eventSize := int(unsafe.Sizeof(bpfLatencyEvent{}))
-		pending := make([]pendingEvent, 0, flushSize)
-		lastFlush := time.Now()
-
-		for rd.ReadInto(&rec) {
-			if len(rec.RawSample) < eventSize {
-				continue
-			}
-			event := *(*bpfLatencyEvent)(unsafe.Pointer(&rec.RawSample[0]))
-			devName := lookupDevName(event.Dev)
-			if !isTrackedDevice(devName) {
-				continue
-			}
-			latencyUs := float64(event.LatencyNs) / 1000.0
-			if latencyUs < 1 {
-				latencyUs = 1
-			}
-			pending = append(pending, pendingEvent{event.Dev, latencyUs})
-
-			if len(pending) >= flushSize || time.Since(lastFlush) >= flushInterval {
-				state.RecordBatch(pending)
-				rd.Commit()
-				pending = pending[:0]
-				lastFlush = time.Now()
-			}
-		}
-		if len(pending) > 0 {
-			state.RecordBatch(pending)
-			rd.Commit()
-		}
+		runReader(readers, *pollSleep, state)
 	}()
 
 	// Drop counter: read from kernel map periodically by display goroutine

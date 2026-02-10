@@ -56,7 +56,6 @@ var (
 	// Timing
 	displayRefreshInterval = flag.Duration("display-refresh-interval", 100*time.Millisecond, "display refresh interval (e.g. 100ms, 200ms)")
 	batchSize              = flag.Int("batch-size", 1024, "event batch: max events before flush to stats")
-	batchInterval          = flag.Duration("batch-interval", 10*time.Millisecond, "event batch: max time before flush to stats")
 	mapSampleInterval      = flag.Duration("map-sample-interval", 2*time.Second, "BPF map occupancy sample interval")
 
 	// BPF
@@ -181,11 +180,10 @@ func ringsQuiet(readers []*ringpoll.Reader) bool {
 
 // runReader busy-polls multiple ring buffers in round-robin, batches events,
 // and flushes to state. Single goroutine — no new contention points.
-func runReader(readers []*ringpoll.Reader, pollSleep time.Duration, maxBatch int, batchTimeout time.Duration, state *State) {
+func runReader(readers []*ringpoll.Reader, pollSleep time.Duration, maxBatch int, state *State) {
 	var rec ringpoll.Record
 	eventSize := int(unsafe.Sizeof(bpfLatencyEvent{}))
 	pending := make([]pendingEvent, 0, maxBatch)
-	lastFlush := time.Now()
 
 	for !allClosed(readers) {
 		for _, rd := range readers {
@@ -204,23 +202,16 @@ func runReader(readers []*ringpoll.Reader, pollSleep time.Duration, maxBatch int
 					state.RecordBatch(pending)
 					commitAll(readers)
 					pending = pending[:0]
-					lastFlush = time.Now()
 				}
 			}
 		}
-		if ringsQuiet(readers) {
-			if len(pending) > 0 {
-				state.RecordBatch(pending)
-				pending = pending[:0]
-				lastFlush = time.Now()
-			}
-			commitAll(readers)
-			time.Sleep(pollSleep)
-		} else if len(pending) > 0 && time.Since(lastFlush) >= batchTimeout {
+		if len(pending) > 0 {
 			state.RecordBatch(pending)
-			commitAll(readers)
 			pending = pending[:0]
-			lastFlush = time.Now()
+		}
+		commitAll(readers)
+		if ringsQuiet(readers) {
+			time.Sleep(pollSleep)
 		}
 	}
 	// flush remainder
@@ -412,7 +403,7 @@ func run() error {
 	ringMaps := []*ebpf.Map{objs.Events0, objs.Events1, objs.Events2, objs.Events3}
 	readers := make([]*ringpoll.Reader, len(ringMaps))
 	for i, m := range ringMaps {
-		rd, err := ringpoll.NewReader(m, *pollSleep)
+		rd, err := ringpoll.NewReader(m)
 		if err != nil {
 			// Clean up already-opened readers
 			for j := 0; j < i; j++ {
@@ -480,7 +471,7 @@ func run() error {
 	readerDone.Add(1)
 	go func() {
 		defer readerDone.Done()
-		runReader(readers, *pollSleep, *batchSize, *batchInterval, state)
+		runReader(readers, *pollSleep, *batchSize, state)
 	}()
 
 	// Input goroutine for interactive mode
