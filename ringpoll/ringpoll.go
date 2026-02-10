@@ -290,10 +290,9 @@ func snapshotGroup(readers []*Reader) GroupSnapshot {
 }
 
 // Group manages multiple ring buffer readers, providing a single polling
-// interface with round-robin drain across all rings.
+// interface that scans all rings in order.
 type Group struct {
 	readers []*Reader
-	cur     int // round-robin index
 }
 
 // NewGroup creates a Group of busy-polling readers, one per map.
@@ -313,16 +312,13 @@ func NewGroup(maps []*ebpf.Map) (*Group, error) {
 	return &Group{readers: readers}, nil
 }
 
-// Poll reads one record from the ring buffers in round-robin order.
-// Returns true if a record was read. Returns false only after a full
-// rotation finds every ring empty, catching events that arrived in
-// earlier rings while later ones were draining.
+// Poll scans rings 0..N-1 and returns the first record found.
+// Returns false when all rings are empty in a single pass.
 func (g *Group) Poll(rec *Record) bool {
-	for i := 0; i < len(g.readers); i++ {
-		if g.readers[g.cur].Poll(rec) {
+	for _, rd := range g.readers {
+		if rd.Poll(rec) {
 			return true
 		}
-		g.cur = (g.cur + 1) % len(g.readers)
 	}
 	return false
 }
