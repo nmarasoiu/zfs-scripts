@@ -16,13 +16,43 @@ type processSummary struct {
 }
 
 type tableEntry struct {
-	label string
-	ss    *syscallStats
+	label   string
+	ss      *syscallStats
+	sortVal float64
+}
+
+// entrySortVal extracts the sort value for a given column from a syscallStats entry.
+func entrySortVal(ss *syscallStats, col string, elapsedSecs float64, quantiles []float64) float64 {
+	switch col {
+	case "min":
+		return float64(ss.stats.min)
+	case "avg":
+		return float64(ss.stats.Avg())
+	case "max":
+		return float64(ss.stats.max)
+	case "samples", "count", "total":
+		return float64(ss.stats.count)
+	case "rate":
+		if elapsedSecs > 0 {
+			return float64(ss.stats.count) / elapsedSecs
+		}
+		return 0
+	default:
+		// percentile column: match against quantile headers
+		for _, q := range quantiles {
+			if col == quantileHeader(q) {
+				v, _ := ss.sketch.GetValueAtQuantile(q)
+				return v
+			}
+		}
+		return float64(ss.stats.count)
+	}
 }
 
 // collectEntries builds a sorted list of table entries from per-process stats.
 // When singleProc is true, the proc prefix is omitted from labels.
-func collectEntries(procStats map[string]map[uint32]*syscallStats, singleProc bool) []tableEntry {
+// Entries are sorted descending by the given sortColumn.
+func collectEntries(procStats map[string]map[uint32]*syscallStats, singleProc bool, sortColumn string, elapsedSecs float64, quantiles []float64) []tableEntry {
 
 	var entries []tableEntry
 	for proc, fm := range procStats {
@@ -31,15 +61,14 @@ func collectEntries(procStats map[string]map[uint32]*syscallStats, singleProc bo
 			if !singleProc {
 				label = proc + "/" + label
 			}
-			entries = append(entries, tableEntry{label, ss})
+			sv := entrySortVal(ss, sortColumn, elapsedSecs, quantiles)
+			entries = append(entries, tableEntry{label, ss, sv})
 		}
 	}
 
 	sort.Slice(entries, func(i, j int) bool {
-		ci := entries[i].ss.stats.count
-		cj := entries[j].ss.stats.count
-		if ci != cj {
-			return ci > cj
+		if entries[i].sortVal != entries[j].sortVal {
+			return entries[i].sortVal > entries[j].sortVal
 		}
 		return entries[i].label < entries[j].label
 	})
@@ -72,7 +101,9 @@ func filterStatsGeneral(procStats map[string]map[uint32]*syscallStats, text stri
 }
 
 // collectProcessSummaries aggregates per-process totals.
-func collectProcessSummaries(procStats map[string]map[uint32]*syscallStats, elapsedSecs float64) []processSummary {
+// When sortByRate is true, summaries are sorted by rate/sec; otherwise by total count.
+func collectProcessSummaries(procStats map[string]map[uint32]*syscallStats, elapsedSecs float64, sortColumn string) []processSummary {
+	sortByRate := sortColumn == "rate"
 	summaries := make([]processSummary, 0, len(procStats))
 	for proc, fm := range procStats {
 		var total uint64
@@ -85,12 +116,21 @@ func collectProcessSummaries(procStats map[string]map[uint32]*syscallStats, elap
 		}
 		summaries = append(summaries, processSummary{name: proc, count: total, rate: rate})
 	}
-	sort.Slice(summaries, func(i, j int) bool {
-		if summaries[i].count != summaries[j].count {
-			return summaries[i].count > summaries[j].count
-		}
-		return summaries[i].name < summaries[j].name
-	})
+	if sortByRate {
+		sort.Slice(summaries, func(i, j int) bool {
+			if summaries[i].rate != summaries[j].rate {
+				return summaries[i].rate > summaries[j].rate
+			}
+			return summaries[i].name < summaries[j].name
+		})
+	} else {
+		sort.Slice(summaries, func(i, j int) bool {
+			if summaries[i].count != summaries[j].count {
+				return summaries[i].count > summaries[j].count
+			}
+			return summaries[i].name < summaries[j].name
+		})
+	}
 	return summaries
 }
 
@@ -106,6 +146,7 @@ type interactiveMode int
 const (
 	modeNormal interactiveMode = iota
 	modeFilter
+	modeSort
 )
 
 // Display handles rendering
@@ -115,17 +156,59 @@ type Display struct {
 	topN           int
 	colsOverride   int        // --cols override; 0 = auto-detect
 	quantiles      []float64  // configured percentile quantiles (0.0–1.0)
+	sortColumn     string     // column to sort by (rate, samples, avg, p99, max, min, etc.)
 
 	// Interactive state (all owned by display goroutine — no sync needed)
 	interactive   bool
 	mode          interactiveMode
 	filterText    string
+	sortText      string // typed text in modeSort
 	lastSummaries []processSummary
 }
 
 // quantileHeader formats a quantile as a column header (e.g. 0.50 → "p50", 0.999 → "p99.9").
 func quantileHeader(q float64) string {
 	return fmt.Sprintf("p%g", q*100)
+}
+
+// availableSortColumns returns the valid sort column names for the current view.
+// Table view (focusProcesses set) has min but no rate; summary view has rate but no min.
+func (d *Display) availableSortColumns() []string {
+	isTable := len(d.focusProcesses) > 0
+	var cols []string
+	if isTable {
+		cols = append(cols, "min")
+	}
+	cols = append(cols, "avg")
+	for _, q := range d.quantiles {
+		cols = append(cols, quantileHeader(q))
+	}
+	cols = append(cols, "max", "samples")
+	if !isTable {
+		cols = append(cols, "rate")
+	}
+	return cols
+}
+
+// isValidSortColumn checks if the given column name is valid for the current view.
+func (d *Display) isValidSortColumn(col string) bool {
+	for _, c := range d.availableSortColumns() {
+		if c == col {
+			return true
+		}
+	}
+	return false
+}
+
+// sortIndicator returns the column header with ▼ appended if it's the active sort column.
+// The result is right-justified to the given width.
+func (d *Display) sortIndicator(col string, width int) string {
+	if col == d.sortColumn || (col == "samples" && (d.sortColumn == "count" || d.sortColumn == "total")) {
+		s := col + "▼"
+		// ▼ is 3 bytes but 1 display column, so pad to width-1 display columns
+		return fmt.Sprintf("%*s", width-1, s)
+	}
+	return fmt.Sprintf("%*s", width, col)
 }
 
 // summaryLineWidth computes the width of a summary row given the number of percentile columns.
@@ -182,9 +265,11 @@ func (d *Display) summaryBarLegend() string {
 	}
 	switch d.mode {
 	case modeNormal:
-		return "[/] filter  [q] quit"
+		return "[/] filter  [s] sort  [q] quit"
 	case modeFilter:
 		return fmt.Sprintf("Filter: %s_  [/] cancel  [Bksp] back", d.filterText)
+	case modeSort:
+		return fmt.Sprintf("Sort by: %s_  [columns: %s]  [s] cancel", d.sortText, strings.Join(d.availableSortColumns(), " "))
 	}
 	return ""
 }
@@ -205,7 +290,7 @@ func (d *Display) render(state *State, drops uint64, ms *mapStats, rs *ringStats
 		fmt.Fprintf(&mainBuf, "Syscall Latency Monitor - %s (uptime: %s) -- %d sketches × 2KB ≈ %.1fMB  evict:%s\n",
 			now.Format("15:04:05"), formatDuration(elapsed), v.NSketches, totalMB, formatCount(int64(v.SketchEvictions)))
 
-		d.lastSummaries = collectProcessSummaries(v.ProcStats, elapsed.Seconds())
+		d.lastSummaries = collectProcessSummaries(v.ProcStats, elapsed.Seconds(), d.sortColumn)
 
 		viewStats := v.ProcStats
 		if d.mode == modeFilter && d.filterText != "" {
@@ -217,7 +302,7 @@ func (d *Display) render(state *State, drops uint64, ms *mapStats, rs *ringStats
 		}
 
 		if len(d.focusProcesses) > 0 {
-			d.renderTable(&mainBuf, viewStats)
+			d.renderTable(&mainBuf, viewStats, elapsed.Seconds())
 		} else {
 			d.renderSummary(&mainBuf, viewStats, elapsed, v.GlobalStats, sketchPercentiles(v.GlobalSketch, d.quantiles))
 		}
@@ -285,9 +370,11 @@ func (d *Display) render(state *State, drops uint64, ms *mapStats, rs *ringStats
 	if d.interactive && len(d.focusProcesses) > 0 {
 		switch d.mode {
 		case modeNormal:
-			output.WriteString("  [/] filter  [q] quit\n")
+			output.WriteString("  [/] filter  [s] sort  [q] quit\n")
 		case modeFilter:
 			fmt.Fprintf(&output, "  Filter prefix (proc/syscall): %s_  [/] cancel  [Bksp] back\n", d.filterText)
+		case modeSort:
+			fmt.Fprintf(&output, "  Sort by: %s_  [columns: %s]  [s] cancel\n", d.sortText, strings.Join(d.availableSortColumns(), " "))
 		}
 	}
 
@@ -305,6 +392,9 @@ func (d *Display) handleKey(ev keyEvent) bool {
 			case '/':
 				d.mode = modeFilter
 				d.filterText = ""
+			case 's':
+				d.mode = modeSort
+				d.sortText = ""
 			case 'q':
 				return true
 			}
@@ -325,8 +415,43 @@ func (d *Display) handleKey(ev keyEvent) bool {
 				d.mode = modeNormal
 			}
 		}
+	case modeSort:
+		switch ev.kind {
+		case keyChar:
+			if ev.ch == 's' && d.sortText == "" {
+				// 's' again on empty → cancel
+				d.mode = modeNormal
+			} else {
+				d.sortText += string(ev.ch)
+				d.tryAutoSelectSort()
+			}
+		case keyBackspace:
+			if len(d.sortText) > 0 {
+				d.sortText = d.sortText[:len(d.sortText)-1]
+			} else {
+				d.mode = modeNormal
+			}
+		}
 	}
 	return false
+}
+
+// tryAutoSelectSort checks if the current sortText uniquely matches one column.
+// If so, applies the sort and returns to normal mode.
+func (d *Display) tryAutoSelectSort() {
+	cols := d.availableSortColumns()
+	lower := strings.ToLower(d.sortText)
+	var matches []string
+	for _, c := range cols {
+		if strings.HasPrefix(strings.ToLower(c), lower) {
+			matches = append(matches, c)
+		}
+	}
+	if len(matches) == 1 {
+		d.sortColumn = matches[0]
+		d.sortText = ""
+		d.mode = modeNormal
+	}
 }
 
 func (d *Display) renderFooter(buf *strings.Builder, elapsed time.Duration, nProcs int, drops uint64, ms *mapStats, rs *ringStats) {
@@ -353,8 +478,8 @@ func (d *Display) renderFooter(buf *strings.Builder, elapsed time.Duration, nPro
 	}
 }
 
-func (d *Display) renderTable(buf *strings.Builder, procStats map[string]map[uint32]*syscallStats) {
-	entries := collectEntries(procStats, len(procStats) == 1)
+func (d *Display) renderTable(buf *strings.Builder, procStats map[string]map[uint32]*syscallStats, elapsedSecs float64) {
+	entries := collectEntries(procStats, len(procStats) == 1, d.sortColumn, elapsedSecs, d.quantiles)
 
 	if len(entries) == 0 {
 		return
@@ -384,11 +509,11 @@ func (d *Display) renderTable(buf *strings.Builder, procStats map[string]map[uin
 	nameFmt := fmt.Sprintf("%%-%ds", labelWidth)
 	buf.WriteString(fmt.Sprintf(nameFmt, "LIFETIME"))
 	buf.WriteString(" │")
-	buf.WriteString(fmt.Sprintf(" %8s %8s", "min", "avg"))
+	fmt.Fprintf(buf, " %s %s", d.sortIndicator("min", 8), d.sortIndicator("avg", 8))
 	for _, q := range d.quantiles {
-		fmt.Fprintf(buf, " %8s", quantileHeader(q))
+		fmt.Fprintf(buf, " %s", d.sortIndicator(quantileHeader(q), 8))
 	}
-	fmt.Fprintf(buf, " %8s │ %9s\n", "max", "samples")
+	fmt.Fprintf(buf, " %s │ %s\n", d.sortIndicator("max", 8), d.sortIndicator("samples", 9))
 	buf.WriteString(strings.Repeat("-", lineWidth))
 	buf.WriteString("\n")
 
@@ -424,7 +549,7 @@ func renderDetailRow(buf *strings.Builder, name string, st *simpleStats, pcts []
 }
 
 func (d *Display) renderSummary(buf *strings.Builder, procStats map[string]map[uint32]*syscallStats, elapsed time.Duration, globalStats *simpleStats, globalPcts []int64) {
-	entries := collectEntries(procStats, false)
+	entries := collectEntries(procStats, false, d.sortColumn, elapsed.Seconds(), d.quantiles)
 
 	totalSecs := elapsed.Seconds()
 	nPerCol := d.topN // rows per column
@@ -442,11 +567,11 @@ func (d *Display) renderSummary(buf *strings.Builder, procStats map[string]map[u
 	// Column headers: LIFETIME │ avg [pcts...] max │ samples rate
 	var hdr strings.Builder
 	fmt.Fprintf(&hdr, "%-28s │", "LIFETIME")
-	fmt.Fprintf(&hdr, " %8s", "avg")
+	fmt.Fprintf(&hdr, " %s", d.sortIndicator("avg", 8))
 	for _, q := range d.quantiles {
-		fmt.Fprintf(&hdr, " %8s", quantileHeader(q))
+		fmt.Fprintf(&hdr, " %s", d.sortIndicator(quantileHeader(q), 8))
 	}
-	fmt.Fprintf(&hdr, " %8s │ %9s %9s", "max", "samples", "rate")
+	fmt.Fprintf(&hdr, " %s │ %s %s", d.sortIndicator("max", 8), d.sortIndicator("samples", 9), d.sortIndicator("rate", 9))
 	hdrStr := hdr.String()
 	fmt.Fprintf(buf, "%s │ %s\n", hdrStr, hdrStr)
 	buf.WriteString(strings.Repeat("-", dualWidth))

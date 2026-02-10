@@ -5,9 +5,9 @@
 // min/max/avg tracking (sum+count). Lifetime stats only.
 //
 // -c filters to specified processes (BPF-level). Without -c, traces all.
-// One unified table output, sorted by sample count.
+// One unified table output, sorted by any visible column.
 //
-// Usage: syscall-latency [-c procs] [-n top_n]
+// Usage: syscall-latency [-c procs] [-n top_n] [-sort column]
 //
 //go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -target bpfel -type latency_event bpf bpf/syscall_latency.c -- -I/usr/include -I.
 
@@ -50,6 +50,7 @@ var (
 	colsFlag    = flag.Int("cols", 0, "override terminal width (enables panel in batch mode)")
 	pollSleep   = flag.Duration("poll-sleep", 50*time.Microsecond, "ring buffer poll sleep when all rings are empty")
 	maxSketches = flag.Int("max-sketches", 0, "max process×syscall sketches to keep (LRU eviction; 0=auto: 4×n)")
+	sortFlag    = flag.String("sort", "rate", "sort column (e.g. rate, samples, avg, p99, max, min)")
 	showVersion = flag.Bool("version", false, "print version and exit")
 
 	// Timing
@@ -310,6 +311,11 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("-percentiles: %w", err)
 	}
+	sortColumn := strings.ToLower(*sortFlag)
+	// Normalize aliases
+	if sortColumn == "count" || sortColumn == "total" {
+		sortColumn = "samples"
+	}
 	if *mapEntriesFlag <= 0 {
 		return fmt.Errorf("-map-entries: must be > 0 (got %d)", *mapEntriesFlag)
 	}
@@ -418,6 +424,11 @@ func run() error {
 		colsOverride:   *colsFlag,
 		interactive:    interactive,
 		quantiles:      quantiles,
+		sortColumn:     sortColumn,
+	}
+	// Validate sort column against available columns
+	if !display.isValidSortColumn(sortColumn) {
+		return fmt.Errorf("-sort: invalid column %q (available: %s)", *sortFlag, strings.Join(display.availableSortColumns(), ", "))
 	}
 	metrics := &runtimeMetrics{}
 

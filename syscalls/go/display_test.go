@@ -5,7 +5,36 @@ import (
 	"testing"
 )
 
+var defaultQuantiles = []float64{0.50, 0.90, 0.99}
+
 // --- collectEntries ---
+
+func TestCollectEntries_SortedByRateDescending(t *testing.T) {
+	procStats := map[string]map[uint32]*syscallStats{
+		"tor": {
+			0: statsWithCount(100), // read
+			1: statsWithCount(50),  // write
+		},
+		"sshd": {
+			0: statsWithCount(200), // read
+		},
+	}
+
+	// sortByRate=true with elapsed=10s: rates are 20/s, 10/s, 5/s
+	entries := collectEntries(procStats, false, "rate", 10.0, defaultQuantiles)
+	if len(entries) != 3 {
+		t.Fatalf("len = %d, want 3", len(entries))
+	}
+	if entries[0].ss.stats.count != 200 {
+		t.Errorf("first entry count = %d, want 200", entries[0].ss.stats.count)
+	}
+	if entries[1].ss.stats.count != 100 {
+		t.Errorf("second entry count = %d, want 100", entries[1].ss.stats.count)
+	}
+	if entries[2].ss.stats.count != 50 {
+		t.Errorf("third entry count = %d, want 50", entries[2].ss.stats.count)
+	}
+}
 
 func TestCollectEntries_SortedByCountDescending(t *testing.T) {
 	procStats := map[string]map[uint32]*syscallStats{
@@ -18,7 +47,8 @@ func TestCollectEntries_SortedByCountDescending(t *testing.T) {
 		},
 	}
 
-	entries := collectEntries(procStats, false)
+	// sortByRate=false: sorted by total count
+	entries := collectEntries(procStats, false, "samples", 10.0, defaultQuantiles)
 	if len(entries) != 3 {
 		t.Fatalf("len = %d, want 3", len(entries))
 	}
@@ -39,7 +69,7 @@ func TestCollectEntries_TiesBrokenByLabel(t *testing.T) {
 		"a": {0: statsWithCount(10)},
 	}
 
-	entries := collectEntries(procStats, false)
+	entries := collectEntries(procStats, false, "rate", 10.0, defaultQuantiles)
 	if len(entries) != 2 {
 		t.Fatalf("len = %d, want 2", len(entries))
 	}
@@ -53,7 +83,7 @@ func TestCollectEntries_SingleProcOmitsPrefix(t *testing.T) {
 		"tor": {0: statsWithCount(10)}, // syscall 0 = "read"
 	}
 
-	entries := collectEntries(procStats, true)
+	entries := collectEntries(procStats, true, "rate", 10.0, defaultQuantiles)
 	if len(entries) != 1 {
 		t.Fatalf("len = %d, want 1", len(entries))
 	}
@@ -68,7 +98,7 @@ func TestCollectEntries_MultiProcIncludesPrefix(t *testing.T) {
 		"sshd": {0: statsWithCount(5)},
 	}
 
-	entries := collectEntries(procStats, false)
+	entries := collectEntries(procStats, false, "rate", 10.0, defaultQuantiles)
 	for _, e := range entries {
 		if !strings.Contains(e.label, "/") {
 			t.Errorf("label should include proc prefix, got %q", e.label)
@@ -144,7 +174,7 @@ func TestCollectProcessSummaries_AggregatesAcrossSyscalls(t *testing.T) {
 		},
 	}
 
-	summaries := collectProcessSummaries(procStats, 10.0)
+	summaries := collectProcessSummaries(procStats, 10.0, "rate")
 	if len(summaries) != 1 {
 		t.Fatalf("len = %d, want 1", len(summaries))
 	}
@@ -156,14 +186,14 @@ func TestCollectProcessSummaries_AggregatesAcrossSyscalls(t *testing.T) {
 	}
 }
 
-func TestCollectProcessSummaries_SortedByCountDesc(t *testing.T) {
+func TestCollectProcessSummaries_SortedByRateDesc(t *testing.T) {
 	procStats := map[string]map[uint32]*syscallStats{
 		"low":  {0: statsWithCount(10)},
 		"high": {0: statsWithCount(100)},
 		"mid":  {0: statsWithCount(50)},
 	}
 
-	summaries := collectProcessSummaries(procStats, 1.0)
+	summaries := collectProcessSummaries(procStats, 1.0, "rate")
 	if len(summaries) != 3 {
 		t.Fatalf("len = %d, want 3", len(summaries))
 	}
@@ -183,7 +213,7 @@ func TestCollectProcessSummaries_ZeroElapsed(t *testing.T) {
 		"p": {0: statsWithCount(10)},
 	}
 
-	summaries := collectProcessSummaries(procStats, 0)
+	summaries := collectProcessSummaries(procStats, 0, "rate")
 	if summaries[0].rate != 0 {
 		t.Errorf("rate = %f, want 0 when elapsed=0", summaries[0].rate)
 	}
@@ -356,7 +386,7 @@ func TestSummaryBarLegend_NonInteractive(t *testing.T) {
 func TestSummaryBarLegend_NormalMode(t *testing.T) {
 	d := &Display{interactive: true, mode: modeNormal}
 	legend := d.summaryBarLegend()
-	if !strings.Contains(legend, "[/]") || !strings.Contains(legend, "[q]") {
+	if !strings.Contains(legend, "[/]") || !strings.Contains(legend, "[q]") || !strings.Contains(legend, "[s]") {
 		t.Errorf("normal mode legend = %q, missing keys", legend)
 	}
 }
@@ -448,6 +478,192 @@ func TestRenderDetailRow_Zero(t *testing.T) {
 	s := buf.String()
 	if !strings.Contains(s, "-") {
 		t.Errorf("zero row should contain dashes, got %q", s)
+	}
+}
+
+// --- availableSortColumns ---
+
+func TestAvailableSortColumns_SummaryView(t *testing.T) {
+	d := &Display{quantiles: []float64{0.50, 0.99}}
+	cols := d.availableSortColumns()
+	// Summary view: avg, p50, p99, max, samples, rate (no min)
+	expected := []string{"avg", "p50", "p99", "max", "samples", "rate"}
+	if len(cols) != len(expected) {
+		t.Fatalf("cols = %v, want %v", cols, expected)
+	}
+	for i, c := range cols {
+		if c != expected[i] {
+			t.Errorf("cols[%d] = %q, want %q", i, c, expected[i])
+		}
+	}
+}
+
+func TestAvailableSortColumns_TableView(t *testing.T) {
+	d := &Display{focusProcesses: []string{"tor"}, quantiles: []float64{0.50, 0.99}}
+	cols := d.availableSortColumns()
+	// Table view: min, avg, p50, p99, max, samples (no rate)
+	expected := []string{"min", "avg", "p50", "p99", "max", "samples"}
+	if len(cols) != len(expected) {
+		t.Fatalf("cols = %v, want %v", cols, expected)
+	}
+	for i, c := range cols {
+		if c != expected[i] {
+			t.Errorf("cols[%d] = %q, want %q", i, c, expected[i])
+		}
+	}
+}
+
+// --- entrySortVal ---
+
+func TestEntrySortVal_Rate(t *testing.T) {
+	ss := statsWithCount(100)
+	val := entrySortVal(ss, "rate", 10.0, defaultQuantiles)
+	if val != 10.0 {
+		t.Errorf("rate sortVal = %f, want 10.0", val)
+	}
+}
+
+func TestEntrySortVal_Samples(t *testing.T) {
+	ss := statsWithCount(100)
+	val := entrySortVal(ss, "samples", 10.0, defaultQuantiles)
+	if val != 100.0 {
+		t.Errorf("samples sortVal = %f, want 100.0", val)
+	}
+}
+
+func TestEntrySortVal_Avg(t *testing.T) {
+	ss := statsWithCount(100)
+	val := entrySortVal(ss, "avg", 10.0, defaultQuantiles)
+	expected := float64(ss.stats.Avg())
+	if val != expected {
+		t.Errorf("avg sortVal = %f, want %f", val, expected)
+	}
+}
+
+func TestEntrySortVal_MinMax(t *testing.T) {
+	ss := statsWithCount(100)
+	minVal := entrySortVal(ss, "min", 10.0, defaultQuantiles)
+	maxVal := entrySortVal(ss, "max", 10.0, defaultQuantiles)
+	if minVal != float64(ss.stats.min) {
+		t.Errorf("min sortVal = %f, want %f", minVal, float64(ss.stats.min))
+	}
+	if maxVal != float64(ss.stats.max) {
+		t.Errorf("max sortVal = %f, want %f", maxVal, float64(ss.stats.max))
+	}
+}
+
+func TestEntrySortVal_Percentile(t *testing.T) {
+	ss := statsWithCount(100)
+	val := entrySortVal(ss, "p99", 10.0, defaultQuantiles)
+	if val <= 0 {
+		t.Errorf("p99 sortVal = %f, want > 0", val)
+	}
+}
+
+// --- sort by percentile column ---
+
+func TestCollectEntries_SortedByPercentile(t *testing.T) {
+	// Create two entries with different latency distributions
+	ssLow := newSyscallStats(0.25)
+	for i := int64(1); i <= 100; i++ {
+		ssLow.Record(i) // latencies 1-100
+	}
+	ssHigh := newSyscallStats(0.25)
+	for i := int64(50); i <= 200; i++ {
+		ssHigh.Record(i) // latencies 50-200, higher p99
+	}
+
+	procStats := map[string]map[uint32]*syscallStats{
+		"a": {0: ssLow},
+		"b": {0: ssHigh},
+	}
+
+	entries := collectEntries(procStats, false, "p99", 10.0, defaultQuantiles)
+	if len(entries) != 2 {
+		t.Fatalf("len = %d, want 2", len(entries))
+	}
+	// b/read should be first (higher p99)
+	if !strings.HasPrefix(entries[0].label, "b/") {
+		t.Errorf("first entry = %q, want b/ prefix (higher p99)", entries[0].label)
+	}
+}
+
+// --- sort mode key handling ---
+
+func TestHandleKey_SEntersSortMode(t *testing.T) {
+	d := &Display{interactive: true, quantiles: defaultQuantiles}
+	quit := d.handleKey(keyEvent{kind: keyChar, ch: 's'})
+	if quit {
+		t.Error("expected quit=false for 's' in normal mode")
+	}
+	if d.mode != modeSort {
+		t.Errorf("mode = %d, want modeSort", d.mode)
+	}
+}
+
+func TestHandleKey_SortCancelWithS(t *testing.T) {
+	d := &Display{interactive: true, mode: modeSort, sortText: "", quantiles: defaultQuantiles, sortColumn: "rate"}
+	d.handleKey(keyEvent{kind: keyChar, ch: 's'})
+	if d.mode != modeNormal {
+		t.Errorf("mode = %d, want modeNormal (cancel sort)", d.mode)
+	}
+}
+
+func TestHandleKey_SortBackspaceEmpty(t *testing.T) {
+	d := &Display{interactive: true, mode: modeSort, sortText: "", quantiles: defaultQuantiles}
+	d.handleKey(keyEvent{kind: keyBackspace})
+	if d.mode != modeNormal {
+		t.Errorf("mode = %d, want modeNormal after backspace on empty sort", d.mode)
+	}
+}
+
+func TestHandleKey_SortAutoSelect(t *testing.T) {
+	d := &Display{interactive: true, mode: modeSort, sortText: "", quantiles: []float64{0.50, 0.99}, sortColumn: "rate"}
+	// Type "m" → uniquely matches "max"
+	d.handleKey(keyEvent{kind: keyChar, ch: 'm'})
+	if d.mode != modeNormal {
+		t.Errorf("mode = %d, want modeNormal (auto-selected)", d.mode)
+	}
+	if d.sortColumn != "max" {
+		t.Errorf("sortColumn = %q, want max", d.sortColumn)
+	}
+}
+
+func TestHandleKey_SortPartialNoAutoSelect(t *testing.T) {
+	d := &Display{interactive: true, mode: modeSort, sortText: "", quantiles: []float64{0.50, 0.99}, sortColumn: "rate"}
+	// Type "p" → matches p50 and p99, should not auto-select
+	d.handleKey(keyEvent{kind: keyChar, ch: 'p'})
+	if d.mode != modeSort {
+		t.Errorf("mode = %d, want modeSort (ambiguous prefix)", d.mode)
+	}
+	if d.sortText != "p" {
+		t.Errorf("sortText = %q, want p", d.sortText)
+	}
+	// Now type "5" → matches only p50
+	d.handleKey(keyEvent{kind: keyChar, ch: '5'})
+	if d.mode != modeNormal {
+		t.Errorf("mode = %d, want modeNormal (auto-selected p50)", d.mode)
+	}
+	if d.sortColumn != "p50" {
+		t.Errorf("sortColumn = %q, want p50", d.sortColumn)
+	}
+}
+
+// --- sortIndicator ---
+
+func TestSortIndicator_ActiveColumn(t *testing.T) {
+	d := &Display{sortColumn: "p99"}
+	s := d.sortIndicator("p99", 8)
+	if !strings.Contains(s, "p99▼") {
+		t.Errorf("sortIndicator = %q, want to contain p99▼", s)
+	}
+}
+
+func TestSortIndicator_InactiveColumn(t *testing.T) {
+	d := &Display{sortColumn: "rate"}
+	s := d.sortIndicator("p99", 8)
+	if strings.Contains(s, "▼") {
+		t.Errorf("sortIndicator = %q, should not contain ▼", s)
 	}
 }
 
