@@ -50,7 +50,7 @@ var (
 	devices     = flag.String("d", "", "comma-separated device filter (e.g., sdc,sdd or 8:32,8:48)")
 	batch       = flag.Bool("batch", false, "batch mode (no screen clearing)")
 	alpha       = flag.Float64("alpha", 0.01, "DDSketch relative accuracy (0.01 = 1%)")
-	pollSleep   = flag.Duration("poll-sleep", 3*time.Millisecond, "ring buffer poll sleep when all rings are empty")
+	pollSleep   = flag.Duration("poll-sleep", 20*time.Millisecond, "ring buffer poll sleep when all rings are empty")
 	showVersion = flag.Bool("version", false, "print version and exit")
 )
 
