@@ -232,6 +232,77 @@ func (r *Reader) CommitAndSnap() {
 	})
 }
 
+// AllClosed reports whether every reader in the slice has been closed.
+func AllClosed(readers []*Reader) bool {
+	for _, rd := range readers {
+		if !rd.Closed() {
+			return false
+		}
+	}
+	return true
+}
+
+// CommitAll calls CommitAndSnap on every reader in the slice.
+func CommitAll(readers []*Reader) {
+	for _, rd := range readers {
+		rd.CommitAndSnap()
+	}
+}
+
+// RingsQuiet reports whether all rings are below 5% capacity,
+// meaning it's safe to take a brief sleep between poll rounds.
+func RingsQuiet(readers []*Reader) bool {
+	for _, rd := range readers {
+		if rd.Pending()*20 > rd.BufSize() {
+			return false
+		}
+	}
+	return true
+}
+
+// GroupSnapshot holds aggregated stats across multiple ring buffer readers.
+type GroupSnapshot struct {
+	Pending    int           // worst-case across rings
+	MaxPending int64         // worst-case high-water mark
+	Cap        int64         // per-ring capacity (all same size)
+	EventSum   int64         // sum across rings
+	NonEmpty   int64         // sum across rings
+	PollCount  int64         // sum across rings
+	LastBatch  int64         // sum across rings
+	LastEmpty  time.Duration // time since most recent empty poll (any ring)
+}
+
+// SnapshotGroup aggregates stats across multiple ring buffer readers.
+// Capacity metrics use worst-case; counters are summed; timestamps use most recent.
+func SnapshotGroup(readers []*Reader) GroupSnapshot {
+	var g GroupSnapshot
+	var latestEmptyNano int64
+	for _, rd := range readers {
+		if pending := rd.Pending(); pending > g.Pending {
+			g.Pending = pending
+		}
+		g.Cap = int64(rd.BufSize())
+		snap := rd.Snapshot()
+		if snap == nil {
+			continue
+		}
+		if snap.MaxPending > g.MaxPending {
+			g.MaxPending = snap.MaxPending
+		}
+		g.EventSum += snap.EventSum
+		g.NonEmpty += snap.NonEmptyCount
+		g.PollCount += snap.PollCount
+		g.LastBatch += snap.LastNonEmpty
+		if snap.LastEmptyNano > latestEmptyNano {
+			latestEmptyNano = snap.LastEmptyNano
+		}
+	}
+	if latestEmptyNano > 0 {
+		g.LastEmpty = time.Since(time.Unix(0, latestEmptyNano))
+	}
+	return g
+}
+
 // Poll is a non-blocking read from the ring buffer. Returns true if a
 // record was read, false immediately when the ring is empty or the
 // producer is mid-write. The caller controls sleep timing across

@@ -152,31 +152,6 @@ func parsePercentiles(s string) ([]float64, error) {
 	return quantiles, nil
 }
 
-func allClosed(readers []*ringpoll.Reader) bool {
-	for _, rd := range readers {
-		if !rd.Closed() {
-			return false
-		}
-	}
-	return true
-}
-
-func commitAll(readers []*ringpoll.Reader) {
-	for _, rd := range readers {
-		rd.CommitAndSnap()
-	}
-}
-
-// ringsQuiet reports whether all rings are below 5% capacity,
-// meaning it's safe to take a brief sleep between poll rounds.
-func ringsQuiet(readers []*ringpoll.Reader) bool {
-	for _, rd := range readers {
-		if rd.Pending()*20 > rd.BufSize() {
-			return false
-		}
-	}
-	return true
-}
 
 // runReader busy-polls multiple ring buffers in round-robin, batches events,
 // and flushes to state. Single goroutine — no new contention points.
@@ -185,7 +160,7 @@ func runReader(readers []*ringpoll.Reader, pollSleep time.Duration, maxBatch int
 	eventSize := int(unsafe.Sizeof(bpfLatencyEvent{}))
 	pending := make([]pendingEvent, 0, maxBatch)
 
-	for !allClosed(readers) {
+	for !ringpoll.AllClosed(readers) {
 		for _, rd := range readers {
 			for rd.Poll(&rec) {
 				if len(rec.RawSample) < eventSize {
@@ -200,7 +175,7 @@ func runReader(readers []*ringpoll.Reader, pollSleep time.Duration, maxBatch int
 
 				if len(pending) >= maxBatch {
 					state.RecordBatch(pending)
-					commitAll(readers)
+					ringpoll.CommitAll(readers)
 					pending = pending[:0]
 				}
 			}
@@ -209,73 +184,41 @@ func runReader(readers []*ringpoll.Reader, pollSleep time.Duration, maxBatch int
 			state.RecordBatch(pending)
 			pending = pending[:0]
 		}
-		commitAll(readers)
-		if ringsQuiet(readers) {
+		ringpoll.CommitAll(readers)
+		if ringpoll.RingsQuiet(readers) {
 			time.Sleep(pollSleep)
 		}
 	}
 	// flush remainder
 	if len(pending) > 0 {
 		state.RecordBatch(pending)
-		commitAll(readers)
+		ringpoll.CommitAll(readers)
 	}
 }
 
 func snapshotRingStats(readers []*ringpoll.Reader, acc *ringAvg) *ringStats {
-	// For capacity stats (avg/max/cap), use worst-case ring — each ring
-	// drops independently, so the most-filled ring is what matters.
-	var worstPending int
-	var perRingCap int64
-	var worstMaxPending int64
-	var totalEventSum, totalNonEmpty, totalPollCount, totalLastNonEmpty int64
-	var latestEmptyNano int64
-
-	for _, rd := range readers {
-		pending := rd.Pending()
-		if pending > worstPending {
-			worstPending = pending
-		}
-		perRingCap = int64(rd.BufSize()) // all rings same size
-		snap := rd.Snapshot()
-		if snap != nil {
-			if snap.MaxPending > worstMaxPending {
-				worstMaxPending = snap.MaxPending
-			}
-			totalEventSum += snap.EventSum
-			totalNonEmpty += snap.NonEmptyCount
-			totalPollCount += snap.PollCount
-			totalLastNonEmpty += snap.LastNonEmpty
-			if snap.LastEmptyNano > latestEmptyNano {
-				latestEmptyNano = snap.LastEmptyNano
-			}
-		}
-	}
-
-	acc.add(worstPending)
+	g := ringpoll.SnapshotGroup(readers)
+	acc.add(g.Pending)
 
 	var avg1, avg0 float64
-	if totalNonEmpty > 0 {
-		avg1 = float64(totalEventSum) / float64(totalNonEmpty)
+	if g.NonEmpty > 0 {
+		avg1 = float64(g.EventSum) / float64(g.NonEmpty)
 	}
-	if totalPollCount > 0 {
-		avg0 = float64(totalEventSum) / float64(totalPollCount)
-	}
-	var last0 time.Duration
-	if latestEmptyNano > 0 {
-		last0 = time.Since(time.Unix(0, latestEmptyNano))
+	if g.PollCount > 0 {
+		avg0 = float64(g.EventSum) / float64(g.PollCount)
 	}
 
 	return &ringStats{
 		capacityStats: capacityStats{
 			avg: acc.avg(),
-			max: worstMaxPending,
-			cap: perRingCap,
+			max: g.MaxPending,
+			cap: g.Cap,
 		},
-		pending: worstPending,
+		pending: g.Pending,
 		avg1:    avg1,
 		avg0:    avg0,
-		last1:   totalLastNonEmpty,
-		last0:   last0,
+		last1:   g.LastBatch,
+		last0:   g.LastEmpty,
 	}
 }
 
