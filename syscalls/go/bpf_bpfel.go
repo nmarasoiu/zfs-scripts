@@ -74,7 +74,6 @@ type bpfMapSpecs struct {
 	Events2     *ebpf.MapSpec `ebpf:"events2"`
 	Events3     *ebpf.MapSpec `ebpf:"events3"`
 	StartTimes  *ebpf.MapSpec `ebpf:"start_times"`
-	SyscallIds  *ebpf.MapSpec `ebpf:"syscall_ids"`
 	TargetComms *ebpf.MapSpec `ebpf:"target_comms"`
 }
 
@@ -103,7 +102,6 @@ type bpfMaps struct {
 	Events2     *ebpf.Map `ebpf:"events2"`
 	Events3     *ebpf.Map `ebpf:"events3"`
 	StartTimes  *ebpf.Map `ebpf:"start_times"`
-	SyscallIds  *ebpf.Map `ebpf:"syscall_ids"`
 	TargetComms *ebpf.Map `ebpf:"target_comms"`
 }
 
@@ -115,7 +113,6 @@ func (m *bpfMaps) Close() error {
 		m.Events2,
 		m.Events3,
 		m.StartTimes,
-		m.SyscallIds,
 		m.TargetComms,
 	)
 }

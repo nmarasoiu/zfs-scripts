@@ -311,7 +311,7 @@ func run() error {
 	for _, name := range []string{"events0", "events1", "events2", "events3"} {
 		spec.Maps[name].MaxEntries = ringSize
 	}
-	for _, name := range []string{"start_times", "syscall_ids"} {
+	for _, name := range []string{"start_times"} {
 		spec.Maps[name].MaxEntries = uint32(*mapEntriesFlag)
 	}
 
