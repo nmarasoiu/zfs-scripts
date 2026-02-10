@@ -119,9 +119,9 @@ int trace_syscall_exit(struct trace_event_raw_sys_exit *ctx) {
 
     __u64 latency = bpf_ktime_get_ns() - *start_ts;
 
-    __u32 cpu = bpf_get_smp_processor_id() % NUM_RINGS;
+    __u32 ring = (__u32)latency % NUM_RINGS;
     struct latency_event *event = NULL;
-    switch (cpu) {
+    switch (ring) {
         case 0: event = bpf_ringbuf_reserve(&events0, sizeof(*event), 0); break;
         case 1: event = bpf_ringbuf_reserve(&events1, sizeof(*event), 0); break;
         case 2: event = bpf_ringbuf_reserve(&events2, sizeof(*event), 0); break;
