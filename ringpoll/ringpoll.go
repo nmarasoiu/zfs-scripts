@@ -241,46 +241,47 @@ func (r *Reader) Poll(rec *Record) bool {
 		return false
 	}
 
-	prod := atomic.LoadUint64(r.prodPos)
-	if pending := int64(prod - r.pos); pending > r.maxPending {
-		r.maxPending = pending
-	}
-	if r.pos == prod {
-		return false // empty
-	}
+	for {
+		prod := atomic.LoadUint64(r.prodPos)
+		if pending := int64(prod - r.pos); pending > r.maxPending {
+			r.maxPending = pending
+		}
+		if r.pos == prod {
+			return false // empty
+		}
 
-	// Read 8-byte header
-	off := r.pos & r.mask
-	hdrLen := binary.LittleEndian.Uint32(r.ring[off:])
+		// Read 8-byte header
+		off := r.pos & r.mask
+		hdrLen := binary.LittleEndian.Uint32(r.ring[off:])
 
-	if hdrLen&bpfRingbufBusyBit != 0 {
-		return false // producer mid-write
-	}
+		if hdrLen&bpfRingbufBusyBit != 0 {
+			return false // producer mid-write
+		}
 
-	r.pos += ringbufHdrSize
+		r.pos += ringbufHdrSize
 
-	dataLen := hdrLen & ^uint32(bpfRingbufBusyBit|bpfRingbufDiscardBit)
-	dataAligned := (uint64(dataLen) + 7) &^ 7
+		dataLen := hdrLen & ^uint32(bpfRingbufBusyBit|bpfRingbufDiscardBit)
+		dataAligned := (uint64(dataLen) + 7) &^ 7
 
-	if hdrLen&bpfRingbufDiscardBit != 0 {
+		if hdrLen&bpfRingbufDiscardBit != 0 {
+			r.pos += dataAligned
+			continue // skip discarded record
+		}
+
+		// Copy data out of the ring
+		start := r.pos & r.mask
+		if cap(rec.RawSample) < int(dataLen) {
+			rec.RawSample = make([]byte, dataLen)
+		} else {
+			rec.RawSample = rec.RawSample[:dataLen]
+		}
+		copy(rec.RawSample, r.ring[start:start+uint64(dataLen)])
+
 		r.pos += dataAligned
-		// Discarded record — try again (tail-recurse)
-		return r.Poll(rec)
+
+		r.batchCount++
+		return true
 	}
-
-	// Copy data out of the ring
-	start := r.pos & r.mask
-	if cap(rec.RawSample) < int(dataLen) {
-		rec.RawSample = make([]byte, dataLen)
-	} else {
-		rec.RawSample = rec.RawSample[:dataLen]
-	}
-	copy(rec.RawSample, r.ring[start:start+uint64(dataLen)])
-
-	r.pos += dataAligned
-
-	r.batchCount++
-	return true
 }
 
 // ReadInto polls the ring buffer for the next committed record.
