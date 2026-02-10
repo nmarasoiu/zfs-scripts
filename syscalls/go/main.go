@@ -19,6 +19,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -32,11 +33,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const (
-	displayInterval = 100 * time.Millisecond // 10 FPS display refresh
-	flushSize       = 1024
-	flushInterval   = 10 * time.Millisecond
-)
+const defaultPercentiles = "50,90,99"
 
 var (
 	version = "dev"
@@ -48,9 +45,23 @@ var (
 	topProcs    = flag.Int("n", 0, "top N rows to display (0=all)")
 	batch       = flag.Bool("batch", false, "batch mode (no screen clearing)")
 	colsFlag    = flag.Int("cols", 0, "override terminal width (enables panel in batch mode)")
-	pollSleep   = flag.Duration("poll-sleep", 50*time.Microsecond, "ring buffer poll sleep when empty")
+	pollSleep   = flag.Duration("poll-sleep", 50*time.Microsecond, "ring buffer poll sleep when all rings are empty")
 	maxSketches = flag.Int("max-sketches", 0, "max process×syscall sketches to keep (LRU eviction; 0=auto: 4×n)")
 	showVersion = flag.Bool("version", false, "print version and exit")
+
+	// Timing
+	displayRefreshInterval = flag.Duration("display-refresh-interval", 100*time.Millisecond, "display refresh interval (e.g. 100ms, 200ms)")
+	batchSize              = flag.Int("batch-size", 1024, "event batch: max events before flush to stats")
+	batchInterval          = flag.Duration("batch-interval", 10*time.Millisecond, "event batch: max time before flush to stats")
+	mapSampleInterval      = flag.Duration("map-sample-interval", 2*time.Second, "BPF map occupancy sample interval")
+
+	// BPF
+	ringSizeFlag   = flag.String("ring-size", "2M", "per-ring buffer size (e.g. 512K, 2M, 8M); must be power of 2, ≥4K; 4 rings total")
+	mapEntriesFlag = flag.Int("map-entries", 65536, "BPF LRU hash map max entries (in-flight syscall tracking capacity)")
+
+	// DDSketch
+	alphaFlag       = flag.Float64("alpha", 0.25, "DDSketch relative accuracy — 0.25 means any reported\n\tpercentile is within ±25% of the true value; lower values\n\tuse more memory but give tighter bounds.\n\tSee: https://arxiv.org/abs/1908.10693")
+	percentilesFlag = flag.String("percentiles", defaultPercentiles, "comma-separated percentile list (e.g. 50,90,99,99.9)")
 )
 
 // parseFocusList parses the -c flag into a deduplicated list of process names,
@@ -74,6 +85,70 @@ func parseFocusList() []string {
 	return list
 }
 
+// parseSize parses a human-readable byte size (e.g. "2M", "512K", "4096").
+// Accepts suffixes K, M, G (case-insensitive, optional trailing B).
+func parseSize(s string) (uint32, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, fmt.Errorf("empty size")
+	}
+	s = strings.ToUpper(s)
+	s = strings.TrimSuffix(s, "B") // "2MB" → "2M"
+	multiplier := uint64(1)
+	if strings.HasSuffix(s, "K") {
+		multiplier = 1024
+		s = s[:len(s)-1]
+	} else if strings.HasSuffix(s, "M") {
+		multiplier = 1024 * 1024
+		s = s[:len(s)-1]
+	} else if strings.HasSuffix(s, "G") {
+		multiplier = 1024 * 1024 * 1024
+		s = s[:len(s)-1]
+	}
+	n, err := fmt.Sscanf(s, "%d", new(uint64))
+	if n != 1 || err != nil {
+		return 0, fmt.Errorf("invalid size %q", s)
+	}
+	var val uint64
+	fmt.Sscanf(s, "%d", &val)
+	result := val * multiplier
+	if result > 1<<32-1 {
+		return 0, fmt.Errorf("size %d exceeds uint32 max", result)
+	}
+	return uint32(result), nil
+}
+
+// isPowerOf2 returns true if n > 0 and n is a power of two.
+func isPowerOf2(n uint32) bool {
+	return n > 0 && n&(n-1) == 0
+}
+
+// parsePercentiles parses a comma-separated list of percentiles (0–100 exclusive)
+// and returns sorted quantiles in 0.0–1.0 form.
+func parsePercentiles(s string) ([]float64, error) {
+	parts := strings.Split(s, ",")
+	var quantiles []float64
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		var val float64
+		if _, err := fmt.Sscanf(p, "%f", &val); err != nil {
+			return nil, fmt.Errorf("invalid percentile %q: %w", p, err)
+		}
+		if val <= 0 || val >= 100 {
+			return nil, fmt.Errorf("percentile %g must be in (0, 100)", val)
+		}
+		quantiles = append(quantiles, val/100)
+	}
+	if len(quantiles) == 0 {
+		return nil, fmt.Errorf("empty percentile list")
+	}
+	sort.Float64s(quantiles)
+	return quantiles, nil
+}
+
 func allClosed(readers []*ringpoll.Reader) bool {
 	for _, rd := range readers {
 		if !rd.Closed() {
@@ -91,10 +166,10 @@ func commitAll(readers []*ringpoll.Reader) {
 
 // runReader busy-polls multiple ring buffers in round-robin, batches events,
 // and flushes to state. Single goroutine — no new contention points.
-func runReader(readers []*ringpoll.Reader, pollSleep time.Duration, state *State) {
+func runReader(readers []*ringpoll.Reader, pollSleep time.Duration, batchSz int, batchIntv time.Duration, state *State) {
 	var rec ringpoll.Record
 	eventSize := int(unsafe.Sizeof(bpfLatencyEvent{}))
-	pending := make([]pendingEvent, 0, flushSize)
+	pending := make([]pendingEvent, 0, batchSz)
 	lastFlush := time.Now()
 
 	for !allClosed(readers) {
@@ -112,7 +187,7 @@ func runReader(readers []*ringpoll.Reader, pollSleep time.Duration, state *State
 				pending = append(pending, pendingEvent{event.Comm, event.SyscallId, latencyUs})
 				gotAny = true
 
-				if len(pending) >= flushSize {
+				if len(pending) >= batchSz {
 					state.RecordBatch(pending)
 					commitAll(readers)
 					pending = pending[:0]
@@ -123,7 +198,7 @@ func runReader(readers []*ringpoll.Reader, pollSleep time.Duration, state *State
 		if !gotAny {
 			commitAll(readers)
 			time.Sleep(pollSleep)
-		} else if time.Since(lastFlush) >= flushInterval {
+		} else if time.Since(lastFlush) >= batchIntv {
 			state.RecordBatch(pending)
 			commitAll(readers)
 			pending = pending[:0]
@@ -216,6 +291,26 @@ func run() error {
 		printVersion()
 		return nil
 	}
+
+	// Validate and parse new flags
+	ringSize, err := parseSize(*ringSizeFlag)
+	if err != nil {
+		return fmt.Errorf("-ring-size: %w", err)
+	}
+	if !isPowerOf2(ringSize) || ringSize < 4096 {
+		return fmt.Errorf("-ring-size: must be a power of 2 and ≥ 4K (got %d)", ringSize)
+	}
+	if *alphaFlag <= 0 || *alphaFlag >= 1 {
+		return fmt.Errorf("-alpha: must be in (0, 1) (got %g)", *alphaFlag)
+	}
+	quantiles, err := parsePercentiles(*percentilesFlag)
+	if err != nil {
+		return fmt.Errorf("-percentiles: %w", err)
+	}
+	if *mapEntriesFlag <= 0 {
+		return fmt.Errorf("-map-entries: must be > 0 (got %d)", *mapEntriesFlag)
+	}
+
 	if *maxSketches <= 0 {
 		if *topProcs > 0 {
 			*maxSketches = 4 * *topProcs // 2× what fits on screen (n×2 columns)
@@ -244,6 +339,15 @@ func run() error {
 			return fmt.Errorf("rewrite BPF constants: %w", err)
 		}
 	}
+
+	// Resize BPF maps from CLI flags before loading into kernel
+	for _, name := range []string{"events0", "events1", "events2", "events3"} {
+		spec.Maps[name].MaxEntries = ringSize
+	}
+	for _, name := range []string{"start_times", "syscall_ids"} {
+		spec.Maps[name].MaxEntries = uint32(*mapEntriesFlag)
+	}
+
 	objs := bpfObjects{}
 	if err := spec.LoadAndAssign(&objs, nil); err != nil {
 		return fmt.Errorf("load eBPF objects: %w", err)
@@ -287,7 +391,7 @@ func run() error {
 		}
 	}()
 
-	state := newState(*maxSketches)
+	state := newState(*maxSketches, *alphaFlag)
 	mapCap := int64(objs.StartTimes.MaxEntries())
 	interactive := !*batch && isTerminal(int(os.Stdin.Fd())) && isTerminal(int(os.Stdout.Fd()))
 	display := &Display{
@@ -296,6 +400,7 @@ func run() error {
 		topN:           *topProcs,
 		colsOverride:   *colsFlag,
 		interactive:    interactive,
+		quantiles:      quantiles,
 	}
 	metrics := &runtimeMetrics{}
 
@@ -333,7 +438,7 @@ func run() error {
 	readerDone.Add(1)
 	go func() {
 		defer readerDone.Done()
-		runReader(readers, *pollSleep, state)
+		runReader(readers, *pollSleep, *batchSize, *batchInterval, state)
 	}()
 
 	// Input goroutine for interactive mode
@@ -342,8 +447,8 @@ func run() error {
 		go runInput(keyCh)
 	}
 
-	// Map occupancy goroutine (counts entries in BPF LRU hash every 2s)
-	mapTicker := time.NewTicker(2 * time.Second)
+	// Map occupancy goroutine
+	mapTicker := time.NewTicker(*mapSampleInterval)
 	go func() {
 		defer mapTicker.Stop()
 		for {
@@ -361,8 +466,8 @@ func run() error {
 		}
 	}()
 
-	// Display goroutine (10 FPS)
-	displayTicker := time.NewTicker(displayInterval)
+	// Display goroutine
+	displayTicker := time.NewTicker(*displayRefreshInterval)
 	go func() {
 		defer displayTicker.Stop()
 		var ra ringAvg

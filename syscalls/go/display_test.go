@@ -400,12 +400,15 @@ func TestRenderFooter_WithRingStats(t *testing.T) {
 
 // --- formatSummaryRow ---
 
+var testQuantiles = []float64{0.25, 0.50, 0.75, 0.90, 0.99, 0.999}
+
 func TestFormatSummaryRow_NonZero(t *testing.T) {
-	ss := newSyscallStats()
+	ss := newSyscallStats(0.25)
 	for i := int64(1); i <= 100; i++ {
 		ss.Record(i)
 	}
-	row := formatSummaryRow("tor/read", ss.stats, sketchPercentiles(ss.sketch), 10.0)
+	d := &Display{quantiles: testQuantiles}
+	row := d.formatSummaryRow("tor/read", ss.stats, sketchPercentiles(ss.sketch, testQuantiles), 10.0)
 	if !strings.Contains(row, "tor/read") {
 		t.Errorf("row should contain name, got %q", row)
 	}
@@ -415,8 +418,9 @@ func TestFormatSummaryRow_NonZero(t *testing.T) {
 }
 
 func TestFormatSummaryRow_Zero(t *testing.T) {
-	ss := newSyscallStats()
-	row := formatSummaryRow("empty", ss.stats, sketchPercentiles(ss.sketch), 10.0)
+	ss := newSyscallStats(0.25)
+	d := &Display{quantiles: testQuantiles}
+	row := d.formatSummaryRow("empty", ss.stats, sketchPercentiles(ss.sketch, testQuantiles), 10.0)
 	if !strings.Contains(row, "-") {
 		t.Errorf("zero row should contain dashes, got %q", row)
 	}
@@ -425,12 +429,12 @@ func TestFormatSummaryRow_Zero(t *testing.T) {
 // --- renderDetailRow ---
 
 func TestRenderDetailRow_NonZero(t *testing.T) {
-	ss := newSyscallStats()
+	ss := newSyscallStats(0.25)
 	for i := int64(1); i <= 50; i++ {
 		ss.Record(i)
 	}
 	var buf strings.Builder
-	renderDetailRow(&buf, "tor/read        ", ss.stats, sketchPercentiles(ss.sketch))
+	renderDetailRow(&buf, "tor/read        ", ss.stats, sketchPercentiles(ss.sketch, testQuantiles))
 	s := buf.String()
 	if !strings.Contains(s, "tor/read") {
 		t.Errorf("row should contain name, got %q", s)
@@ -438,9 +442,9 @@ func TestRenderDetailRow_NonZero(t *testing.T) {
 }
 
 func TestRenderDetailRow_Zero(t *testing.T) {
-	ss := newSyscallStats()
+	ss := newSyscallStats(0.25)
 	var buf strings.Builder
-	renderDetailRow(&buf, "empty           ", ss.stats, sketchPercentiles(ss.sketch))
+	renderDetailRow(&buf, "empty           ", ss.stats, sketchPercentiles(ss.sketch, testQuantiles))
 	s := buf.String()
 	if !strings.Contains(s, "-") {
 		t.Errorf("zero row should contain dashes, got %q", s)
@@ -450,7 +454,7 @@ func TestRenderDetailRow_Zero(t *testing.T) {
 // --- helper ---
 
 func statsWithCount(n uint64) *syscallStats {
-	ss := newSyscallStats()
+	ss := newSyscallStats(0.25)
 	for i := uint64(0); i < n; i++ {
 		ss.Record(int64(i + 1))
 	}

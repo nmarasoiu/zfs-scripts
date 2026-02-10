@@ -58,8 +58,8 @@ type syscallStats struct {
 	stats  *simpleStats
 }
 
-func newSyscallStats() *syscallStats {
-	sketch, _ := ddsketch.NewDefaultDDSketch(0.01)
+func newSyscallStats(alpha float64) *syscallStats {
+	sketch, _ := ddsketch.NewDefaultDDSketch(alpha)
 	return &syscallStats{
 		sketch: sketch,
 		stats:  newSimpleStats(),
@@ -71,22 +71,15 @@ func (ss *syscallStats) Record(latencyUs int64) {
 	ss.stats.Record(latencyUs)
 }
 
-// percentiles holds pre-extracted quantile values (in µs) from a DDSketch.
-type percentiles struct {
-	P25, P50, P75, P90, P99, P999 int64
-}
-
-func sketchPercentiles(sketch *ddsketch.DDSketch) percentiles {
-	p25, _ := sketch.GetValueAtQuantile(0.25)
-	p50, _ := sketch.GetValueAtQuantile(0.50)
-	p75, _ := sketch.GetValueAtQuantile(0.75)
-	p90, _ := sketch.GetValueAtQuantile(0.90)
-	p99, _ := sketch.GetValueAtQuantile(0.99)
-	p999, _ := sketch.GetValueAtQuantile(0.999)
-	return percentiles{
-		P25: int64(p25), P50: int64(p50), P75: int64(p75),
-		P90: int64(p90), P99: int64(p99), P999: int64(p999),
+// sketchPercentiles extracts the given quantiles from a DDSketch.
+// quantiles are in 0.0–1.0 form (e.g. 0.50, 0.99). Returns values in µs.
+func sketchPercentiles(sketch *ddsketch.DDSketch, quantiles []float64) []int64 {
+	result := make([]int64, len(quantiles))
+	for i, q := range quantiles {
+		v, _ := sketch.GetValueAtQuantile(q)
+		result[i] = int64(v)
 	}
+	return result
 }
 
 // sketchKey is the flat composite key for the LRU sketch cache.
@@ -98,7 +91,8 @@ type sketchKey struct {
 
 // State holds all per-process and per-syscall stats
 type State struct {
-	mu sync.Mutex
+	mu    sync.Mutex
+	alpha float64 // DDSketch relative accuracy
 
 	// Per-(process, syscall) stats, capped by LRU eviction.
 	sketches        *simplelru.LRU[sketchKey, *syscallStats]
@@ -111,9 +105,10 @@ type State struct {
 	startTime time.Time
 }
 
-func newState(maxSketches int) *State {
-	sketch, _ := ddsketch.NewDefaultDDSketch(0.01)
+func newState(maxSketches int, alpha float64) *State {
+	sketch, _ := ddsketch.NewDefaultDDSketch(alpha)
 	s := &State{
+		alpha:        alpha,
 		globalSketch: sketch,
 		globalStats:  newSimpleStats(),
 		startTime:    time.Now(),
@@ -183,7 +178,7 @@ func (s *State) RecordBatch(batch []pendingEvent) {
 
 		ss, ok := s.sketches.Get(key) // Get promotes to most-recent
 		if !ok {
-			ss = newSyscallStats()
+			ss = newSyscallStats(s.alpha)
 			s.sketches.Add(key, ss) // evicts LRU if over cap
 		}
 		ss.Record(e.latencyUs)

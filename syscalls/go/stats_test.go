@@ -79,7 +79,7 @@ func TestSimpleStats_MinMaxAvg(t *testing.T) {
 // --- syscallStats ---
 
 func TestSyscallStats_RecordUpdatesSketchAndStats(t *testing.T) {
-	ss := newSyscallStats()
+	ss := newSyscallStats(0.25)
 	ss.Record(100)
 	ss.Record(200)
 	ss.Record(300)
@@ -102,21 +102,23 @@ func TestSyscallStats_RecordUpdatesSketchAndStats(t *testing.T) {
 }
 
 func TestSketchPercentiles_Monotonic(t *testing.T) {
-	ss := newSyscallStats()
+	ss := newSyscallStats(0.25)
 	for i := int64(1); i <= 1000; i++ {
 		ss.Record(i)
 	}
-	pcts := sketchPercentiles(ss.sketch)
-	if pcts.P25 > pcts.P50 || pcts.P50 > pcts.P75 || pcts.P75 > pcts.P90 || pcts.P90 > pcts.P99 || pcts.P99 > pcts.P999 {
-		t.Errorf("percentiles not monotonic: P25=%d P50=%d P75=%d P90=%d P99=%d P999=%d",
-			pcts.P25, pcts.P50, pcts.P75, pcts.P90, pcts.P99, pcts.P999)
+	qs := []float64{0.25, 0.50, 0.75, 0.90, 0.99, 0.999}
+	pcts := sketchPercentiles(ss.sketch, qs)
+	for i := 1; i < len(pcts); i++ {
+		if pcts[i-1] > pcts[i] {
+			t.Errorf("percentiles not monotonic at index %d: %d > %d", i, pcts[i-1], pcts[i])
+		}
 	}
 }
 
 // --- State ---
 
 func TestState_RecordBatchAndRead(t *testing.T) {
-	state := newState(100)
+	state := newState(100, 0.25)
 	batch := []pendingEvent{
 		{testComm("tor"), 0, 100},  // read
 		{testComm("tor"), 0, 200},  // read
@@ -157,7 +159,7 @@ func TestState_RecordBatchAndRead(t *testing.T) {
 }
 
 func TestState_LRUEviction(t *testing.T) {
-	state := newState(2) // only 2 sketches allowed
+	state := newState(2, 0.25) // only 2 sketches allowed
 	state.RecordBatch([]pendingEvent{
 		{testComm("a"), 0, 10},
 		{testComm("b"), 1, 20},
@@ -185,7 +187,7 @@ func TestState_LRUEviction(t *testing.T) {
 }
 
 func TestState_GlobalStatsTrackAllEvents(t *testing.T) {
-	state := newState(100)
+	state := newState(100, 0.25)
 	state.RecordBatch([]pendingEvent{
 		{testComm("p1"), 0, 5},
 		{testComm("p2"), 1, 15},
