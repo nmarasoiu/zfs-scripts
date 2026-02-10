@@ -89,7 +89,7 @@ func runReader(rd *ringpoll.Reader, state *State) {
 		if latencyUs < 1 {
 			latencyUs = 1
 		}
-		pending = append(pending, pendingEvent{commString(event.Comm), event.SyscallId, latencyUs})
+		pending = append(pending, pendingEvent{event.Comm, event.SyscallId, latencyUs})
 
 		if len(pending) >= flushSize || time.Since(lastFlush) >= flushInterval {
 			state.RecordBatch(pending)

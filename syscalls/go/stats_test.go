@@ -4,44 +4,30 @@ import (
 	"testing"
 )
 
-// --- commString ---
-
-func TestCommString_NullTerminated(t *testing.T) {
-	var comm [16]int8
-	for i, c := range []byte("tor") {
-		comm[i] = int8(c)
+func testComm(s string) [16]int8 {
+	var c [16]int8
+	for i, b := range []byte(s) {
+		if i >= 16 {
+			break
+		}
+		c[i] = int8(b)
 	}
-	got := commString(comm)
+	return c
+}
+
+// --- commToString ---
+
+func TestCommToString_NullTerminated(t *testing.T) {
+	got := commToString(testComm("tor"))
 	if got != "tor" {
-		t.Errorf("commString = %q, want %q", got, "tor")
+		t.Errorf("commToString = %q, want %q", got, "tor")
 	}
 }
 
-func TestCommString_FullBuffer(t *testing.T) {
-	var comm [16]int8
-	for i, c := range []byte("0123456789abcdef") {
-		comm[i] = int8(c)
-	}
-	got := commString(comm)
+func TestCommToString_FullBuffer(t *testing.T) {
+	got := commToString(testComm("0123456789abcdef"))
 	if got != "0123456789abcdef" {
-		t.Errorf("commString = %q, want %q", got, "0123456789abcdef")
-	}
-}
-
-func TestCommString_Interning(t *testing.T) {
-	// Reset intern map for test isolation
-	old := commIntern
-	commIntern = make(map[string]string)
-	defer func() { commIntern = old }()
-
-	var comm [16]int8
-	for i, c := range []byte("sshd") {
-		comm[i] = int8(c)
-	}
-	s1 := commString(comm)
-	s2 := commString(comm)
-	if s1 != s2 {
-		t.Errorf("interned strings not equal: %q vs %q", s1, s2)
+		t.Errorf("commToString = %q, want %q", got, "0123456789abcdef")
 	}
 }
 
@@ -132,10 +118,10 @@ func TestSketchPercentiles_Monotonic(t *testing.T) {
 func TestState_RecordBatchAndRead(t *testing.T) {
 	state := newState(100)
 	batch := []pendingEvent{
-		{"tor", 0, 100},  // read
-		{"tor", 0, 200},  // read
-		{"tor", 1, 50},   // write
-		{"sshd", 0, 300}, // read
+		{testComm("tor"), 0, 100},  // read
+		{testComm("tor"), 0, 200},  // read
+		{testComm("tor"), 1, 50},   // write
+		{testComm("sshd"), 0, 300}, // read
 	}
 	state.RecordBatch(batch)
 
@@ -173,9 +159,9 @@ func TestState_RecordBatchAndRead(t *testing.T) {
 func TestState_LRUEviction(t *testing.T) {
 	state := newState(2) // only 2 sketches allowed
 	state.RecordBatch([]pendingEvent{
-		{"a", 0, 10},
-		{"b", 1, 20},
-		{"c", 2, 30}, // should evict "a"/0
+		{testComm("a"), 0, 10},
+		{testComm("b"), 1, 20},
+		{testComm("c"), 2, 30}, // should evict "a"/0
 	})
 
 	state.Read(func(v StateView) {
@@ -201,11 +187,11 @@ func TestState_LRUEviction(t *testing.T) {
 func TestState_GlobalStatsTrackAllEvents(t *testing.T) {
 	state := newState(100)
 	state.RecordBatch([]pendingEvent{
-		{"p1", 0, 5},
-		{"p2", 1, 15},
+		{testComm("p1"), 0, 5},
+		{testComm("p2"), 1, 15},
 	})
 	state.RecordBatch([]pendingEvent{
-		{"p1", 0, 25},
+		{testComm("p1"), 0, 25},
 	})
 
 	state.Read(func(v StateView) {

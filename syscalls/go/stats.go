@@ -11,23 +11,14 @@ import (
 	"github.com/hashicorp/golang-lru/v2/simplelru"
 )
 
-// commIntern interns process comm strings to avoid 80K allocations/s.
-// Only used by the reader goroutine — no sync needed.
-var commIntern = make(map[string]string)
-
-func commString(comm [16]int8) string {
+// commToString converts a kernel TASK_COMM_LEN array to a Go string.
+// Only used at display time (~2-4 FPS), never on the hot event path.
+func commToString(comm [16]int8) string {
 	buf := *(*[16]byte)(unsafe.Pointer(&comm))
-	var raw string
 	if n := bytes.IndexByte(buf[:], 0); n >= 0 {
-		raw = string(buf[:n])
-	} else {
-		raw = string(buf[:])
+		return string(buf[:n])
 	}
-	if s, ok := commIntern[raw]; ok {
-		return s
-	}
-	commIntern[raw] = raw
-	return raw
+	return string(buf[:])
 }
 
 // simpleStats tracks min/max/sum/count explicitly (no sketch overhead)
@@ -99,8 +90,9 @@ func sketchPercentiles(sketch *ddsketch.DDSketch) percentiles {
 }
 
 // sketchKey is the flat composite key for the LRU sketch cache.
+// Uses [16]int8 (value type, no pointers) so the hot path avoids heap allocations.
 type sketchKey struct {
-	proc    string
+	comm    [16]int8
 	syscall uint32
 }
 
@@ -151,16 +143,18 @@ func (s *State) Read(fn func(StateView)) {
 	defer s.mu.Unlock()
 
 	// Build nested map view from LRU (pointer copies only, no cloning).
+	// String conversion of comm happens here at display rate, not on the hot event path.
 	procStats := make(map[string]map[uint32]*syscallStats)
 	for _, key := range s.sketches.Keys() {
 		val, ok := s.sketches.Peek(key)
 		if !ok {
 			continue
 		}
-		fm := procStats[key.proc]
+		name := commToString(key.comm)
+		fm := procStats[name]
 		if fm == nil {
 			fm = make(map[uint32]*syscallStats)
-			procStats[key.proc] = fm
+			procStats[name] = fm
 		}
 		fm[key.syscall] = val
 	}
@@ -176,7 +170,7 @@ func (s *State) Read(fn func(StateView)) {
 }
 
 type pendingEvent struct {
-	comm      string
+	comm      [16]int8
 	syscallID uint32
 	latencyUs int64
 }
@@ -186,6 +180,7 @@ func (s *State) RecordBatch(batch []pendingEvent) {
 	for i := range batch {
 		e := &batch[i]
 		key := sketchKey{e.comm, e.syscallID}
+
 		ss, ok := s.sketches.Get(key) // Get promotes to most-recent
 		if !ok {
 			ss = newSyscallStats()

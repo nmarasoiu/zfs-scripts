@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -93,10 +94,10 @@ func main() {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
-	shutdownRequested := false
+	var shutdownRequested atomic.Bool
 	go func() {
 		<-sigCh
-		shutdownRequested = true
+		shutdownRequested.Store(true)
 		fmt.Fprintf(os.Stderr, "\n[shutdown requested, finishing current chunk...]\n")
 	}()
 
@@ -116,7 +117,7 @@ func main() {
 
 	buffer := make([]byte, bufferSize)
 
-	for !shutdownRequested {
+	for !shutdownRequested.Load() {
 		// Read from stdin (blocks until producer has data)
 		n, err := os.Stdin.Read(buffer)
 		if err != nil {
@@ -177,7 +178,7 @@ func main() {
 
 	// Final stats
 	totalDuration := time.Since(totalStart)
-	if statsInterval > 0 || shutdownRequested {
+	if statsInterval > 0 || shutdownRequested.Load() {
 		avgRate := float64(totalBytes) / totalDuration.Seconds()
 		fmt.Fprintf(os.Stderr, "\n[done] total: %s in %v (%d cycles) @ %s avg\n",
 			formatBytes(totalBytes),
