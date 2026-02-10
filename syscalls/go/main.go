@@ -25,6 +25,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/rlimit"
 	"github.com/nmarasoiu/zfs-scripts/ringpoll"
@@ -73,51 +74,123 @@ func parseFocusList() []string {
 	return list
 }
 
-// runReader busy-polls the ring buffer, batches events, and flushes to state.
-func runReader(rd *ringpoll.Reader, state *State) {
+func allClosed(readers []*ringpoll.Reader) bool {
+	for _, rd := range readers {
+		if !rd.Closed() {
+			return false
+		}
+	}
+	return true
+}
+
+func commitAll(readers []*ringpoll.Reader) {
+	for _, rd := range readers {
+		rd.CommitAndSnap()
+	}
+}
+
+// runReader busy-polls multiple ring buffers in round-robin, batches events,
+// and flushes to state. Single goroutine — no new contention points.
+func runReader(readers []*ringpoll.Reader, pollSleep time.Duration, state *State) {
 	var rec ringpoll.Record
 	eventSize := int(unsafe.Sizeof(bpfLatencyEvent{}))
 	pending := make([]pendingEvent, 0, flushSize)
 	lastFlush := time.Now()
 
-	for rd.ReadInto(&rec) {
-		if len(rec.RawSample) < eventSize {
-			continue
-		}
-		event := *(*bpfLatencyEvent)(unsafe.Pointer(&rec.RawSample[0]))
-		latencyUs := int64(event.LatencyNs / 1000)
-		if latencyUs < 1 {
-			latencyUs = 1
-		}
-		pending = append(pending, pendingEvent{event.Comm, event.SyscallId, latencyUs})
+	for !allClosed(readers) {
+		gotAny := false
+		for _, rd := range readers {
+			for rd.Poll(&rec) {
+				if len(rec.RawSample) < eventSize {
+					continue
+				}
+				event := *(*bpfLatencyEvent)(unsafe.Pointer(&rec.RawSample[0]))
+				latencyUs := int64(event.LatencyNs / 1000)
+				if latencyUs < 1 {
+					latencyUs = 1
+				}
+				pending = append(pending, pendingEvent{event.Comm, event.SyscallId, latencyUs})
+				gotAny = true
 
-		if len(pending) >= flushSize || time.Since(lastFlush) >= flushInterval {
+				if len(pending) >= flushSize {
+					state.RecordBatch(pending)
+					commitAll(readers)
+					pending = pending[:0]
+					lastFlush = time.Now()
+				}
+			}
+		}
+		if !gotAny {
+			commitAll(readers)
+			time.Sleep(pollSleep)
+		} else if time.Since(lastFlush) >= flushInterval {
 			state.RecordBatch(pending)
-			rd.Commit()
+			commitAll(readers)
 			pending = pending[:0]
 			lastFlush = time.Now()
 		}
 	}
+	// flush remainder
 	if len(pending) > 0 {
 		state.RecordBatch(pending)
-		rd.Commit()
+		commitAll(readers)
 	}
 }
 
-func snapshotRingStats(rd *ringpoll.Reader, ra *ringAvg) *ringStats {
-	pending := rd.Pending()
-	ra.add(pending)
-	avg1, avg0, last1, last0 := rd.PollStats()
+func snapshotRingStats(readers []*ringpoll.Reader, ra *ringAvg) *ringStats {
+	// For capacity stats (avg/max/cap), use worst-case ring — each ring
+	// drops independently, so the most-filled ring is what matters.
+	var worstPending int
+	var perRingCap int64
+	var worstMaxPending int64
+	var totalEventSum, totalNonEmpty, totalPollCount, totalLastNonEmpty int64
+	var latestEmptyNano int64
+
+	for _, rd := range readers {
+		p := rd.Pending()
+		if p > worstPending {
+			worstPending = p
+		}
+		perRingCap = int64(rd.BufSize()) // all rings same size
+		snap := rd.Snapshot()
+		if snap != nil {
+			if snap.MaxPending > worstMaxPending {
+				worstMaxPending = snap.MaxPending
+			}
+			totalEventSum += snap.EventSum
+			totalNonEmpty += snap.NonEmptyCount
+			totalPollCount += snap.PollCount
+			totalLastNonEmpty += snap.LastNonEmpty
+			if snap.LastEmptyNano > latestEmptyNano {
+				latestEmptyNano = snap.LastEmptyNano
+			}
+		}
+	}
+
+	ra.add(worstPending)
+
+	var avg1, avg0 float64
+	if totalNonEmpty > 0 {
+		avg1 = float64(totalEventSum) / float64(totalNonEmpty)
+	}
+	if totalPollCount > 0 {
+		avg0 = float64(totalEventSum) / float64(totalPollCount)
+	}
+	var last0 time.Duration
+	if latestEmptyNano > 0 {
+		last0 = time.Since(time.Unix(0, latestEmptyNano))
+	}
+
 	return &ringStats{
 		capacityStats: capacityStats{
 			avg: ra.avg(),
-			max: rd.MaxPending(),
-			cap: int64(rd.BufSize()),
+			max: worstMaxPending,
+			cap: perRingCap,
 		},
-		pending: pending,
+		pending: worstPending,
 		avg1:    avg1,
 		avg0:    avg0,
-		last1:   last1,
+		last1:   totalLastNonEmpty,
 		last0:   last0,
 	}
 }
@@ -187,12 +260,25 @@ func run() error {
 	}
 	defer tpExit.Close()
 
-	// Open ring buffer (busy-poll reader — no epoll)
-	rd, err := ringpoll.NewReader(objs.Events, *pollSleep)
-	if err != nil {
-		return fmt.Errorf("open ring buffer: %w", err)
+	// Open per-CPU ring buffers (busy-poll readers — no epoll)
+	ringMaps := []*ebpf.Map{objs.Events0, objs.Events1, objs.Events2, objs.Events3}
+	readers := make([]*ringpoll.Reader, len(ringMaps))
+	for i, m := range ringMaps {
+		rd, err := ringpoll.NewReader(m, *pollSleep)
+		if err != nil {
+			// Clean up already-opened readers
+			for j := 0; j < i; j++ {
+				readers[j].Cleanup()
+			}
+			return fmt.Errorf("open ring buffer %d: %w", i, err)
+		}
+		readers[i] = rd
 	}
-	defer rd.Cleanup()
+	defer func() {
+		for _, rd := range readers {
+			rd.Cleanup()
+		}
+	}()
 
 	state := newState(*maxSketches)
 	mapCap := int64(objs.StartTimes.MaxEntries())
@@ -229,16 +315,18 @@ func run() error {
 		signal.Stop(sig) // restore default handler so second Ctrl+C force-kills
 		termCleanup()
 		close(done)
-		rd.Close()
+		for _, rd := range readers {
+			rd.Close()
+		}
 	}()
 	defer termCleanup()
 
-	// Reader goroutine: busy-polls ring buffer, batches events, flushes under single Lock
+	// Reader goroutine: busy-polls ring buffers, batches events, flushes under single Lock
 	var readerDone sync.WaitGroup
 	readerDone.Add(1)
 	go func() {
 		defer readerDone.Done()
-		runReader(rd, state)
+		runReader(readers, *pollSleep, state)
 	}()
 
 	// Input goroutine for interactive mode
@@ -277,7 +365,7 @@ func run() error {
 				return
 			case <-displayTicker.C:
 				readDropCount(objs.DropCount, &metrics.drops)
-				display.render(state, metrics.drops.Load(), snapshotMapStats(metrics, mapCap), snapshotRingStats(rd, &ra))
+				display.render(state, metrics.drops.Load(), snapshotMapStats(metrics, mapCap), snapshotRingStats(readers, &ra))
 			case ev := <-keyCh:
 				if display.handleKey(ev) {
 					// 'q' pressed — trigger shutdown via signal
@@ -285,7 +373,7 @@ func run() error {
 					return
 				}
 				readDropCount(objs.DropCount, &metrics.drops)
-				display.render(state, metrics.drops.Load(), snapshotMapStats(metrics, mapCap), snapshotRingStats(rd, &ra))
+				display.render(state, metrics.drops.Load(), snapshotMapStats(metrics, mapCap), snapshotRingStats(readers, &ra))
 			}
 		}
 	}()
@@ -302,6 +390,6 @@ func run() error {
 	readerDone.Wait()
 
 	readDropCount(objs.DropCount, &metrics.drops)
-	display.render(state, metrics.drops.Load(), snapshotMapStats(metrics, mapCap), snapshotRingStats(rd, &ringAvg{}))
+	display.render(state, metrics.drops.Load(), snapshotMapStats(metrics, mapCap), snapshotRingStats(readers, &ringAvg{}))
 	return nil
 }

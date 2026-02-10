@@ -45,11 +45,13 @@ struct {
     __type(value, __u32); // syscall_id
 } syscall_ids SEC(".maps");
 
-// Ring buffer for events
-struct {
-    __uint(type, BPF_MAP_TYPE_RINGBUF);
-    __uint(max_entries, 8 * 1024 * 1024);
-} events SEC(".maps");
+// Per-CPU ring buffers (4 × 2MB = 8MB total)
+#define NUM_RINGS 4
+
+struct { __uint(type, BPF_MAP_TYPE_RINGBUF); __uint(max_entries, 2 * 1024 * 1024); } events0 SEC(".maps");
+struct { __uint(type, BPF_MAP_TYPE_RINGBUF); __uint(max_entries, 2 * 1024 * 1024); } events1 SEC(".maps");
+struct { __uint(type, BPF_MAP_TYPE_RINGBUF); __uint(max_entries, 2 * 1024 * 1024); } events2 SEC(".maps");
+struct { __uint(type, BPF_MAP_TYPE_RINGBUF); __uint(max_entries, 2 * 1024 * 1024); } events3 SEC(".maps");
 
 // Target process names (hash lookup for O(1) matching)
 struct {
@@ -117,7 +119,14 @@ int trace_syscall_exit(struct trace_event_raw_sys_exit *ctx) {
 
     __u64 latency = bpf_ktime_get_ns() - *start_ts;
 
-    struct latency_event *event = bpf_ringbuf_reserve(&events, sizeof(*event), 0);
+    __u32 cpu = bpf_get_smp_processor_id() % NUM_RINGS;
+    struct latency_event *event = NULL;
+    switch (cpu) {
+        case 0: event = bpf_ringbuf_reserve(&events0, sizeof(*event), 0); break;
+        case 1: event = bpf_ringbuf_reserve(&events1, sizeof(*event), 0); break;
+        case 2: event = bpf_ringbuf_reserve(&events2, sizeof(*event), 0); break;
+        case 3: event = bpf_ringbuf_reserve(&events3, sizeof(*event), 0); break;
+    }
     if (!event) {
         __u32 zero = 0;
         __u64 *cnt = bpf_map_lookup_elem(&drop_count, &zero);

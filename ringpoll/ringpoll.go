@@ -134,6 +134,11 @@ func (r *Reader) Close() {
 	r.closed.Store(true)
 }
 
+// Closed returns true if the reader has been closed.
+func (r *Reader) Closed() bool {
+	return r.closed.Load()
+}
+
 // Cleanup unmaps the shared memory. Must be called after the read loop exits.
 func (r *Reader) Cleanup() {
 	syscall.Munmap(r.prodMmap)
@@ -202,6 +207,80 @@ func (r *Reader) LastBatch() int64 {
 // ring buffer space. Call after processing a batch of events.
 func (r *Reader) Commit() {
 	atomic.StoreUint64(r.consPos, r.pos)
+}
+
+// CommitAndSnap publishes the consumer position AND publishes the poll
+// snapshot in one call. Used by the multi-ring drainer at ring-empty
+// boundaries to atomically free space and update stats.
+func (r *Reader) CommitAndSnap() {
+	r.Commit()
+	r.pollCount++
+	lastBatch := r.batchCount
+	if r.batchCount > 0 {
+		r.nonEmptyCount++
+		r.eventSum += r.batchCount
+		r.batchCount = 0
+	}
+	r.snapshot.Store(&PollSnapshot{
+		EventSum:      r.eventSum,
+		NonEmptyCount: r.nonEmptyCount,
+		PollCount:     r.pollCount,
+		LastNonEmpty:  lastBatch,
+		LastEmptyNano: time.Now().UnixNano(),
+		MaxPending:    r.maxPending,
+		LastBatch:     lastBatch,
+	})
+}
+
+// Poll is a non-blocking read from the ring buffer. Returns true if a
+// record was read, false immediately when the ring is empty or the
+// producer is mid-write. The caller controls sleep timing across
+// multiple rings.
+func (r *Reader) Poll(rec *Record) bool {
+	if r.closed.Load() {
+		return false
+	}
+
+	prod := atomic.LoadUint64(r.prodPos)
+	if pending := int64(prod - r.pos); pending > r.maxPending {
+		r.maxPending = pending
+	}
+	if r.pos == prod {
+		return false // empty
+	}
+
+	// Read 8-byte header
+	off := r.pos & r.mask
+	hdrLen := binary.LittleEndian.Uint32(r.ring[off:])
+
+	if hdrLen&bpfRingbufBusyBit != 0 {
+		return false // producer mid-write
+	}
+
+	r.pos += ringbufHdrSize
+
+	dataLen := hdrLen & ^uint32(bpfRingbufBusyBit|bpfRingbufDiscardBit)
+	dataAligned := (uint64(dataLen) + 7) &^ 7
+
+	if hdrLen&bpfRingbufDiscardBit != 0 {
+		r.pos += dataAligned
+		// Discarded record — try again (tail-recurse)
+		return r.Poll(rec)
+	}
+
+	// Copy data out of the ring
+	start := r.pos & r.mask
+	if cap(rec.RawSample) < int(dataLen) {
+		rec.RawSample = make([]byte, dataLen)
+	} else {
+		rec.RawSample = rec.RawSample[:dataLen]
+	}
+	copy(rec.RawSample, r.ring[start:start+uint64(dataLen)])
+
+	r.pos += dataAligned
+
+	r.batchCount++
+	return true
 }
 
 // ReadInto polls the ring buffer for the next committed record.
