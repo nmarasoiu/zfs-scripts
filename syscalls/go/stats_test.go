@@ -79,10 +79,10 @@ func TestSimpleStats_MinMaxAvg(t *testing.T) {
 // --- syscallStats ---
 
 func TestSyscallStats_RecordUpdatesSketchAndStats(t *testing.T) {
-	ss := newSyscallStats(0.25)
-	ss.Record(100)
-	ss.Record(200)
-	ss.Record(300)
+	ss := newTestSyscallStats(0.25)
+	testRecord(ss, 100)
+	testRecord(ss, 200)
+	testRecord(ss, 300)
 
 	if ss.stats.count != 3 {
 		t.Errorf("count = %d, want 3", ss.stats.count)
@@ -102,9 +102,9 @@ func TestSyscallStats_RecordUpdatesSketchAndStats(t *testing.T) {
 }
 
 func TestSketchPercentiles_Monotonic(t *testing.T) {
-	ss := newSyscallStats(0.25)
+	ss := newTestSyscallStats(0.25)
 	for i := int64(1); i <= 1000; i++ {
-		ss.Record(i)
+		testRecord(ss, i)
 	}
 	d := &Display{quantiles: []float64{0.25, 0.50, 0.75, 0.90, 0.99, 0.999}}
 	pcts := d.sketchPercentiles(ss.sketch)
@@ -163,22 +163,40 @@ func TestState_LRUEviction(t *testing.T) {
 	state.RecordBatch([]pendingEvent{
 		{testComm("a"), 0, 10},
 		{testComm("b"), 1, 20},
-		{testComm("c"), 2, 30}, // should evict "a"/0
+		{testComm("c"), 2, 30}, // should evict "a"/0 sketch
 	})
 
 	state.Read(func(v StateView) {
 		if v.NSketches != 2 {
 			t.Errorf("NSketches = %d, want 2", v.NSketches)
 		}
+		if v.NStats != 3 {
+			t.Errorf("NStats = %d, want 3 (all entries persist)", v.NStats)
+		}
 		if v.SketchEvictions != 1 {
 			t.Errorf("evictions = %d, want 1", v.SketchEvictions)
 		}
-		// "a" should have been evicted (LRU), "b" and "c" remain
-		if v.ProcStats["a"] != nil {
-			t.Error("expected 'a' to be evicted")
+		// "a" stats persist but sketch is evicted
+		aStats := v.ProcStats["a"]
+		if aStats == nil {
+			t.Fatal("expected 'a' to be present (stats persist)")
 		}
+		aSyscall := aStats[0]
+		if aSyscall == nil {
+			t.Fatal("expected 'a' syscall 0 to be present")
+		}
+		if aSyscall.sketch != nil {
+			t.Error("expected 'a' sketch to be nil (evicted)")
+		}
+		if aSyscall.stats.count != 1 {
+			t.Errorf("'a' count = %d, want 1", aSyscall.stats.count)
+		}
+		// "b" and "c" have both stats and sketches
 		if v.ProcStats["b"] == nil {
 			t.Error("expected 'b' to be present")
+		}
+		if v.ProcStats["b"][1].sketch == nil {
+			t.Error("expected 'b' sketch to be present")
 		}
 		if v.ProcStats["c"] == nil {
 			t.Error("expected 'c' to be present")

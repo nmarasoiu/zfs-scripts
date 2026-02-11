@@ -3,6 +3,8 @@ package main
 import (
 	"strings"
 	"testing"
+
+	"github.com/DataDog/sketches-go/ddsketch"
 )
 
 var defaultQuantiles = []float64{0.50, 0.90, 0.99}
@@ -409,7 +411,7 @@ func TestSummaryBarLegend_FilterMode(t *testing.T) {
 func TestRenderFooter_ContainsDropInfo(t *testing.T) {
 	d := &Display{}
 	var buf strings.Builder
-	d.renderFooter(&buf, 10*1e9, 5, frameMetrics{drops: 42})
+	d.renderFooter(&buf, 10*1e9, 5, frameMetrics{drops: frameDrops{ringFull: 42}})
 	s := buf.String()
 	if !strings.Contains(s, "42") {
 		t.Errorf("footer should contain drop count 42, got %q", s)
@@ -438,9 +440,9 @@ func TestRenderFooter_WithRingStats(t *testing.T) {
 var testQuantiles = []float64{0.25, 0.50, 0.75, 0.90, 0.99, 0.999}
 
 func TestFormatSummaryRow_NonZero(t *testing.T) {
-	ss := newSyscallStats(0.25)
+	ss := newTestSyscallStats(0.25)
 	for i := int64(1); i <= 100; i++ {
-		ss.Record(i)
+		testRecord(ss, i)
 	}
 	d := &Display{quantiles: testQuantiles}
 	row := d.formatSummaryRow("tor/read", ss.stats, d.sketchPercentiles(ss.sketch), 10.0)
@@ -453,7 +455,7 @@ func TestFormatSummaryRow_NonZero(t *testing.T) {
 }
 
 func TestFormatSummaryRow_Zero(t *testing.T) {
-	ss := newSyscallStats(0.25)
+	ss := newTestSyscallStats(0.25)
 	d := &Display{quantiles: testQuantiles}
 	row := d.formatSummaryRow("empty", ss.stats, d.sketchPercentiles(ss.sketch), 10.0)
 	if !strings.Contains(row, "-") {
@@ -464,13 +466,13 @@ func TestFormatSummaryRow_Zero(t *testing.T) {
 // --- renderDetailRow ---
 
 func TestRenderDetailRow_NonZero(t *testing.T) {
-	ss := newSyscallStats(0.25)
+	ss := newTestSyscallStats(0.25)
 	for i := int64(1); i <= 50; i++ {
-		ss.Record(i)
+		testRecord(ss, i)
 	}
 	d := &Display{quantiles: testQuantiles}
 	var buf strings.Builder
-	renderDetailRow(&buf, "tor/read        ", ss.stats, d.sketchPercentiles(ss.sketch))
+	d.renderDetailRow(&buf, "tor/read        ", ss.stats, d.sketchPercentiles(ss.sketch))
 	s := buf.String()
 	if !strings.Contains(s, "tor/read") {
 		t.Errorf("row should contain name, got %q", s)
@@ -478,10 +480,10 @@ func TestRenderDetailRow_NonZero(t *testing.T) {
 }
 
 func TestRenderDetailRow_Zero(t *testing.T) {
-	ss := newSyscallStats(0.25)
+	ss := newTestSyscallStats(0.25)
 	d := &Display{quantiles: testQuantiles}
 	var buf strings.Builder
-	renderDetailRow(&buf, "empty           ", ss.stats, d.sketchPercentiles(ss.sketch))
+	d.renderDetailRow(&buf, "empty           ", ss.stats, d.sketchPercentiles(ss.sketch))
 	s := buf.String()
 	if !strings.Contains(s, "-") {
 		t.Errorf("zero row should contain dashes, got %q", s)
@@ -571,13 +573,13 @@ func TestEntrySortVal_Percentile(t *testing.T) {
 
 func TestCollectEntries_SortedByPercentile(t *testing.T) {
 	// Create two entries with different latency distributions
-	ssLow := newSyscallStats(0.25)
+	ssLow := newTestSyscallStats(0.25)
 	for i := int64(1); i <= 100; i++ {
-		ssLow.Record(i) // latencies 1-100
+		testRecord(ssLow, i) // latencies 1-100
 	}
-	ssHigh := newSyscallStats(0.25)
+	ssHigh := newTestSyscallStats(0.25)
 	for i := int64(50); i <= 200; i++ {
-		ssHigh.Record(i) // latencies 50-200, higher p99
+		testRecord(ssHigh, i) // latencies 50-200, higher p99
 	}
 
 	procStats := map[string]map[uint32]*syscallStats{
@@ -674,12 +676,24 @@ func TestSortIndicator_InactiveColumn(t *testing.T) {
 	}
 }
 
-// --- helper ---
+// --- helpers ---
+
+// newTestSyscallStats creates a syscallStats with both sketch and simpleStats for testing.
+func newTestSyscallStats(alpha float64) *syscallStats {
+	sketch, _ := ddsketch.NewDefaultDDSketch(alpha)
+	return &syscallStats{sketch: sketch, stats: newSimpleStats()}
+}
+
+// testRecord records a latency into both the sketch and simpleStats.
+func testRecord(ss *syscallStats, latencyUs int64) {
+	ss.sketch.Add(float64(latencyUs))
+	ss.stats.Record(latencyUs)
+}
 
 func statsWithCount(n uint64) *syscallStats {
-	ss := newSyscallStats(0.25)
+	ss := newTestSyscallStats(0.25)
 	for i := uint64(0); i < n; i++ {
-		ss.Record(int64(i + 1))
+		testRecord(ss, int64(i+1))
 	}
 	return ss
 }

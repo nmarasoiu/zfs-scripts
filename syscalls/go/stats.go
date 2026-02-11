@@ -58,19 +58,6 @@ type syscallStats struct {
 	stats  *simpleStats
 }
 
-func newSyscallStats(alpha float64) *syscallStats {
-	sketch, _ := ddsketch.NewDefaultDDSketch(alpha)
-	return &syscallStats{
-		sketch: sketch,
-		stats:  newSimpleStats(),
-	}
-}
-
-func (ss *syscallStats) Record(latencyUs int64) {
-	ss.sketch.Add(float64(latencyUs))
-	ss.stats.Record(latencyUs)
-}
-
 // sketchKey is the flat composite key for the LRU sketch cache.
 // Uses [16]int8 (value type, no pointers) so the hot path avoids heap allocations.
 type sketchKey struct {
@@ -83,8 +70,12 @@ type State struct {
 	mu    sync.Mutex
 	alpha float64 // DDSketch relative accuracy
 
-	// Per-(process, syscall) stats, capped by LRU eviction.
-	sketches        *simplelru.LRU[sketchKey, *syscallStats]
+	// Per-(process, syscall) simple stats — unbounded, persistent for program lifetime.
+	// ~80 bytes/entry; 10K entries ≈ 800KB.
+	stats map[sketchKey]*simpleStats
+
+	// Per-(process, syscall) DDSketches, capped by LRU eviction.
+	sketches        *simplelru.LRU[sketchKey, *ddsketch.DDSketch]
 	sketchEvictions uint64
 
 	// Global lifetime sketch across all processes and syscalls
@@ -98,11 +89,12 @@ func newState(maxSketches int, alpha float64) *State {
 	sketch, _ := ddsketch.NewDefaultDDSketch(alpha)
 	s := &State{
 		alpha:        alpha,
+		stats:        make(map[sketchKey]*simpleStats),
 		globalSketch: sketch,
 		globalStats:  newSimpleStats(),
 		startTime:    time.Now(),
 	}
-	s.sketches, _ = simplelru.NewLRU[sketchKey, *syscallStats](maxSketches, func(_ sketchKey, _ *syscallStats) {
+	s.sketches, _ = simplelru.NewLRU[sketchKey, *ddsketch.DDSketch](maxSketches, func(_ sketchKey, _ *ddsketch.DDSketch) {
 		s.sketchEvictions++
 	})
 	return s
@@ -113,7 +105,8 @@ func newState(maxSketches int, alpha float64) *State {
 // All fields are pointer-shared with the live State — no cloning.
 type StateView struct {
 	StartTime       time.Time
-	NSketches       int
+	NSketches       int    // current DDSketches in LRU
+	NStats          int    // total persistent (proc, syscall) entries
 	SketchEvictions uint64
 	GlobalStats     *simpleStats
 	GlobalSketch    *ddsketch.DDSketch
@@ -126,26 +119,27 @@ func (s *State) Read(fn func(StateView)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Build nested map view from LRU (pointer copies only, no cloning).
+	// Build nested map view from persistent stats, attaching sketches from LRU where available.
 	// String conversion of comm happens here at display rate, not on the hot event path.
 	procStats := make(map[string]map[uint32]*syscallStats)
-	for _, key := range s.sketches.Keys() {
-		val, ok := s.sketches.Peek(key)
-		if !ok {
-			continue
-		}
+	for key, st := range s.stats {
 		name := commToString(key.comm)
 		syscalls := procStats[name]
 		if syscalls == nil {
 			syscalls = make(map[uint32]*syscallStats)
 			procStats[name] = syscalls
 		}
-		syscalls[key.syscall] = val
+		sk, _ := s.sketches.Peek(key) // nil if evicted
+		syscalls[key.syscall] = &syscallStats{
+			sketch: sk,
+			stats:  st,
+		}
 	}
 
 	fn(StateView{
 		StartTime:       s.startTime,
 		NSketches:       s.sketches.Len(),
+		NStats:          len(s.stats),
 		SketchEvictions: s.sketchEvictions,
 		GlobalStats:     s.globalStats,
 		GlobalSketch:    s.globalSketch,
@@ -165,12 +159,22 @@ func (s *State) RecordBatch(batch []pendingEvent) {
 		ev := &batch[i]
 		key := sketchKey{ev.comm, ev.syscallID}
 
-		ss, ok := s.sketches.Get(key) // Get promotes to most-recent
+		// Always record in persistent simple stats
+		st, ok := s.stats[key]
 		if !ok {
-			ss = newSyscallStats(s.alpha)
-			s.sketches.Add(key, ss) // evicts LRU if over cap
+			st = newSimpleStats()
+			s.stats[key] = st
 		}
-		ss.Record(ev.latencyUs)
+		st.Record(ev.latencyUs)
+
+		// Record in LRU-capped DDSketch
+		sk, ok := s.sketches.Get(key) // Get promotes to most-recent
+		if !ok {
+			sk, _ = ddsketch.NewDefaultDDSketch(s.alpha)
+			s.sketches.Add(key, sk) // evicts LRU if over cap
+		}
+		sk.Add(float64(ev.latencyUs))
+
 		s.globalSketch.Add(float64(ev.latencyUs))
 		s.globalStats.Record(ev.latencyUs)
 	}

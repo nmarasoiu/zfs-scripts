@@ -43,6 +43,9 @@ func (d *Display) entrySortVal(ss *syscallStats, elapsedSecs float64) float64 {
 		// percentile column: match against quantile headers
 		for _, q := range d.quantiles {
 			if d.sortColumn == quantileHeader(q) {
+				if ss.sketch == nil {
+					return 0
+				}
 				v, _ := ss.sketch.GetValueAtQuantile(q)
 				return v
 			}
@@ -175,6 +178,9 @@ func quantileHeader(q float64) string {
 // sketchPercentiles extracts d.quantiles from a DDSketch.
 // Returns values in µs. Only called at display rate.
 func (d *Display) sketchPercentiles(sketch *ddsketch.DDSketch) []int64 {
+	if sketch == nil {
+		return nil
+	}
 	result := make([]int64, len(d.quantiles))
 	for i, q := range d.quantiles {
 		v, _ := sketch.GetValueAtQuantile(q)
@@ -299,8 +305,8 @@ func (d *Display) render(state *State, frame frameMetrics) {
 		const sketchBytesEach = 2048 // ~2KB per DDSketch: 0.7KB narrow, 4KB wide range (measured via protobuf + struct overhead)
 		totalMB := float64(v.NSketches) * sketchBytesEach / 1024 / 1024
 
-		fmt.Fprintf(&mainBuf, "Syscall Latency Monitor - %s (uptime: %s) -- %d sketches × 2KB ≈ %.1fMB  evict:%s\n",
-			now.Format("15:04:05"), formatDuration(elapsed), v.NSketches, totalMB, formatCount(int64(v.SketchEvictions)))
+		fmt.Fprintf(&mainBuf, "Syscall Latency Monitor - %s (uptime: %s) -- %d entries  %d sketches × 2KB ≈ %.1fMB  evict:%s\n",
+			now.Format("15:04:05"), formatDuration(elapsed), v.NStats, v.NSketches, totalMB, formatCount(int64(v.SketchEvictions)))
 
 		d.lastSummaries = d.collectProcessSummaries(v.ProcStats, elapsed.Seconds())
 
@@ -543,19 +549,20 @@ func (d *Display) renderTable(buf *strings.Builder, procStats map[string]map[uin
 	for i := 0; i < shown; i++ {
 		e := entries[i]
 		name := fmt.Sprintf(nameFmt, e.label)
-		renderDetailRow(buf, name, e.ss.stats, d.sketchPercentiles(e.ss.sketch))
+		d.renderDetailRow(buf, name, e.ss.stats, d.sketchPercentiles(e.ss.sketch))
 	}
 
 	buf.WriteString("\n")
 }
 
-func renderDetailRow(buf *strings.Builder, name string, stats *simpleStats, percentiles []int64) {
+func (d *Display) renderDetailRow(buf *strings.Builder, name string, stats *simpleStats, percentiles []int64) {
+	numPcts := len(d.quantiles)
 	n := stats.count
 	if n == 0 {
 		buf.WriteString(name)
 		buf.WriteString(" │")
-		// min + avg + percentiles + max = 3 + len(percentiles) dashes
-		for i := 0; i < 3+len(percentiles); i++ {
+		// min + avg + percentiles + max = 3 + numPcts dashes
+		for i := 0; i < 3+numPcts; i++ {
 			fmt.Fprintf(buf, " %8s", "-")
 		}
 		fmt.Fprintf(buf, " │ %9s\n", "0")
@@ -564,8 +571,14 @@ func renderDetailRow(buf *strings.Builder, name string, stats *simpleStats, perc
 	buf.WriteString(name)
 	buf.WriteString(" │")
 	fmt.Fprintf(buf, " %s %s", formatLatencyPadded(stats.min), formatLatencyPadded(stats.Avg()))
-	for _, pct := range percentiles {
-		fmt.Fprintf(buf, " %s", formatLatencyPadded(pct))
+	if percentiles != nil {
+		for _, pct := range percentiles {
+			fmt.Fprintf(buf, " %s", formatLatencyPadded(pct))
+		}
+	} else {
+		for i := 0; i < numPcts; i++ {
+			fmt.Fprintf(buf, " %8s", "-")
+		}
 	}
 	fmt.Fprintf(buf, " %s │ %9s\n", formatLatencyPadded(stats.max), formatCount(int64(n)))
 }
@@ -652,11 +665,12 @@ func (d *Display) renderSummary(buf *strings.Builder, procStats map[string]map[u
 
 func (d *Display) formatSummaryRow(name string, stats *simpleStats, percentiles []int64, secs float64) string {
 	var buf strings.Builder
+	numPcts := len(d.quantiles)
 	n := stats.count
 	if n == 0 {
 		fmt.Fprintf(&buf, "%-28s │", name)
-		// avg + percentiles + max = 2 + len(percentiles) dashes
-		for i := 0; i < 2+len(percentiles); i++ {
+		// avg + percentiles + max = 2 + numPcts dashes
+		for i := 0; i < 2+numPcts; i++ {
 			fmt.Fprintf(&buf, " %8s", "-")
 		}
 		fmt.Fprintf(&buf, " │ %9s %9s", "0", "-")
@@ -664,8 +678,14 @@ func (d *Display) formatSummaryRow(name string, stats *simpleStats, percentiles 
 	}
 	fmt.Fprintf(&buf, "%-28s │", name)
 	fmt.Fprintf(&buf, " %s", formatLatencyPadded(stats.Avg()))
-	for _, pct := range percentiles {
-		fmt.Fprintf(&buf, " %s", formatLatencyPadded(pct))
+	if percentiles != nil {
+		for _, pct := range percentiles {
+			fmt.Fprintf(&buf, " %s", formatLatencyPadded(pct))
+		}
+	} else {
+		for i := 0; i < numPcts; i++ {
+			fmt.Fprintf(&buf, " %8s", "-")
+		}
 	}
 	fmt.Fprintf(&buf, " %s │ %9s %9s", formatLatencyPadded(stats.max), formatCount(int64(n)), formatRate(n, secs))
 	return buf.String()
