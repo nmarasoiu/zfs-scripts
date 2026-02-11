@@ -53,13 +53,25 @@ struct {
     __type(value, __u8);
 } target_comms SEC(".maps");
 
-// Drop counter: incremented when ring buffer is full
+// Drop counters indexed by reason.
+enum drop_reason {
+    DROP_RING_FULL   = 0, // bpf_ringbuf_reserve returned NULL
+    DROP_NO_START_TS = 1, // sys_exit with no matching sys_enter (LRU eviction or startup race)
+    DROP__MAX        = 2,
+};
+
 struct {
     __uint(type, BPF_MAP_TYPE_ARRAY);
-    __uint(max_entries, 1);
+    __uint(max_entries, 2); // DROP__MAX
     __type(key, __u32);
     __type(value, __u64);
 } drop_count SEC(".maps");
+
+static __always_inline void inc_drop(__u32 reason) {
+    __u64 *cnt = bpf_map_lookup_elem(&drop_count, &reason);
+    if (cnt)
+        __sync_fetch_and_add(cnt, 1);
+}
 
 static __always_inline int should_trace(void) {
     if (use_comm_filter) {
@@ -99,6 +111,7 @@ int trace_syscall_exit(struct trace_event_raw_sys_exit *ctx) {
 
     __u64 *start_ts = bpf_map_lookup_elem(&start_times, &tid);
     if (!start_ts) {
+        inc_drop(DROP_NO_START_TS);
         return 0;
     }
 
@@ -113,10 +126,7 @@ int trace_syscall_exit(struct trace_event_raw_sys_exit *ctx) {
         case 3: event = bpf_ringbuf_reserve(&events3, sizeof(*event), 0); break;
     }
     if (!event) {
-        __u32 zero = 0;
-        __u64 *cnt = bpf_map_lookup_elem(&drop_count, &zero);
-        if (cnt)
-            __sync_fetch_and_add(cnt, 1);
+        inc_drop(DROP_RING_FULL);
         bpf_map_delete_elem(&start_times, &tid);
         return 0;
     }

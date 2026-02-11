@@ -155,7 +155,7 @@ func parsePercentiles(s string) ([]float64, error) {
 
 // runReader busy-polls ring buffers via Group round-robin, batches events,
 // and flushes to state. Single goroutine — no new contention points.
-func runReader(rings *ringpoll.Group, pollSleep time.Duration, maxBatch int, state *State) {
+func runReader(rings *ringpoll.Group, pollSleep time.Duration, maxBatch int, state *State, metrics *runtimeMetrics) {
 	var rec ringpoll.Record
 	eventSize := int(unsafe.Sizeof(bpfLatencyEvent{}))
 	pending := make([]pendingEvent, 0, maxBatch)
@@ -164,6 +164,7 @@ func runReader(rings *ringpoll.Group, pollSleep time.Duration, maxBatch int, sta
 		quiet := rings.MaxFill() < 0.05
 		for rings.Poll(&rec) {
 			if len(rec.RawSample) < eventSize {
+				metrics.goShortEvents.Add(1)
 				continue
 			}
 			event := *(*bpfLatencyEvent)(unsafe.Pointer(&rec.RawSample[0]))
@@ -396,7 +397,7 @@ func run() error {
 	readerDone.Add(1)
 	go func() {
 		defer readerDone.Done()
-		runReader(rings, *pollSleep, *batchSize, state)
+		runReader(rings, *pollSleep, *batchSize, state, metrics)
 	}()
 
 	// Input goroutine for interactive mode
@@ -434,9 +435,9 @@ func run() error {
 			case <-done:
 				return
 			case <-displayTicker.C:
-				readDropCount(objs.DropCount, &metrics.drops)
+				readDropCounts(objs.DropCount, &metrics.bpfDrops)
 				display.render(state, frameMetrics{
-					drops:     metrics.drops.Load(),
+					drops:     snapshotDrops(metrics),
 					mapStats:  snapshotMapStats(metrics, mapCap),
 					ringStats: snapshotRingStats(rings, &ringAcc),
 				})
@@ -446,9 +447,9 @@ func run() error {
 					sig <- syscall.SIGINT
 					return
 				}
-				readDropCount(objs.DropCount, &metrics.drops)
+				readDropCounts(objs.DropCount, &metrics.bpfDrops)
 				display.render(state, frameMetrics{
-					drops:     metrics.drops.Load(),
+					drops:     snapshotDrops(metrics),
 					mapStats:  snapshotMapStats(metrics, mapCap),
 					ringStats: snapshotRingStats(rings, &ringAcc),
 				})
@@ -467,9 +468,9 @@ func run() error {
 	<-done
 	readerDone.Wait()
 
-	readDropCount(objs.DropCount, &metrics.drops)
+	readDropCounts(objs.DropCount, &metrics.bpfDrops)
 	display.render(state, frameMetrics{
-		drops:     metrics.drops.Load(),
+		drops:     snapshotDrops(metrics),
 		mapStats:  snapshotMapStats(metrics, mapCap),
 		ringStats: snapshotRingStats(rings, &ringAvg{}),
 	})

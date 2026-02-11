@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"sync/atomic"
 
 	"github.com/cilium/ebpf"
 )
@@ -19,11 +18,19 @@ func configureBPFFilters(objs *bpfObjects, focusList []string) error {
 	return nil
 }
 
-func readDropCount(m *ebpf.Map, dst *atomic.Uint64) {
-	var key uint32
+// BPF drop reason indices — must match enum drop_reason in syscall_latency.c.
+const (
+	dropRingFull   uint32 = 0
+	dropNoStartTS  uint32 = 1
+)
+
+func readDropCounts(m *ebpf.Map, dst *dropCounts) {
 	var val uint64
-	if err := m.Lookup(key, &val); err == nil {
-		dst.Store(val)
+	if err := m.Lookup(dropRingFull, &val); err == nil {
+		dst.ringFull.Store(val)
+	}
+	if err := m.Lookup(dropNoStartTS, &val); err == nil {
+		dst.noStartTS.Store(val)
 	}
 }
 

@@ -467,10 +467,15 @@ func (d *Display) tryAutoSelectSort() {
 }
 
 func (d *Display) renderFooter(buf *strings.Builder, elapsed time.Duration, nProcs int, frame frameMetrics) {
+	total := frame.drops.total()
 	dropRate := float64(0)
 	if elapsed.Seconds() > 0 {
-		dropRate = float64(frame.drops) / elapsed.Seconds()
+		dropRate = float64(total) / elapsed.Seconds()
 	}
+	dropDetail := fmt.Sprintf("ring:%s miss:%s short:%s",
+		formatCount(int64(frame.drops.ringFull)),
+		formatCount(int64(frame.drops.noStartTS)),
+		formatCount(int64(frame.drops.goShort)))
 	mapInfo := ""
 	if frame.mapStats != nil {
 		mapInfo = fmt.Sprintf(" | Map %s", frame.mapStats.formatUsage(formatCount))
@@ -482,8 +487,8 @@ func (d *Display) renderFooter(buf *strings.Builder, elapsed time.Duration, nPro
 			formatBytes(int64(frame.ringStats.pending)),
 			frame.ringStats.avg1, frame.ringStats.avg0)
 	}
-	fmt.Fprintf(buf, "Processes: %d | Drops: %s (%s/s)%s%s\n",
-		nProcs, formatCount(int64(frame.drops)), formatCount(int64(dropRate)), mapInfo, ringInfo)
+	fmt.Fprintf(buf, "Processes: %d | Drops: %s (%s/s) [%s]%s%s\n",
+		nProcs, formatCount(int64(total)), formatCount(int64(dropRate)), dropDetail, mapInfo, ringInfo)
 
 	if d.batchMode {
 		buf.WriteString("\n")
