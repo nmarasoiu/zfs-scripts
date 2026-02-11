@@ -27,8 +27,6 @@ type tableEntry struct {
 // entrySortVal extracts the sort value for a given column from a syscallStats entry.
 func (d *Display) entrySortVal(ss *syscallStats, elapsedSecs float64) float64 {
 	switch d.sortColumn {
-	case "min":
-		return float64(ss.stats.min)
 	case "avg":
 		return float64(ss.stats.Avg())
 	case "max":
@@ -173,7 +171,7 @@ type Display struct {
 	topN           int
 	colsOverride   int        // --cols override; 0 = auto-detect
 	quantiles      []float64  // configured percentile quantiles (0.0–1.0)
-	sortColumn     string     // column to sort by (rate, samples, avg, p99, max, min, etc.)
+	sortColumn     string     // column to sort by (rate, samples, avg, p99, max, etc.)
 
 	// Interactive state (all owned by display goroutine — no sync needed)
 	interactive   bool
@@ -203,10 +201,10 @@ func (d *Display) sketchPercentiles(sketch *ddsketch.DDSketch) []int64 {
 }
 
 // availableSortColumns returns the valid sort column names for the current view.
-// Both views have min and time; table view omits rate; summary view includes rate.
+// Both views have time; table view omits rate; summary view includes rate.
 func (d *Display) availableSortColumns() []string {
 	isTable := len(d.focusProcesses) > 0
-	cols := []string{"min", "avg"}
+	cols := []string{"avg"}
 	for _, q := range d.quantiles {
 		cols = append(cols, quantileHeader(q))
 	}
@@ -240,17 +238,17 @@ func (d *Display) sortIndicator(col string, width int) string {
 }
 
 // summaryLineWidth computes the width of a summary row given the number of percentile columns.
-// Layout: %-28s │ min avg [pcts...] max │ samples rate time
+// Layout: %-28s │ avg [pcts...] max │ samples rate time
 func summaryLineWidth(numPcts int) int {
-	// 28 (name) + 3 (│) + 9 (min) + 9 (avg) + 9*numPcts + 8 (max) + 3 (│) + 9 (samples) + 1 + 9 (rate) + 1 + 8 (time)
-	return 28 + 3 + 9*numPcts + 26 + 3 + 28
+	// 28 (name) + 3 (│) + 9 (avg) + 9*numPcts + 8 (max) + 3 (│) + 9 (samples) + 1 + 9 (rate) + 1 + 8 (time)
+	return 28 + 3 + 9*numPcts + 17 + 3 + 28
 }
 
 // tableDataWidth computes the data area width (after label) for the table view.
-// Layout: │ min avg [pcts...] max │ samples time
+// Layout: │ avg [pcts...] max │ samples time
 func tableDataWidth(numPcts int) int {
-	// 2 (│) + 9 (min) + 9 (avg) + 9*numPcts + 9 (max) + 3 (│) + 9 (samples) + 1 + 8 (time)
-	return 9*numPcts + 50
+	// 2 (│) + 9 (avg) + 9*numPcts + 9 (max) + 3 (│) + 9 (samples) + 1 + 8 (time)
+	return 9*numPcts + 41
 }
 
 func (d *Display) resetCursor() {
@@ -549,11 +547,11 @@ func (d *Display) renderTable(buf *strings.Builder, procStats map[string]map[uin
 	lineWidth := labelWidth + tableDataWidth(len(d.quantiles))
 	sectionHeader(buf, fmt.Sprintf("%s (%d)", title, shown), lineWidth)
 
-	// Column headers: LIFETIME │ min avg [pcts...] max │ samples time
+	// Column headers: LIFETIME │ avg [pcts...] max │ samples time
 	nameFmt := fmt.Sprintf("%%-%ds", labelWidth)
 	buf.WriteString(fmt.Sprintf(nameFmt, "LIFETIME"))
 	buf.WriteString(" │")
-	fmt.Fprintf(buf, " %s %s", d.sortIndicator("min", 8), d.sortIndicator("avg", 8))
+	fmt.Fprintf(buf, " %s", d.sortIndicator("avg", 8))
 	for _, q := range d.quantiles {
 		fmt.Fprintf(buf, " %s", d.sortIndicator(quantileHeader(q), 8))
 	}
@@ -577,8 +575,8 @@ func (d *Display) renderDetailRow(buf *strings.Builder, name string, stats *simp
 	if n == 0 {
 		buf.WriteString(name)
 		buf.WriteString(" │")
-		// min + avg + percentiles + max = 3 + numPcts dashes
-		for i := 0; i < 3+numPcts; i++ {
+		// avg + percentiles + max = 2 + numPcts dashes
+		for i := 0; i < 2+numPcts; i++ {
 			fmt.Fprintf(buf, " %8s", "-")
 		}
 		fmt.Fprintf(buf, " │ %9s %8s\n", "0", "-")
@@ -586,7 +584,7 @@ func (d *Display) renderDetailRow(buf *strings.Builder, name string, stats *simp
 	}
 	buf.WriteString(name)
 	buf.WriteString(" │")
-	fmt.Fprintf(buf, " %s %s", formatLatencyPadded(stats.min), formatLatencyPadded(stats.Avg()))
+	fmt.Fprintf(buf, " %s", formatLatencyPadded(stats.Avg()))
 	if percentiles != nil {
 		for _, pct := range percentiles {
 			fmt.Fprintf(buf, " %s", formatLatencyPadded(pct))
@@ -615,10 +613,10 @@ func (d *Display) renderSummary(buf *strings.Builder, procStats map[string]map[u
 	colWidth := summaryLineWidth(len(d.quantiles))
 	dualWidth := colWidth + 3 + colWidth
 
-	// Column headers: LIFETIME │ min avg [pcts...] max │ samples rate time
+	// Column headers: LIFETIME │ avg [pcts...] max │ samples rate time
 	var header strings.Builder
 	fmt.Fprintf(&header, "%-28s │", "LIFETIME")
-	fmt.Fprintf(&header, " %s %s", d.sortIndicator("min", 8), d.sortIndicator("avg", 8))
+	fmt.Fprintf(&header, " %s", d.sortIndicator("avg", 8))
 	for _, q := range d.quantiles {
 		fmt.Fprintf(&header, " %s", d.sortIndicator(quantileHeader(q), 8))
 	}
@@ -686,15 +684,15 @@ func (d *Display) formatSummaryRow(name string, stats *simpleStats, percentiles 
 	n := stats.count
 	if n == 0 {
 		fmt.Fprintf(&buf, "%-28s │", name)
-		// min + avg + percentiles + max = 3 + numPcts dashes
-		for i := 0; i < 3+numPcts; i++ {
+		// avg + percentiles + max = 2 + numPcts dashes
+		for i := 0; i < 2+numPcts; i++ {
 			fmt.Fprintf(&buf, " %8s", "-")
 		}
 		fmt.Fprintf(&buf, " │ %9s %9s %8s", "0", "-", "-")
 		return buf.String()
 	}
 	fmt.Fprintf(&buf, "%-28s │", name)
-	fmt.Fprintf(&buf, " %s %s", formatLatencyPadded(stats.min), formatLatencyPadded(stats.Avg()))
+	fmt.Fprintf(&buf, " %s", formatLatencyPadded(stats.Avg()))
 	if percentiles != nil {
 		for _, pct := range percentiles {
 			fmt.Fprintf(&buf, " %s", formatLatencyPadded(pct))

@@ -2,7 +2,7 @@
 //
 // Traces syscall enter/exit to compute per-syscall latency, grouped by process.
 // Uses DDSketch for percentiles (P25/P50/P75/P90/P99/P99.9) with explicit
-// min/max/avg tracking (sum+count). Lifetime stats only.
+// max/avg tracking (sum+count). Lifetime stats only.
 //
 // -c filters to specified processes (BPF-level). Without -c, traces all.
 // One unified table output, sorted by any visible column.
@@ -50,7 +50,7 @@ var (
 	colsFlag    = flag.Int("cols", 0, "override terminal width (enables panel in batch mode)")
 	pollSleep   = flag.Duration("poll-sleep", 20*time.Millisecond, "ring buffer poll sleep when all rings are empty")
 	maxSketches = flag.Int("max-sketches", 0, "max process×syscall sketches to keep (LRU eviction; 0=auto: 4×n)")
-	sortFlag    = flag.String("sort", "rate", "sort column (e.g. rate, samples, avg, p99, max, min)")
+	sortFlag    = flag.String("sort", "rate", "sort column (e.g. rate, samples, avg, p99, max)")
 	showVersion = flag.Bool("version", false, "print version and exit")
 
 	// Timing

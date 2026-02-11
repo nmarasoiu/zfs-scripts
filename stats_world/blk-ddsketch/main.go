@@ -346,7 +346,7 @@ func getQuantileSafe(s *ddsketch.DDSketch, q float64) (float64, bool) {
 	return v, true
 }
 
-const lineWidth = 196
+const lineWidth = 187
 
 func (d *Display) render(state *State, intervalDur time.Duration, a float64, drops uint64, ringSnap ringpoll.GroupSnapshot) {
 	var buf strings.Builder
@@ -377,9 +377,9 @@ func (d *Display) render(state *State, intervalDur time.Duration, a float64, dro
 	buf.WriteString(strings.Repeat("=", lineWidth))
 	buf.WriteString("\n")
 
-	// Header: min, avg, p10-p90, p99, p99.9, p99.99, p99.999, max, samples
-	fmt.Fprintf(&buf, "%-10s | %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s | %9s\n",
-		"INTERVAL", "min", "avg", "p10", "p20", "p30", "p40", "p50", "p60", "p70", "p80", "p90", "p99", "p99.9", "p99.99", "p99.999", "max", "samples")
+	// Header: avg, p10-p90, p99, p99.9, p99.99, p99.999, max, samples
+	fmt.Fprintf(&buf, "%-10s | %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s | %9s\n",
+		"INTERVAL", "avg", "p10", "p20", "p30", "p40", "p50", "p60", "p70", "p80", "p90", "p99", "p99.9", "p99.99", "p99.999", "max", "samples")
 	buf.WriteString(strings.Repeat("-", lineWidth))
 	buf.WriteString("\n")
 
@@ -390,13 +390,12 @@ func (d *Display) render(state *State, intervalDur time.Duration, a float64, dro
 		s := ds.interval
 		n := ds.intervalPrecise.count
 		if n == 0 {
-			fmt.Fprintf(&buf, "%-10s | %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s | %9s\n",
-				name, "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "0")
+			fmt.Fprintf(&buf, "%-10s | %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s | %9s\n",
+				name, "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "0")
 			continue
 		}
 
 		avg := ds.intervalPrecise.Avg()
-		min, _ := getQuantileSafe(s, 0.0)
 		p10, _ := getQuantileSafe(s, 0.10)
 		p20, _ := getQuantileSafe(s, 0.20)
 		p30, _ := getQuantileSafe(s, 0.30)
@@ -412,9 +411,8 @@ func (d *Display) render(state *State, intervalDur time.Duration, a float64, dro
 		p99999, _ := getQuantileSafe(s, 0.99999)
 		max, _ := getQuantileSafe(s, 1.0)
 
-		fmt.Fprintf(&buf, "%-10s | %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s | %9s\n",
+		fmt.Fprintf(&buf, "%-10s | %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s | %9s\n",
 			name,
-			formatLatencyPadded(min),
 			formatLatencyPadded(avg),
 			formatLatencyPadded(p10),
 			formatLatencyPadded(p20),
@@ -435,8 +433,8 @@ func (d *Display) render(state *State, intervalDur time.Duration, a float64, dro
 	}
 
 	buf.WriteString("\n")
-	fmt.Fprintf(&buf, "%-10s | %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s | %9s\n",
-		"LIFETIME", "min", "avg", "p10", "p20", "p30", "p40", "p50", "p60", "p70", "p80", "p90", "p99", "p99.9", "p99.99", "p99.999", "max", "samples")
+	fmt.Fprintf(&buf, "%-10s | %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s | %9s\n",
+		"LIFETIME", "avg", "p10", "p20", "p30", "p40", "p50", "p60", "p70", "p80", "p90", "p99", "p99.9", "p99.99", "p99.999", "max", "samples")
 	buf.WriteString(strings.Repeat("-", lineWidth))
 	buf.WriteString("\n")
 
@@ -449,13 +447,12 @@ func (d *Display) render(state *State, intervalDur time.Duration, a float64, dro
 		n := ds.lifetimePrecise.count
 		totalSamples += n
 		if n == 0 {
-			fmt.Fprintf(&buf, "%-10s | %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s | %9s\n",
-				name, "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "0")
+			fmt.Fprintf(&buf, "%-10s | %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s | %9s\n",
+				name, "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "0")
 			continue
 		}
 
 		avg := ds.lifetimePrecise.Avg()
-		min, _ := getQuantileSafe(s, 0.0)
 		p10, _ := getQuantileSafe(s, 0.10)
 		p20, _ := getQuantileSafe(s, 0.20)
 		p30, _ := getQuantileSafe(s, 0.30)
@@ -471,9 +468,8 @@ func (d *Display) render(state *State, intervalDur time.Duration, a float64, dro
 		p99999, _ := getQuantileSafe(s, 0.99999)
 		max, _ := getQuantileSafe(s, 1.0)
 
-		fmt.Fprintf(&buf, "%-10s | %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s | %9s\n",
+		fmt.Fprintf(&buf, "%-10s | %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s | %9s\n",
 			name,
-			formatLatencyPadded(min),
 			formatLatencyPadded(avg),
 			formatLatencyPadded(p10),
 			formatLatencyPadded(p20),

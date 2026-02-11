@@ -495,8 +495,8 @@ func TestRenderDetailRow_Zero(t *testing.T) {
 func TestAvailableSortColumns_SummaryView(t *testing.T) {
 	d := &Display{quantiles: []float64{0.50, 0.99}}
 	cols := d.availableSortColumns()
-	// Summary view: min, avg, p50, p99, max, samples, rate, time
-	expected := []string{"min", "avg", "p50", "p99", "max", "samples", "rate", "time"}
+	// Summary view: avg, p50, p99, max, samples, rate, time
+	expected := []string{"avg", "p50", "p99", "max", "samples", "rate", "time"}
 	if len(cols) != len(expected) {
 		t.Fatalf("cols = %v, want %v", cols, expected)
 	}
@@ -510,8 +510,8 @@ func TestAvailableSortColumns_SummaryView(t *testing.T) {
 func TestAvailableSortColumns_TableView(t *testing.T) {
 	d := &Display{focusProcesses: []string{"tor"}, quantiles: []float64{0.50, 0.99}}
 	cols := d.availableSortColumns()
-	// Table view: min, avg, p50, p99, max, samples, time (no rate)
-	expected := []string{"min", "avg", "p50", "p99", "max", "samples", "time"}
+	// Table view: avg, p50, p99, max, samples, time (no rate)
+	expected := []string{"avg", "p50", "p99", "max", "samples", "time"}
 	if len(cols) != len(expected) {
 		t.Fatalf("cols = %v, want %v", cols, expected)
 	}
@@ -549,13 +549,9 @@ func TestEntrySortVal_Avg(t *testing.T) {
 	}
 }
 
-func TestEntrySortVal_MinMax(t *testing.T) {
+func TestEntrySortVal_Max(t *testing.T) {
 	ss := statsWithCount(100)
-	minVal := testDisplay("min").entrySortVal(ss, 10.0)
 	maxVal := testDisplay("max").entrySortVal(ss, 10.0)
-	if minVal != float64(ss.stats.min) {
-		t.Errorf("min sortVal = %f, want %f", minVal, float64(ss.stats.min))
-	}
 	if maxVal != float64(ss.stats.max) {
 		t.Errorf("max sortVal = %f, want %f", maxVal, float64(ss.stats.max))
 	}
@@ -628,13 +624,8 @@ func TestHandleKey_SortBackspaceEmpty(t *testing.T) {
 
 func TestHandleKey_SortAutoSelect(t *testing.T) {
 	d := &Display{interactive: true, mode: modeSort, sortText: "", quantiles: []float64{0.50, 0.99}, sortColumn: "rate"}
-	// Type "m" → matches both "min" and "max", no auto-select
+	// Type "m" → uniquely matches "max", auto-select
 	d.handleKey(keyEvent{kind: keyChar, ch: 'm'})
-	if d.mode != modeSort {
-		t.Errorf("mode = %d, want modeSort (ambiguous prefix)", d.mode)
-	}
-	// Type "a" → uniquely matches "max"
-	d.handleKey(keyEvent{kind: keyChar, ch: 'a'})
 	if d.mode != modeNormal {
 		t.Errorf("mode = %d, want modeNormal (auto-selected)", d.mode)
 	}

@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"math"
 	"sync"
 	"time"
 	"unsafe"
@@ -11,13 +10,10 @@ import (
 	"github.com/hashicorp/golang-lru/v2/simplelru"
 )
 
-// mergeSimpleStats folds src into dst (min/max/sum/count).
+// mergeSimpleStats folds src into dst (max/sum/count).
 func mergeSimpleStats(dst, src *simpleStats) {
 	if src.count == 0 {
 		return
-	}
-	if src.min < dst.min {
-		dst.min = src.min
 	}
 	if src.max > dst.max {
 		dst.max = src.max
@@ -36,22 +32,18 @@ func commToString(comm [16]int8) string {
 	return string(buf[:])
 }
 
-// simpleStats tracks min/max/sum/count explicitly (no sketch overhead)
+// simpleStats tracks max/sum/count explicitly (no sketch overhead)
 type simpleStats struct {
-	min   int64
 	max   int64
 	sum   uint64
 	count uint64
 }
 
 func newSimpleStats() *simpleStats {
-	return &simpleStats{min: math.MaxInt64, max: 0}
+	return &simpleStats{}
 }
 
 func (s *simpleStats) Record(v int64) {
-	if v < s.min {
-		s.min = v
-	}
 	if v > s.max {
 		s.max = v
 	}
@@ -67,7 +59,7 @@ func (s *simpleStats) Avg() int64 {
 }
 
 // syscallStats holds lifetime stats for a syscall.
-// Uses DDSketch for percentiles, explicit tracking for min/max/avg.
+// Uses DDSketch for percentiles, explicit tracking for max/avg.
 type syscallStats struct {
 	sketch *ddsketch.DDSketch
 	stats  *simpleStats
@@ -128,7 +120,7 @@ func (s *State) Read(fn func(StateView)) {
 
 	// Build nested map view from persistent stats, attaching sketches from LRU where available.
 	// String conversion of comm happens here at display rate, not on the hot event path.
-	// Also fold min/max/sum/count into globalStats in the same pass.
+	// Also fold max/sum/count into globalStats in the same pass.
 	procStats := make(map[string]map[uint32]*syscallStats)
 	globalStats := newSimpleStats()
 	for key, st := range s.stats {

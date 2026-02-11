@@ -46,8 +46,8 @@ func TestSimpleStats_Empty(t *testing.T) {
 func TestSimpleStats_SingleValue(t *testing.T) {
 	s := newSimpleStats()
 	s.Record(42)
-	if s.min != 42 || s.max != 42 {
-		t.Errorf("min=%d max=%d, want both 42", s.min, s.max)
+	if s.max != 42 {
+		t.Errorf("max=%d, want 42", s.max)
 	}
 	if s.Avg() != 42 {
 		t.Errorf("Avg = %d, want 42", s.Avg())
@@ -57,13 +57,10 @@ func TestSimpleStats_SingleValue(t *testing.T) {
 	}
 }
 
-func TestSimpleStats_MinMaxAvg(t *testing.T) {
+func TestSimpleStats_MaxAvg(t *testing.T) {
 	s := newSimpleStats()
 	for _, v := range []int64{10, 20, 30, 40, 50} {
 		s.Record(v)
-	}
-	if s.min != 10 {
-		t.Errorf("min = %d, want 10", s.min)
 	}
 	if s.max != 50 {
 		t.Errorf("max = %d, want 50", s.max)
@@ -86,9 +83,6 @@ func TestSyscallStats_RecordUpdatesSketchAndStats(t *testing.T) {
 
 	if ss.stats.count != 3 {
 		t.Errorf("count = %d, want 3", ss.stats.count)
-	}
-	if ss.stats.min != 100 {
-		t.Errorf("min = %d, want 100", ss.stats.min)
 	}
 	if ss.stats.max != 300 {
 		t.Errorf("max = %d, want 300", ss.stats.max)
@@ -217,9 +211,6 @@ func TestState_GlobalStatsTrackAllEvents(t *testing.T) {
 	state.Read(func(v StateView) {
 		if v.GlobalStats.count != 3 {
 			t.Errorf("global count = %d, want 3", v.GlobalStats.count)
-		}
-		if v.GlobalStats.min != 5 {
-			t.Errorf("global min = %d, want 5", v.GlobalStats.min)
 		}
 		if v.GlobalStats.max != 25 {
 			t.Errorf("global max = %d, want 25", v.GlobalStats.max)

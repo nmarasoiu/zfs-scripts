@@ -66,11 +66,11 @@ processes, showing the full percentile spread:
 
 ```
 ── postgres,pgbench (42) ──────────────────────────────────────────────────
-LIFETIME          │      min      avg      p25      p50      p75      p90      p99    p99.9      max │   samples
+LIFETIME          │      avg      p25      p50      p75      p90      p99    p99.9      max │   samples
 --------------------------------------------------------------------------------------------
-pgbench/futex     │     1µs     14µs      2µs      4µs     11µs     38µs    210µs   1200µs   4800µs │    125.3K
-postgres/epoll_w  │     1µs    380µs      2µs     12µs    820µs   1500µs   3200µs   8100µs     22ms │     42.1K
-postgres/read     │     1µs      8µs      1µs      2µs      5µs     18µs    120µs    680µs   2400µs │     38.7K
+pgbench/futex     │     14µs      2µs      4µs     11µs     38µs    210µs   1200µs   4800µs │    125.3K
+postgres/epoll_w  │    380µs      2µs     12µs    820µs   1500µs   3200µs   8100µs     22ms │     42.1K
+postgres/read     │      8µs      1µs      2µs      5µs     18µs    120µs    680µs   2400µs │     38.7K
 ```
 
 **Summary mode** (no `-c`): a compact dual-column layout covering all
