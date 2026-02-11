@@ -1,8 +1,7 @@
 // syscall-latency: Per-syscall latency percentile tracker using eBPF
 //
 // Traces syscall enter/exit to compute per-syscall latency, grouped by process.
-// Uses DDSketch for percentiles (P25/P50/P75/P90/P99/P99.9) with explicit
-// max/avg tracking (sum+count). Lifetime stats only.
+// Uses DDSketch for percentiles, avg, max, count, and sum. Lifetime stats only.
 //
 // -c filters to specified processes (BPF-level). Without -c, traces all.
 // One unified table output, sorted by any visible column.

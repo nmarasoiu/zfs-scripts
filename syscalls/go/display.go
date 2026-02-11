@@ -20,55 +20,57 @@ type processSummary struct {
 
 type tableEntry struct {
 	label   string
-	ss      *syscallStats
+	sketch  *ddsketch.DDSketch
 	sortVal float64
 }
 
-// entrySortVal extracts the sort value for a given column from a syscallStats entry.
-func (d *Display) entrySortVal(ss *syscallStats, elapsedSecs float64) float64 {
+// entrySortVal extracts the sort value for a given column from a DDSketch.
+func (d *Display) entrySortVal(sketch *ddsketch.DDSketch, elapsedSecs float64) float64 {
+	count := sketch.GetCount()
+	if count == 0 {
+		return 0
+	}
 	switch d.sortColumn {
 	case "avg":
-		return float64(ss.stats.Avg())
+		return sketch.GetSum() / count
 	case "max":
-		return float64(ss.stats.max)
+		v, _ := sketch.GetMaxValue()
+		return v
 	case "samples", "count", "total":
-		return float64(ss.stats.count)
+		return count
 	case "time":
-		return float64(ss.stats.sum)
+		return sketch.GetSum()
 	case "rate":
 		if elapsedSecs > 0 {
-			return float64(ss.stats.count) / elapsedSecs
+			return count / elapsedSecs
 		}
 		return 0
 	default:
 		// percentile column: match against quantile headers
 		for _, q := range d.quantiles {
 			if d.sortColumn == quantileHeader(q) {
-				if ss.sketch == nil {
-					return 0
-				}
-				v, _ := ss.sketch.GetValueAtQuantile(q)
+				v, _ := sketch.GetValueAtQuantile(q)
 				return v
 			}
 		}
-		return float64(ss.stats.count)
+		return count
 	}
 }
 
 // collectEntries builds a sorted list of table entries from per-process stats.
 // When singleProc is true, the proc prefix is omitted from labels.
 // Entries are sorted descending by d.sortColumn.
-func (d *Display) collectEntries(procStats map[string]map[uint32]*syscallStats, singleProc bool, elapsedSecs float64) []tableEntry {
+func (d *Display) collectEntries(procStats map[string]map[uint32]*ddsketch.DDSketch, singleProc bool, elapsedSecs float64) []tableEntry {
 
 	var entries []tableEntry
 	for proc, syscalls := range procStats {
-		for id, ss := range syscalls {
+		for id, sk := range syscalls {
 			label := syscallName(id)
 			if !singleProc {
 				label = proc + "/" + label
 			}
-			sortVal := d.entrySortVal(ss, elapsedSecs)
-			entries = append(entries, tableEntry{label, ss, sortVal})
+			sortVal := d.entrySortVal(sk, elapsedSecs)
+			entries = append(entries, tableEntry{label, sk, sortVal})
 		}
 	}
 
@@ -85,18 +87,18 @@ func (d *Display) collectEntries(procStats map[string]map[uint32]*syscallStats, 
 // filterStatsGeneral returns a filtered copy of procStats where entries match
 // the text against process name or syscall name (case-insensitive substring).
 // Process name matches include all syscalls; syscall matches are per-entry.
-func filterStatsGeneral(procStats map[string]map[uint32]*syscallStats, text string) map[string]map[uint32]*syscallStats {
+func filterStatsGeneral(procStats map[string]map[uint32]*ddsketch.DDSketch, text string) map[string]map[uint32]*ddsketch.DDSketch {
 	lower := strings.ToLower(text)
-	filtered := make(map[string]map[uint32]*syscallStats)
+	filtered := make(map[string]map[uint32]*ddsketch.DDSketch)
 	for proc, syscalls := range procStats {
 		if strings.HasPrefix(strings.ToLower(proc), lower) {
 			filtered[proc] = syscalls
 			continue
 		}
-		matched := make(map[uint32]*syscallStats)
-		for id, ss := range syscalls {
+		matched := make(map[uint32]*ddsketch.DDSketch)
+		for id, sk := range syscalls {
 			if strings.HasPrefix(syscallName(id), lower) {
-				matched[id] = ss
+				matched[id] = sk
 			}
 		}
 		if len(matched) > 0 {
@@ -107,16 +109,16 @@ func filterStatsGeneral(procStats map[string]map[uint32]*syscallStats, text stri
 }
 
 // collectProcessSummaries aggregates per-process totals, sorted by d.sortColumn.
-func (d *Display) collectProcessSummaries(procStats map[string]map[uint32]*syscallStats, elapsedSecs float64) []processSummary {
+func (d *Display) collectProcessSummaries(procStats map[string]map[uint32]*ddsketch.DDSketch, elapsedSecs float64) []processSummary {
 	sortByRate := d.sortColumn == "rate"
 	sortByTime := d.sortColumn == "time"
 	summaries := make([]processSummary, 0, len(procStats))
 	for proc, syscalls := range procStats {
 		var total uint64
 		var totalTime uint64
-		for _, ss := range syscalls {
-			total += ss.stats.count
-			totalTime += ss.stats.sum
+		for _, sk := range syscalls {
+			total += uint64(sk.GetCount())
+			totalTime += uint64(sk.GetSum())
 		}
 		rate := float64(0)
 		if elapsedSecs > 0 {
@@ -313,14 +315,12 @@ func (d *Display) render(state *State, frame frameMetrics) {
 		const sketchBytesEach = 2048 // ~2KB per DDSketch: 0.7KB narrow, 4KB wide range (measured via protobuf + struct overhead)
 		totalMB := float64(v.NSketches) * sketchBytesEach / 1024 / 1024
 
-		evicted := v.NStats - v.NSketches
-
 		cpuPct := 0.0
 		if elapsed.Seconds() > 0 {
 			cpuPct = frame.cpuTime.Seconds() / elapsed.Seconds() * 100
 		}
-		fmt.Fprintf(&mainBuf, "Syscall Latency Monitor - %s (uptime: %s, cpu: %s = %.1f%%) -- %d entries  %d sketches × 2KB ≈ %.1fMB  evict:%s churn:%s\n",
-			now.Format("15:04:05"), formatDuration(elapsed), formatDuration(frame.cpuTime), cpuPct, v.NStats, v.NSketches, totalMB, formatCount(int64(evicted)), formatCount(int64(v.SketchEvictions)))
+		fmt.Fprintf(&mainBuf, "Syscall Latency Monitor - %s (uptime: %s, cpu: %s = %.1f%%) -- %d sketches × 2KB ≈ %.1fMB  churn:%s\n",
+			now.Format("15:04:05"), formatDuration(elapsed), formatDuration(frame.cpuTime), cpuPct, v.NSketches, totalMB, formatCount(int64(v.SketchEvictions)))
 
 		d.lastSummaries = d.collectProcessSummaries(v.ProcStats, elapsed.Seconds())
 
@@ -336,7 +336,7 @@ func (d *Display) render(state *State, frame frameMetrics) {
 		if len(d.focusProcesses) > 0 {
 			d.renderTable(&mainBuf, viewStats, elapsed.Seconds())
 		} else {
-			d.renderSummary(&mainBuf, viewStats, elapsed, v.GlobalStats)
+			d.renderSummary(&mainBuf, viewStats, elapsed)
 		}
 
 		nProcs = len(v.ProcStats)
@@ -520,7 +520,7 @@ func (d *Display) renderFooter(buf *strings.Builder, elapsed time.Duration, nPro
 	}
 }
 
-func (d *Display) renderTable(buf *strings.Builder, procStats map[string]map[uint32]*syscallStats, elapsedSecs float64) {
+func (d *Display) renderTable(buf *strings.Builder, procStats map[string]map[uint32]*ddsketch.DDSketch, elapsedSecs float64) {
 	entries := d.collectEntries(procStats, len(procStats) == 1, elapsedSecs)
 
 	if len(entries) == 0 {
@@ -563,16 +563,16 @@ func (d *Display) renderTable(buf *strings.Builder, procStats map[string]map[uin
 	for i := 0; i < shown; i++ {
 		e := entries[i]
 		name := fmt.Sprintf(nameFmt, e.label)
-		d.renderDetailRow(buf, name, e.ss.stats, d.sketchPercentiles(e.ss.sketch))
+		d.renderDetailRow(buf, name, e.sketch)
 	}
 
 	buf.WriteString("\n")
 }
 
-func (d *Display) renderDetailRow(buf *strings.Builder, name string, stats *simpleStats, percentiles []int64) {
+func (d *Display) renderDetailRow(buf *strings.Builder, name string, sketch *ddsketch.DDSketch) {
 	numPcts := len(d.quantiles)
-	n := stats.count
-	if n == 0 {
+	count := uint64(sketch.GetCount())
+	if count == 0 {
 		buf.WriteString(name)
 		buf.WriteString(" │")
 		// avg + percentiles + max = 2 + numPcts dashes
@@ -582,22 +582,20 @@ func (d *Display) renderDetailRow(buf *strings.Builder, name string, stats *simp
 		fmt.Fprintf(buf, " │ %9s %8s\n", "0", "-")
 		return
 	}
+	avg := int64(sketch.GetSum() / sketch.GetCount())
+	maxVal, _ := sketch.GetMaxValue()
+
 	buf.WriteString(name)
 	buf.WriteString(" │")
-	fmt.Fprintf(buf, " %s", formatLatencyPadded(stats.Avg()))
-	if percentiles != nil {
-		for _, pct := range percentiles {
-			fmt.Fprintf(buf, " %s", formatLatencyPadded(pct))
-		}
-	} else {
-		for i := 0; i < numPcts; i++ {
-			fmt.Fprintf(buf, " %8s", "-")
-		}
+	fmt.Fprintf(buf, " %s", formatLatencyPadded(avg))
+	percentiles := d.sketchPercentiles(sketch)
+	for _, pct := range percentiles {
+		fmt.Fprintf(buf, " %s", formatLatencyPadded(pct))
 	}
-	fmt.Fprintf(buf, " %s │ %9s %s\n", formatLatencyPadded(stats.max), formatCount(int64(n)), formatLatencyPadded(int64(stats.sum)))
+	fmt.Fprintf(buf, " %s │ %9s %s\n", formatLatencyPadded(int64(maxVal)), formatCount(int64(count)), formatLatencyPadded(int64(sketch.GetSum())))
 }
 
-func (d *Display) renderSummary(buf *strings.Builder, procStats map[string]map[uint32]*syscallStats, elapsed time.Duration, globalStats *simpleStats) {
+func (d *Display) renderSummary(buf *strings.Builder, procStats map[string]map[uint32]*ddsketch.DDSketch, elapsed time.Duration) {
 	entries := d.collectEntries(procStats, false, elapsed.Seconds())
 
 	totalSecs := elapsed.Seconds()
@@ -651,13 +649,13 @@ func (d *Display) renderSummary(buf *strings.Builder, procStats map[string]map[u
 		var leftStr, rightStr string
 
 		if i < len(leftSlice) {
-			leftStr = d.formatSummaryRow(leftSlice[i].label, leftSlice[i].ss.stats, d.sketchPercentiles(leftSlice[i].ss.sketch), totalSecs)
+			leftStr = d.formatSummaryRow(leftSlice[i].label, leftSlice[i].sketch, totalSecs)
 		} else {
 			leftStr = strings.Repeat(" ", colWidth)
 		}
 
 		if i < len(rightSlice) {
-			rightStr = d.formatSummaryRow(rightSlice[i].label, rightSlice[i].ss.stats, d.sketchPercentiles(rightSlice[i].ss.sketch), totalSecs)
+			rightStr = d.formatSummaryRow(rightSlice[i].label, rightSlice[i].sketch, totalSecs)
 		} else {
 			rightStr = strings.Repeat(" ", colWidth)
 		}
@@ -665,24 +663,18 @@ func (d *Display) renderSummary(buf *strings.Builder, procStats map[string]map[u
 		fmt.Fprintf(buf, "%s │ %s\n", leftStr, rightStr)
 	}
 
-	// Build summary bar: LIFETIME(all) stats == title == legend ==
+	// Summary bar with title and interactive legend
 	title := fmt.Sprintf("Process × Syscall (top %d)", totalShown)
 	legend := d.summaryBarLegend()
-
-	globalRow := d.formatSummaryRow("LIFETIME(all)", globalStats, nil, totalSecs)
-	remaining := dualWidth - colWidth - 1
-	if remaining < 0 {
-		remaining = 0
-	}
-	fmt.Fprintf(buf, "%s %s\n", globalRow, buildSepLine(remaining, title, legend))
+	fmt.Fprintf(buf, "%s\n", buildSepLine(dualWidth, title, legend))
 }
 
-func (d *Display) formatSummaryRow(name string, stats *simpleStats, percentiles []int64, secs float64) string {
+func (d *Display) formatSummaryRow(name string, sketch *ddsketch.DDSketch, secs float64) string {
 	name = truncateProcLabel(name, 28)
 	var buf strings.Builder
 	numPcts := len(d.quantiles)
-	n := stats.count
-	if n == 0 {
+	count := uint64(sketch.GetCount())
+	if count == 0 {
 		fmt.Fprintf(&buf, "%-28s │", name)
 		// avg + percentiles + max = 2 + numPcts dashes
 		for i := 0; i < 2+numPcts; i++ {
@@ -691,18 +683,16 @@ func (d *Display) formatSummaryRow(name string, stats *simpleStats, percentiles 
 		fmt.Fprintf(&buf, " │ %9s %9s %8s", "0", "-", "-")
 		return buf.String()
 	}
+	avg := int64(sketch.GetSum() / sketch.GetCount())
+	maxVal, _ := sketch.GetMaxValue()
+
 	fmt.Fprintf(&buf, "%-28s │", name)
-	fmt.Fprintf(&buf, " %s", formatLatencyPadded(stats.Avg()))
-	if percentiles != nil {
-		for _, pct := range percentiles {
-			fmt.Fprintf(&buf, " %s", formatLatencyPadded(pct))
-		}
-	} else {
-		for i := 0; i < numPcts; i++ {
-			fmt.Fprintf(&buf, " %8s", "-")
-		}
+	fmt.Fprintf(&buf, " %s", formatLatencyPadded(avg))
+	percentiles := d.sketchPercentiles(sketch)
+	for _, pct := range percentiles {
+		fmt.Fprintf(&buf, " %s", formatLatencyPadded(pct))
 	}
-	fmt.Fprintf(&buf, " %s │ %9s %9s %s", formatLatencyPadded(stats.max), formatCount(int64(n)), formatRate(n, secs), formatLatencyPadded(int64(stats.sum)))
+	fmt.Fprintf(&buf, " %s │ %9s %9s %s", formatLatencyPadded(int64(maxVal)), formatCount(int64(count)), formatRate(count, secs), formatLatencyPadded(int64(sketch.GetSum())))
 	return buf.String()
 }
 

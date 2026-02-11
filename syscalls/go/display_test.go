@@ -17,13 +17,13 @@ func testDisplay(sortColumn string) *Display {
 // --- collectEntries ---
 
 func TestCollectEntries_SortedByRateDescending(t *testing.T) {
-	procStats := map[string]map[uint32]*syscallStats{
+	procStats := map[string]map[uint32]*ddsketch.DDSketch{
 		"tor": {
-			0: statsWithCount(100), // read
-			1: statsWithCount(50),  // write
+			0: sketchWithCount(100), // read
+			1: sketchWithCount(50),  // write
 		},
 		"sshd": {
-			0: statsWithCount(200), // read
+			0: sketchWithCount(200), // read
 		},
 	}
 
@@ -32,25 +32,25 @@ func TestCollectEntries_SortedByRateDescending(t *testing.T) {
 	if len(entries) != 3 {
 		t.Fatalf("len = %d, want 3", len(entries))
 	}
-	if entries[0].ss.stats.count != 200 {
-		t.Errorf("first entry count = %d, want 200", entries[0].ss.stats.count)
+	if uint64(entries[0].sketch.GetCount()) != 200 {
+		t.Errorf("first entry count = %d, want 200", uint64(entries[0].sketch.GetCount()))
 	}
-	if entries[1].ss.stats.count != 100 {
-		t.Errorf("second entry count = %d, want 100", entries[1].ss.stats.count)
+	if uint64(entries[1].sketch.GetCount()) != 100 {
+		t.Errorf("second entry count = %d, want 100", uint64(entries[1].sketch.GetCount()))
 	}
-	if entries[2].ss.stats.count != 50 {
-		t.Errorf("third entry count = %d, want 50", entries[2].ss.stats.count)
+	if uint64(entries[2].sketch.GetCount()) != 50 {
+		t.Errorf("third entry count = %d, want 50", uint64(entries[2].sketch.GetCount()))
 	}
 }
 
 func TestCollectEntries_SortedByCountDescending(t *testing.T) {
-	procStats := map[string]map[uint32]*syscallStats{
+	procStats := map[string]map[uint32]*ddsketch.DDSketch{
 		"tor": {
-			0: statsWithCount(100), // read
-			1: statsWithCount(50),  // write
+			0: sketchWithCount(100), // read
+			1: sketchWithCount(50),  // write
 		},
 		"sshd": {
-			0: statsWithCount(200), // read
+			0: sketchWithCount(200), // read
 		},
 	}
 
@@ -59,21 +59,21 @@ func TestCollectEntries_SortedByCountDescending(t *testing.T) {
 	if len(entries) != 3 {
 		t.Fatalf("len = %d, want 3", len(entries))
 	}
-	if entries[0].ss.stats.count != 200 {
-		t.Errorf("first entry count = %d, want 200", entries[0].ss.stats.count)
+	if uint64(entries[0].sketch.GetCount()) != 200 {
+		t.Errorf("first entry count = %d, want 200", uint64(entries[0].sketch.GetCount()))
 	}
-	if entries[1].ss.stats.count != 100 {
-		t.Errorf("second entry count = %d, want 100", entries[1].ss.stats.count)
+	if uint64(entries[1].sketch.GetCount()) != 100 {
+		t.Errorf("second entry count = %d, want 100", uint64(entries[1].sketch.GetCount()))
 	}
-	if entries[2].ss.stats.count != 50 {
-		t.Errorf("third entry count = %d, want 50", entries[2].ss.stats.count)
+	if uint64(entries[2].sketch.GetCount()) != 50 {
+		t.Errorf("third entry count = %d, want 50", uint64(entries[2].sketch.GetCount()))
 	}
 }
 
 func TestCollectEntries_TiesBrokenByLabel(t *testing.T) {
-	procStats := map[string]map[uint32]*syscallStats{
-		"b": {0: statsWithCount(10)},
-		"a": {0: statsWithCount(10)},
+	procStats := map[string]map[uint32]*ddsketch.DDSketch{
+		"b": {0: sketchWithCount(10)},
+		"a": {0: sketchWithCount(10)},
 	}
 
 	entries := testDisplay("rate").collectEntries(procStats, false, 10.0)
@@ -86,8 +86,8 @@ func TestCollectEntries_TiesBrokenByLabel(t *testing.T) {
 }
 
 func TestCollectEntries_SingleProcOmitsPrefix(t *testing.T) {
-	procStats := map[string]map[uint32]*syscallStats{
-		"tor": {0: statsWithCount(10)}, // syscall 0 = "read"
+	procStats := map[string]map[uint32]*ddsketch.DDSketch{
+		"tor": {0: sketchWithCount(10)}, // syscall 0 = "read"
 	}
 
 	entries := testDisplay("rate").collectEntries(procStats, true, 10.0)
@@ -100,9 +100,9 @@ func TestCollectEntries_SingleProcOmitsPrefix(t *testing.T) {
 }
 
 func TestCollectEntries_MultiProcIncludesPrefix(t *testing.T) {
-	procStats := map[string]map[uint32]*syscallStats{
-		"tor":  {0: statsWithCount(10)},
-		"sshd": {0: statsWithCount(5)},
+	procStats := map[string]map[uint32]*ddsketch.DDSketch{
+		"tor":  {0: sketchWithCount(10)},
+		"sshd": {0: sketchWithCount(5)},
 	}
 
 	entries := testDisplay("rate").collectEntries(procStats, false, 10.0)
@@ -116,9 +116,9 @@ func TestCollectEntries_MultiProcIncludesPrefix(t *testing.T) {
 // --- filterStatsGeneral ---
 
 func TestFilterStatsGeneral_MatchProcess(t *testing.T) {
-	procStats := map[string]map[uint32]*syscallStats{
-		"tor":  {0: statsWithCount(10), 1: statsWithCount(5)},
-		"sshd": {0: statsWithCount(20)},
+	procStats := map[string]map[uint32]*ddsketch.DDSketch{
+		"tor":  {0: sketchWithCount(10), 1: sketchWithCount(5)},
+		"sshd": {0: sketchWithCount(20)},
 	}
 
 	filtered := filterStatsGeneral(procStats, "tor")
@@ -135,9 +135,9 @@ func TestFilterStatsGeneral_MatchProcess(t *testing.T) {
 }
 
 func TestFilterStatsGeneral_MatchSyscall(t *testing.T) {
-	procStats := map[string]map[uint32]*syscallStats{
-		"tor":  {0: statsWithCount(10)}, // 0 = "read"
-		"sshd": {1: statsWithCount(20)}, // 1 = "write"
+	procStats := map[string]map[uint32]*ddsketch.DDSketch{
+		"tor":  {0: sketchWithCount(10)}, // 0 = "read"
+		"sshd": {1: sketchWithCount(20)}, // 1 = "write"
 	}
 
 	filtered := filterStatsGeneral(procStats, "read")
@@ -150,8 +150,8 @@ func TestFilterStatsGeneral_MatchSyscall(t *testing.T) {
 }
 
 func TestFilterStatsGeneral_NoMatch(t *testing.T) {
-	procStats := map[string]map[uint32]*syscallStats{
-		"tor": {0: statsWithCount(10)},
+	procStats := map[string]map[uint32]*ddsketch.DDSketch{
+		"tor": {0: sketchWithCount(10)},
 	}
 
 	filtered := filterStatsGeneral(procStats, "nonexistent")
@@ -161,8 +161,8 @@ func TestFilterStatsGeneral_NoMatch(t *testing.T) {
 }
 
 func TestFilterStatsGeneral_CaseInsensitive(t *testing.T) {
-	procStats := map[string]map[uint32]*syscallStats{
-		"Tor": {0: statsWithCount(10)},
+	procStats := map[string]map[uint32]*ddsketch.DDSketch{
+		"Tor": {0: sketchWithCount(10)},
 	}
 
 	filtered := filterStatsGeneral(procStats, "tor")
@@ -174,10 +174,10 @@ func TestFilterStatsGeneral_CaseInsensitive(t *testing.T) {
 // --- collectProcessSummaries ---
 
 func TestCollectProcessSummaries_AggregatesAcrossSyscalls(t *testing.T) {
-	procStats := map[string]map[uint32]*syscallStats{
+	procStats := map[string]map[uint32]*ddsketch.DDSketch{
 		"tor": {
-			0: statsWithCount(100),
-			1: statsWithCount(50),
+			0: sketchWithCount(100),
+			1: sketchWithCount(50),
 		},
 	}
 
@@ -194,10 +194,10 @@ func TestCollectProcessSummaries_AggregatesAcrossSyscalls(t *testing.T) {
 }
 
 func TestCollectProcessSummaries_SortedByRateDesc(t *testing.T) {
-	procStats := map[string]map[uint32]*syscallStats{
-		"low":  {0: statsWithCount(10)},
-		"high": {0: statsWithCount(100)},
-		"mid":  {0: statsWithCount(50)},
+	procStats := map[string]map[uint32]*ddsketch.DDSketch{
+		"low":  {0: sketchWithCount(10)},
+		"high": {0: sketchWithCount(100)},
+		"mid":  {0: sketchWithCount(50)},
 	}
 
 	summaries := testDisplay("rate").collectProcessSummaries(procStats, 1.0)
@@ -216,8 +216,8 @@ func TestCollectProcessSummaries_SortedByRateDesc(t *testing.T) {
 }
 
 func TestCollectProcessSummaries_ZeroElapsed(t *testing.T) {
-	procStats := map[string]map[uint32]*syscallStats{
-		"p": {0: statsWithCount(10)},
+	procStats := map[string]map[uint32]*ddsketch.DDSketch{
+		"p": {0: sketchWithCount(10)},
 	}
 
 	summaries := testDisplay("rate").collectProcessSummaries(procStats, 0)
@@ -440,12 +440,12 @@ func TestRenderFooter_WithRingStats(t *testing.T) {
 var testQuantiles = []float64{0.25, 0.50, 0.75, 0.90, 0.99, 0.999}
 
 func TestFormatSummaryRow_NonZero(t *testing.T) {
-	ss := newTestSyscallStats(0.25)
+	sk := newTestSketch(0.25)
 	for i := int64(1); i <= 100; i++ {
-		testRecord(ss, i)
+		sk.Add(float64(i))
 	}
 	d := &Display{quantiles: testQuantiles}
-	row := d.formatSummaryRow("tor/read", ss.stats, d.sketchPercentiles(ss.sketch), 10.0)
+	row := d.formatSummaryRow("tor/read", sk, 10.0)
 	if !strings.Contains(row, "tor/read") {
 		t.Errorf("row should contain name, got %q", row)
 	}
@@ -455,9 +455,9 @@ func TestFormatSummaryRow_NonZero(t *testing.T) {
 }
 
 func TestFormatSummaryRow_Zero(t *testing.T) {
-	ss := newTestSyscallStats(0.25)
+	sk := newTestSketch(0.25)
 	d := &Display{quantiles: testQuantiles}
-	row := d.formatSummaryRow("empty", ss.stats, d.sketchPercentiles(ss.sketch), 10.0)
+	row := d.formatSummaryRow("empty", sk, 10.0)
 	if !strings.Contains(row, "-") {
 		t.Errorf("zero row should contain dashes, got %q", row)
 	}
@@ -466,13 +466,13 @@ func TestFormatSummaryRow_Zero(t *testing.T) {
 // --- renderDetailRow ---
 
 func TestRenderDetailRow_NonZero(t *testing.T) {
-	ss := newTestSyscallStats(0.25)
+	sk := newTestSketch(0.25)
 	for i := int64(1); i <= 50; i++ {
-		testRecord(ss, i)
+		sk.Add(float64(i))
 	}
 	d := &Display{quantiles: testQuantiles}
 	var buf strings.Builder
-	d.renderDetailRow(&buf, "tor/read        ", ss.stats, d.sketchPercentiles(ss.sketch))
+	d.renderDetailRow(&buf, "tor/read        ", sk)
 	s := buf.String()
 	if !strings.Contains(s, "tor/read") {
 		t.Errorf("row should contain name, got %q", s)
@@ -480,10 +480,10 @@ func TestRenderDetailRow_NonZero(t *testing.T) {
 }
 
 func TestRenderDetailRow_Zero(t *testing.T) {
-	ss := newTestSyscallStats(0.25)
+	sk := newTestSketch(0.25)
 	d := &Display{quantiles: testQuantiles}
 	var buf strings.Builder
-	d.renderDetailRow(&buf, "empty           ", ss.stats, d.sketchPercentiles(ss.sketch))
+	d.renderDetailRow(&buf, "empty           ", sk)
 	s := buf.String()
 	if !strings.Contains(s, "-") {
 		t.Errorf("zero row should contain dashes, got %q", s)
@@ -525,41 +525,42 @@ func TestAvailableSortColumns_TableView(t *testing.T) {
 // --- entrySortVal ---
 
 func TestEntrySortVal_Rate(t *testing.T) {
-	ss := statsWithCount(100)
-	val := testDisplay("rate").entrySortVal(ss, 10.0)
+	sk := sketchWithCount(100)
+	val := testDisplay("rate").entrySortVal(sk, 10.0)
 	if val != 10.0 {
 		t.Errorf("rate sortVal = %f, want 10.0", val)
 	}
 }
 
 func TestEntrySortVal_Samples(t *testing.T) {
-	ss := statsWithCount(100)
-	val := testDisplay("samples").entrySortVal(ss, 10.0)
+	sk := sketchWithCount(100)
+	val := testDisplay("samples").entrySortVal(sk, 10.0)
 	if val != 100.0 {
 		t.Errorf("samples sortVal = %f, want 100.0", val)
 	}
 }
 
 func TestEntrySortVal_Avg(t *testing.T) {
-	ss := statsWithCount(100)
-	val := testDisplay("avg").entrySortVal(ss, 10.0)
-	expected := float64(ss.stats.Avg())
+	sk := sketchWithCount(100)
+	expected := sk.GetSum() / sk.GetCount()
+	val := testDisplay("avg").entrySortVal(sk, 10.0)
 	if val != expected {
 		t.Errorf("avg sortVal = %f, want %f", val, expected)
 	}
 }
 
 func TestEntrySortVal_Max(t *testing.T) {
-	ss := statsWithCount(100)
-	maxVal := testDisplay("max").entrySortVal(ss, 10.0)
-	if maxVal != float64(ss.stats.max) {
-		t.Errorf("max sortVal = %f, want %f", maxVal, float64(ss.stats.max))
+	sk := sketchWithCount(100)
+	expected, _ := sk.GetMaxValue()
+	maxVal := testDisplay("max").entrySortVal(sk, 10.0)
+	if maxVal != expected {
+		t.Errorf("max sortVal = %f, want %f", maxVal, expected)
 	}
 }
 
 func TestEntrySortVal_Percentile(t *testing.T) {
-	ss := statsWithCount(100)
-	val := testDisplay("p99").entrySortVal(ss, 10.0)
+	sk := sketchWithCount(100)
+	val := testDisplay("p99").entrySortVal(sk, 10.0)
 	if val <= 0 {
 		t.Errorf("p99 sortVal = %f, want > 0", val)
 	}
@@ -569,18 +570,18 @@ func TestEntrySortVal_Percentile(t *testing.T) {
 
 func TestCollectEntries_SortedByPercentile(t *testing.T) {
 	// Create two entries with different latency distributions
-	ssLow := newTestSyscallStats(0.25)
+	skLow := newTestSketch(0.25)
 	for i := int64(1); i <= 100; i++ {
-		testRecord(ssLow, i) // latencies 1-100
+		skLow.Add(float64(i)) // latencies 1-100
 	}
-	ssHigh := newTestSyscallStats(0.25)
+	skHigh := newTestSketch(0.25)
 	for i := int64(50); i <= 200; i++ {
-		testRecord(ssHigh, i) // latencies 50-200, higher p99
+		skHigh.Add(float64(i)) // latencies 50-200, higher p99
 	}
 
-	procStats := map[string]map[uint32]*syscallStats{
-		"a": {0: ssLow},
-		"b": {0: ssHigh},
+	procStats := map[string]map[uint32]*ddsketch.DDSketch{
+		"a": {0: skLow},
+		"b": {0: skHigh},
 	}
 
 	entries := testDisplay("p99").collectEntries(procStats, false, 10.0)
@@ -674,22 +675,17 @@ func TestSortIndicator_InactiveColumn(t *testing.T) {
 
 // --- helpers ---
 
-// newTestSyscallStats creates a syscallStats with both sketch and simpleStats for testing.
-func newTestSyscallStats(alpha float64) *syscallStats {
-	sketch, _ := ddsketch.NewDefaultDDSketch(alpha)
-	return &syscallStats{sketch: sketch, stats: newSimpleStats()}
+// newTestSketch creates a DDSketch for testing.
+func newTestSketch(alpha float64) *ddsketch.DDSketch {
+	sk, _ := ddsketch.NewDefaultDDSketch(alpha)
+	return sk
 }
 
-// testRecord records a latency into both the sketch and simpleStats.
-func testRecord(ss *syscallStats, latencyUs int64) {
-	ss.sketch.Add(float64(latencyUs))
-	ss.stats.Record(latencyUs)
-}
-
-func statsWithCount(n uint64) *syscallStats {
-	ss := newTestSyscallStats(0.25)
+// sketchWithCount creates a DDSketch with n samples (values 1..n).
+func sketchWithCount(n uint64) *ddsketch.DDSketch {
+	sk := newTestSketch(0.25)
 	for i := uint64(0); i < n; i++ {
-		testRecord(ss, int64(i+1))
+		sk.Add(float64(i + 1))
 	}
-	return ss
+	return sk
 }

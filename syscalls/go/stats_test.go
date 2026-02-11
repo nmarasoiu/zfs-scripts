@@ -31,77 +31,50 @@ func TestCommToString_FullBuffer(t *testing.T) {
 	}
 }
 
-// --- simpleStats ---
+// --- DDSketch count/sum/avg/max ---
 
-func TestSimpleStats_Empty(t *testing.T) {
-	s := newSimpleStats()
-	if s.Avg() != 0 {
-		t.Errorf("empty Avg = %d, want 0", s.Avg())
+func TestSketch_CountSumAvg(t *testing.T) {
+	sk := newTestSketch(0.25)
+	sk.Add(10)
+	sk.Add(20)
+	sk.Add(30)
+
+	if uint64(sk.GetCount()) != 3 {
+		t.Errorf("count = %d, want 3", uint64(sk.GetCount()))
 	}
-	if s.count != 0 {
-		t.Errorf("empty count = %d, want 0", s.count)
+	// GetSum() is approximate (bucket centroids), within ±alpha per value
+	sum := sk.GetSum()
+	if sum < 45 || sum > 75 {
+		t.Errorf("sum = %f, want ~60 (within ±25%%)", sum)
+	}
+	avg := sum / sk.GetCount()
+	if avg < 15 || avg > 25 {
+		t.Errorf("avg = %f, want ~20 (within ±25%%)", avg)
 	}
 }
 
-func TestSimpleStats_SingleValue(t *testing.T) {
-	s := newSimpleStats()
-	s.Record(42)
-	if s.max != 42 {
-		t.Errorf("max=%d, want 42", s.max)
+func TestSketch_MaxValue(t *testing.T) {
+	sk := newTestSketch(0.25)
+	for _, v := range []float64{10, 20, 30, 40, 50} {
+		sk.Add(v)
 	}
-	if s.Avg() != 42 {
-		t.Errorf("Avg = %d, want 42", s.Avg())
+	maxVal, err := sk.GetMaxValue()
+	if err != nil {
+		t.Fatalf("GetMaxValue error: %v", err)
 	}
-	if s.count != 1 {
-		t.Errorf("count = %d, want 1", s.count)
-	}
-}
-
-func TestSimpleStats_MaxAvg(t *testing.T) {
-	s := newSimpleStats()
-	for _, v := range []int64{10, 20, 30, 40, 50} {
-		s.Record(v)
-	}
-	if s.max != 50 {
-		t.Errorf("max = %d, want 50", s.max)
-	}
-	if s.Avg() != 30 {
-		t.Errorf("Avg = %d, want 30", s.Avg())
-	}
-	if s.count != 5 {
-		t.Errorf("count = %d, want 5", s.count)
-	}
-}
-
-// --- syscallStats ---
-
-func TestSyscallStats_RecordUpdatesSketchAndStats(t *testing.T) {
-	ss := newTestSyscallStats(0.25)
-	testRecord(ss, 100)
-	testRecord(ss, 200)
-	testRecord(ss, 300)
-
-	if ss.stats.count != 3 {
-		t.Errorf("count = %d, want 3", ss.stats.count)
-	}
-	if ss.stats.max != 300 {
-		t.Errorf("max = %d, want 300", ss.stats.max)
-	}
-
-	// DDSketch should have recorded 3 values
-	p50, _ := ss.sketch.GetValueAtQuantile(0.50)
-	if p50 < 150 || p50 > 250 {
-		t.Errorf("p50 = %.0f, expected near 200", p50)
+	// DDSketch max is approximate within ±alpha
+	if maxVal < 40 || maxVal > 65 {
+		t.Errorf("max = %f, expected near 50 (within ±25%%)", maxVal)
 	}
 }
 
 func TestSketchPercentiles_Monotonic(t *testing.T) {
-	ss := newTestSyscallStats(0.25)
+	sk := newTestSketch(0.25)
 	for i := int64(1); i <= 1000; i++ {
-		testRecord(ss, i)
+		sk.Add(float64(i))
 	}
 	d := &Display{quantiles: []float64{0.25, 0.50, 0.75, 0.90, 0.99, 0.999}}
-	pcts := d.sketchPercentiles(ss.sketch)
+	pcts := d.sketchPercentiles(sk)
 	for i := 1; i < len(pcts); i++ {
 		if pcts[i-1] > pcts[i] {
 			t.Errorf("percentiles not monotonic at index %d: %d > %d", i, pcts[i-1], pcts[i])
@@ -125,9 +98,6 @@ func TestState_RecordBatchAndRead(t *testing.T) {
 		if v.NSketches != 3 {
 			t.Errorf("NSketches = %d, want 3", v.NSketches)
 		}
-		if v.GlobalStats.count != 4 {
-			t.Errorf("global count = %d, want 4", v.GlobalStats.count)
-		}
 
 		torSyscalls := v.ProcStats["tor"]
 		if torSyscalls == nil {
@@ -137,8 +107,8 @@ func TestState_RecordBatchAndRead(t *testing.T) {
 		if torRead == nil {
 			t.Fatal("missing tor/read in ProcStats")
 		}
-		if torRead.stats.count != 2 {
-			t.Errorf("tor/read count = %d, want 2", torRead.stats.count)
+		if uint64(torRead.GetCount()) != 2 {
+			t.Errorf("tor/read count = %d, want 2", uint64(torRead.GetCount()))
 		}
 
 		sshdSyscalls := v.ProcStats["sshd"]
@@ -146,8 +116,8 @@ func TestState_RecordBatchAndRead(t *testing.T) {
 			t.Fatal("missing sshd in ProcStats")
 		}
 		sshdRead := sshdSyscalls[0]
-		if sshdRead.stats.count != 1 {
-			t.Errorf("sshd/read count = %d, want 1", sshdRead.stats.count)
+		if uint64(sshdRead.GetCount()) != 1 {
+			t.Errorf("sshd/read count = %d, want 1", uint64(sshdRead.GetCount()))
 		}
 	})
 }
@@ -164,32 +134,18 @@ func TestState_LRUEviction(t *testing.T) {
 		if v.NSketches != 2 {
 			t.Errorf("NSketches = %d, want 2", v.NSketches)
 		}
-		if v.NStats != 3 {
-			t.Errorf("NStats = %d, want 3 (all entries persist)", v.NStats)
-		}
 		if v.SketchEvictions != 1 {
 			t.Errorf("evictions = %d, want 1", v.SketchEvictions)
 		}
-		// "a" stats persist but sketch is evicted
-		aStats := v.ProcStats["a"]
-		if aStats == nil {
-			t.Fatal("expected 'a' to be present (stats persist)")
+		// "a" is evicted from LRU — no longer in ProcStats
+		if v.ProcStats["a"] != nil {
+			t.Error("expected 'a' to be absent (evicted from LRU)")
 		}
-		aSyscall := aStats[0]
-		if aSyscall == nil {
-			t.Fatal("expected 'a' syscall 0 to be present")
-		}
-		if aSyscall.sketch != nil {
-			t.Error("expected 'a' sketch to be nil (evicted)")
-		}
-		if aSyscall.stats.count != 1 {
-			t.Errorf("'a' count = %d, want 1", aSyscall.stats.count)
-		}
-		// "b" and "c" have both stats and sketches
+		// "b" and "c" should be present
 		if v.ProcStats["b"] == nil {
 			t.Error("expected 'b' to be present")
 		}
-		if v.ProcStats["b"][1].sketch == nil {
+		if v.ProcStats["b"][1] == nil {
 			t.Error("expected 'b' sketch to be present")
 		}
 		if v.ProcStats["c"] == nil {
@@ -198,22 +154,39 @@ func TestState_LRUEviction(t *testing.T) {
 	})
 }
 
-func TestState_GlobalStatsTrackAllEvents(t *testing.T) {
-	state := newState(100, 0.25)
+func TestState_RecordBatchPreservesLRUOrder(t *testing.T) {
+	state := newState(2, 0.25)
+	// Add a, b
 	state.RecordBatch([]pendingEvent{
-		{testComm("p1"), 0, 5},
-		{testComm("p2"), 1, 15},
+		{testComm("a"), 0, 10},
+		{testComm("b"), 1, 20},
 	})
+	// Touch a again (promotes to most-recent), then add c (evicts b)
 	state.RecordBatch([]pendingEvent{
-		{testComm("p1"), 0, 25},
+		{testComm("a"), 0, 15},
+		{testComm("c"), 2, 30},
 	})
 
 	state.Read(func(v StateView) {
-		if v.GlobalStats.count != 3 {
-			t.Errorf("global count = %d, want 3", v.GlobalStats.count)
+		if v.NSketches != 2 {
+			t.Errorf("NSketches = %d, want 2", v.NSketches)
 		}
-		if v.GlobalStats.max != 25 {
-			t.Errorf("global max = %d, want 25", v.GlobalStats.max)
+		// "b" should be evicted (a was promoted by the second batch)
+		if v.ProcStats["b"] != nil {
+			t.Error("expected 'b' to be absent (evicted)")
+		}
+		if v.ProcStats["a"] == nil {
+			t.Error("expected 'a' to be present (was promoted)")
+		}
+		if v.ProcStats["c"] == nil {
+			t.Error("expected 'c' to be present")
+		}
+		// "a" should have both samples
+		if v.ProcStats["a"] != nil {
+			count := uint64(v.ProcStats["a"][0].GetCount())
+			if count != 2 {
+				t.Errorf("a count = %d, want 2", count)
+			}
 		}
 	})
 }
