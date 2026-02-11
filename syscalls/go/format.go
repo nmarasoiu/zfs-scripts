@@ -15,7 +15,15 @@ func formatLatency(us int64) string {
 		return fmt.Sprintf("%dms", ms)
 	}
 	s := float64(us) / 1_000_000
-	return fmt.Sprintf("%.1fs", s)
+	if s < 1000 {
+		return fmt.Sprintf("%.1fs", s)
+	}
+	m := s / 60
+	if m < 100 {
+		return fmt.Sprintf("%.1fm", m)
+	}
+	h := m / 60
+	return fmt.Sprintf("%.1fh", h)
 }
 
 func formatLatencyPadded(us int64) string {

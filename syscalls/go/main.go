@@ -440,6 +440,7 @@ func run() error {
 					drops:     snapshotDrops(metrics),
 					mapStats:  snapshotMapStats(metrics, mapCap),
 					ringStats: snapshotRingStats(rings, &ringAcc),
+					cpuTime:   getCPUTime(),
 				})
 			case ev := <-keyCh:
 				if display.handleKey(ev) {
@@ -452,6 +453,7 @@ func run() error {
 					drops:     snapshotDrops(metrics),
 					mapStats:  snapshotMapStats(metrics, mapCap),
 					ringStats: snapshotRingStats(rings, &ringAcc),
+					cpuTime:   getCPUTime(),
 				})
 			}
 		}
@@ -473,6 +475,7 @@ func run() error {
 		drops:     snapshotDrops(metrics),
 		mapStats:  snapshotMapStats(metrics, mapCap),
 		ringStats: snapshotRingStats(rings, &ringAvg{}),
+		cpuTime:   getCPUTime(),
 	})
 	return nil
 }

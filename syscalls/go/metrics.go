@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"sync/atomic"
+	"syscall"
+	"time"
 )
 
 // capacityStats captures avg/max occupancy of a bounded resource.
@@ -95,6 +97,16 @@ type frameMetrics struct {
 	drops     frameDrops
 	mapStats  *mapStats
 	ringStats *ringStats
+	cpuTime   time.Duration
+}
+
+// getCPUTime returns the process's cumulative user+system CPU time.
+func getCPUTime() time.Duration {
+	var ru syscall.Rusage
+	syscall.Getrusage(syscall.RUSAGE_SELF, &ru)
+	user := time.Duration(ru.Utime.Sec)*time.Second + time.Duration(ru.Utime.Usec)*time.Microsecond
+	sys := time.Duration(ru.Stime.Sec)*time.Second + time.Duration(ru.Stime.Usec)*time.Microsecond
+	return user + sys
 }
 
 // ringAvg accumulates ring pending samples across display ticks

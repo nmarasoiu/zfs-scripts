@@ -12,9 +12,10 @@ import (
 // --- Display data transforms (turn State into renderable structures) ---
 
 type processSummary struct {
-	name  string
-	count uint64
-	rate  float64
+	name   string
+	count  uint64
+	rate   float64
+	timeUs uint64 // sum of all syscall latencies (µs)
 }
 
 type tableEntry struct {
@@ -34,6 +35,8 @@ func (d *Display) entrySortVal(ss *syscallStats, elapsedSecs float64) float64 {
 		return float64(ss.stats.max)
 	case "samples", "count", "total":
 		return float64(ss.stats.count)
+	case "time":
+		return float64(ss.stats.sum)
 	case "rate":
 		if elapsedSecs > 0 {
 			return float64(ss.stats.count) / elapsedSecs
@@ -108,19 +111,29 @@ func filterStatsGeneral(procStats map[string]map[uint32]*syscallStats, text stri
 // collectProcessSummaries aggregates per-process totals, sorted by d.sortColumn.
 func (d *Display) collectProcessSummaries(procStats map[string]map[uint32]*syscallStats, elapsedSecs float64) []processSummary {
 	sortByRate := d.sortColumn == "rate"
+	sortByTime := d.sortColumn == "time"
 	summaries := make([]processSummary, 0, len(procStats))
 	for proc, syscalls := range procStats {
 		var total uint64
+		var totalTime uint64
 		for _, ss := range syscalls {
 			total += ss.stats.count
+			totalTime += ss.stats.sum
 		}
 		rate := float64(0)
 		if elapsedSecs > 0 {
 			rate = float64(total) / elapsedSecs
 		}
-		summaries = append(summaries, processSummary{name: proc, count: total, rate: rate})
+		summaries = append(summaries, processSummary{name: proc, count: total, rate: rate, timeUs: totalTime})
 	}
-	if sortByRate {
+	if sortByTime {
+		sort.Slice(summaries, func(i, j int) bool {
+			if summaries[i].timeUs != summaries[j].timeUs {
+				return summaries[i].timeUs > summaries[j].timeUs
+			}
+			return summaries[i].name < summaries[j].name
+		})
+	} else if sortByRate {
 		sort.Slice(summaries, func(i, j int) bool {
 			if summaries[i].rate != summaries[j].rate {
 				return summaries[i].rate > summaries[j].rate
@@ -139,7 +152,7 @@ func (d *Display) collectProcessSummaries(procStats map[string]map[uint32]*sysca
 }
 
 const (
-	procPanelWidth      = 34
+	procPanelWidth      = 44
 	procPanelSep        = " │ "
 	procPanelSepDisplay = 3 // display width of procPanelSep (│ is 1 column wide)
 	procPanelOverhead   = procPanelSepDisplay + procPanelWidth
@@ -190,14 +203,10 @@ func (d *Display) sketchPercentiles(sketch *ddsketch.DDSketch) []int64 {
 }
 
 // availableSortColumns returns the valid sort column names for the current view.
-// Table view (focusProcesses set) has min but no rate; summary view has rate but no min.
+// Both views have min and time; table view omits rate; summary view includes rate.
 func (d *Display) availableSortColumns() []string {
 	isTable := len(d.focusProcesses) > 0
-	var cols []string
-	if isTable {
-		cols = append(cols, "min")
-	}
-	cols = append(cols, "avg")
+	cols := []string{"min", "avg"}
 	for _, q := range d.quantiles {
 		cols = append(cols, quantileHeader(q))
 	}
@@ -205,6 +214,7 @@ func (d *Display) availableSortColumns() []string {
 	if !isTable {
 		cols = append(cols, "rate")
 	}
+	cols = append(cols, "time")
 	return cols
 }
 
@@ -230,17 +240,17 @@ func (d *Display) sortIndicator(col string, width int) string {
 }
 
 // summaryLineWidth computes the width of a summary row given the number of percentile columns.
-// Layout: %-28s │ avg [pcts...] max │ samples rate
+// Layout: %-28s │ min avg [pcts...] max │ samples rate time
 func summaryLineWidth(numPcts int) int {
-	// 28 (name) + 3 (│) + (numPcts+2)*8 + (numPcts+1)*1 (value cols) + 3 (│) + 9+1+9 (samples+space+rate)
-	return 28 + 3 + 9*numPcts + 17 + 3 + 19
+	// 28 (name) + 3 (│) + 9 (min) + 9 (avg) + 9*numPcts + 8 (max) + 3 (│) + 9 (samples) + 1 + 9 (rate) + 1 + 8 (time)
+	return 28 + 3 + 9*numPcts + 26 + 3 + 28
 }
 
 // tableDataWidth computes the data area width (after label) for the table view.
-// Layout: │ min avg [pcts...] max │ samples
+// Layout: │ min avg [pcts...] max │ samples time
 func tableDataWidth(numPcts int) int {
-	// 3 (│) + (numPcts+3)*8 + (numPcts+2)*1 (value cols) + 3 (│) + 9+1 (space+samples)
-	return 9*numPcts + 41
+	// 2 (│) + 9 (min) + 9 (avg) + 9*numPcts + 9 (max) + 3 (│) + 9 (samples) + 1 + 8 (time)
+	return 9*numPcts + 50
 }
 
 func (d *Display) resetCursor() {
@@ -307,8 +317,12 @@ func (d *Display) render(state *State, frame frameMetrics) {
 
 		evicted := v.NStats - v.NSketches
 
-		fmt.Fprintf(&mainBuf, "Syscall Latency Monitor - %s (uptime: %s) -- %d entries  %d sketches × 2KB ≈ %.1fMB  evict:%s churn:%s\n",
-			now.Format("15:04:05"), formatDuration(elapsed), v.NStats, v.NSketches, totalMB, formatCount(int64(evicted)), formatCount(int64(v.SketchEvictions)))
+		cpuPct := 0.0
+		if elapsed.Seconds() > 0 {
+			cpuPct = frame.cpuTime.Seconds() / elapsed.Seconds() * 100
+		}
+		fmt.Fprintf(&mainBuf, "Syscall Latency Monitor - %s (uptime: %s, cpu: %s = %.1f%%) -- %d entries  %d sketches × 2KB ≈ %.1fMB  evict:%s churn:%s\n",
+			now.Format("15:04:05"), formatDuration(elapsed), formatDuration(frame.cpuTime), cpuPct, v.NStats, v.NSketches, totalMB, formatCount(int64(evicted)), formatCount(int64(v.SketchEvictions)))
 
 		d.lastSummaries = d.collectProcessSummaries(v.ProcStats, elapsed.Seconds())
 
@@ -535,7 +549,7 @@ func (d *Display) renderTable(buf *strings.Builder, procStats map[string]map[uin
 	lineWidth := labelWidth + tableDataWidth(len(d.quantiles))
 	sectionHeader(buf, fmt.Sprintf("%s (%d)", title, shown), lineWidth)
 
-	// Column headers: LIFETIME │ min avg [pcts...] max │ samples
+	// Column headers: LIFETIME │ min avg [pcts...] max │ samples time
 	nameFmt := fmt.Sprintf("%%-%ds", labelWidth)
 	buf.WriteString(fmt.Sprintf(nameFmt, "LIFETIME"))
 	buf.WriteString(" │")
@@ -543,7 +557,7 @@ func (d *Display) renderTable(buf *strings.Builder, procStats map[string]map[uin
 	for _, q := range d.quantiles {
 		fmt.Fprintf(buf, " %s", d.sortIndicator(quantileHeader(q), 8))
 	}
-	fmt.Fprintf(buf, " %s │ %s\n", d.sortIndicator("max", 8), d.sortIndicator("samples", 9))
+	fmt.Fprintf(buf, " %s │ %s %s\n", d.sortIndicator("max", 8), d.sortIndicator("samples", 9), d.sortIndicator("time", 8))
 	buf.WriteString(strings.Repeat("-", lineWidth))
 	buf.WriteString("\n")
 
@@ -567,7 +581,7 @@ func (d *Display) renderDetailRow(buf *strings.Builder, name string, stats *simp
 		for i := 0; i < 3+numPcts; i++ {
 			fmt.Fprintf(buf, " %8s", "-")
 		}
-		fmt.Fprintf(buf, " │ %9s\n", "0")
+		fmt.Fprintf(buf, " │ %9s %8s\n", "0", "-")
 		return
 	}
 	buf.WriteString(name)
@@ -582,7 +596,7 @@ func (d *Display) renderDetailRow(buf *strings.Builder, name string, stats *simp
 			fmt.Fprintf(buf, " %8s", "-")
 		}
 	}
-	fmt.Fprintf(buf, " %s │ %9s\n", formatLatencyPadded(stats.max), formatCount(int64(n)))
+	fmt.Fprintf(buf, " %s │ %9s %s\n", formatLatencyPadded(stats.max), formatCount(int64(n)), formatLatencyPadded(int64(stats.sum)))
 }
 
 func (d *Display) renderSummary(buf *strings.Builder, procStats map[string]map[uint32]*syscallStats, elapsed time.Duration, globalStats *simpleStats, globalPercentiles []int64) {
@@ -601,14 +615,14 @@ func (d *Display) renderSummary(buf *strings.Builder, procStats map[string]map[u
 	colWidth := summaryLineWidth(len(d.quantiles))
 	dualWidth := colWidth + 3 + colWidth
 
-	// Column headers: LIFETIME │ avg [pcts...] max │ samples rate
+	// Column headers: LIFETIME │ min avg [pcts...] max │ samples rate time
 	var header strings.Builder
 	fmt.Fprintf(&header, "%-28s │", "LIFETIME")
-	fmt.Fprintf(&header, " %s", d.sortIndicator("avg", 8))
+	fmt.Fprintf(&header, " %s %s", d.sortIndicator("min", 8), d.sortIndicator("avg", 8))
 	for _, q := range d.quantiles {
 		fmt.Fprintf(&header, " %s", d.sortIndicator(quantileHeader(q), 8))
 	}
-	fmt.Fprintf(&header, " %s │ %s %s", d.sortIndicator("max", 8), d.sortIndicator("samples", 9), d.sortIndicator("rate", 9))
+	fmt.Fprintf(&header, " %s │ %s %s %s", d.sortIndicator("max", 8), d.sortIndicator("samples", 9), d.sortIndicator("rate", 9), d.sortIndicator("time", 8))
 	headerStr := header.String()
 	fmt.Fprintf(buf, "%s │ %s\n", headerStr, headerStr)
 	buf.WriteString(strings.Repeat("-", dualWidth))
@@ -671,15 +685,15 @@ func (d *Display) formatSummaryRow(name string, stats *simpleStats, percentiles 
 	n := stats.count
 	if n == 0 {
 		fmt.Fprintf(&buf, "%-28s │", name)
-		// avg + percentiles + max = 2 + numPcts dashes
-		for i := 0; i < 2+numPcts; i++ {
+		// min + avg + percentiles + max = 3 + numPcts dashes
+		for i := 0; i < 3+numPcts; i++ {
 			fmt.Fprintf(&buf, " %8s", "-")
 		}
-		fmt.Fprintf(&buf, " │ %9s %9s", "0", "-")
+		fmt.Fprintf(&buf, " │ %9s %9s %8s", "0", "-", "-")
 		return buf.String()
 	}
 	fmt.Fprintf(&buf, "%-28s │", name)
-	fmt.Fprintf(&buf, " %s", formatLatencyPadded(stats.Avg()))
+	fmt.Fprintf(&buf, " %s %s", formatLatencyPadded(stats.min), formatLatencyPadded(stats.Avg()))
 	if percentiles != nil {
 		for _, pct := range percentiles {
 			fmt.Fprintf(&buf, " %s", formatLatencyPadded(pct))
@@ -689,7 +703,7 @@ func (d *Display) formatSummaryRow(name string, stats *simpleStats, percentiles 
 			fmt.Fprintf(&buf, " %8s", "-")
 		}
 	}
-	fmt.Fprintf(&buf, " %s │ %9s %9s", formatLatencyPadded(stats.max), formatCount(int64(n)), formatRate(n, secs))
+	fmt.Fprintf(&buf, " %s │ %9s %9s %s", formatLatencyPadded(stats.max), formatCount(int64(n)), formatRate(n, secs), formatLatencyPadded(int64(stats.sum)))
 	return buf.String()
 }
 
@@ -699,7 +713,7 @@ func renderProcPanel(summaries []processSummary, matchedProcs map[string]bool, m
 	var lines []string
 
 	// Header
-	lines = append(lines, padOrTrunc(" PROCESS         RATE   TOTAL", procPanelWidth))
+	lines = append(lines, padOrTrunc(fmt.Sprintf(" %-15s %8s %7s %8s", "PROCESS", "RATE", "TOTAL", "TIME"), procPanelWidth))
 	lines = append(lines, strings.Repeat("─", procPanelWidth))
 
 	n := 0
@@ -716,7 +730,8 @@ func renderProcPanel(summaries []processSummary, matchedProcs map[string]bool, m
 		} else if summary.rate > 0 {
 			rateStr = fmt.Sprintf("%.1f/s", summary.rate)
 		}
-		line := fmt.Sprintf(" %-15s %8s %7s", padOrTrunc(summary.name, 15), rateStr, formatCount(int64(summary.count)))
+		timeStr := formatLatency(int64(summary.timeUs))
+		line := fmt.Sprintf(" %-15s %8s %7s %8s", padOrTrunc(summary.name, 15), rateStr, formatCount(int64(summary.count)), timeStr)
 		lines = append(lines, padOrTrunc(line, procPanelWidth))
 		n++
 	}
