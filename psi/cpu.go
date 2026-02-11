@@ -130,17 +130,35 @@ func newCpuState(windowSize int) *cpuState {
 }
 
 func parseCpuLine(line string) (cpuTick, bool) {
-	fields := strings.Fields(line)
-	if len(fields) < 8 {
+	var vals [8]uint64
+	// Skip the label (e.g. "cpu", "cpu0") by finding the first space.
+	i := strings.IndexByte(line, ' ')
+	if i < 0 {
 		return cpuTick{}, false
 	}
-	vals := make([]uint64, 8)
-	for i := 0; i < 8; i++ {
-		v, err := strconv.ParseUint(fields[i+1], 10, 64)
+	s := line[i:]
+	for f := 0; f < 8; f++ {
+		// Skip spaces.
+		for len(s) > 0 && s[0] == ' ' {
+			s = s[1:]
+		}
+		if len(s) == 0 {
+			return cpuTick{}, false
+		}
+		// Find end of field.
+		end := strings.IndexByte(s, ' ')
+		if end < 0 {
+			if f < 7 {
+				return cpuTick{}, false
+			}
+			end = len(s)
+		}
+		v, err := strconv.ParseUint(s[:end], 10, 64)
 		if err != nil {
 			return cpuTick{}, false
 		}
-		vals[i] = v
+		vals[f] = v
+		s = s[end:]
 	}
 	return cpuTick{vals[0], vals[1], vals[2], vals[3], vals[4], vals[5], vals[6], vals[7]}, true
 }
@@ -153,23 +171,33 @@ func (cs *cpuState) update() {
 
 	hadPrev := cs.all.hasPrev
 
-	for _, line := range strings.Split(string(cs.buf[:n]), "\n") {
-		if strings.HasPrefix(line, "cpu ") {
+	// Scan lines without allocating a []string from Split.
+	data := string(cs.buf[:n])
+	for len(data) > 0 {
+		var line string
+		if nl := strings.IndexByte(data, '\n'); nl >= 0 {
+			line = data[:nl]
+			data = data[nl+1:]
+		} else {
+			line = data
+			data = ""
+		}
+		if len(line) < 4 || line[0] != 'c' || line[1] != 'p' || line[2] != 'u' {
+			continue
+		}
+		if line[3] == ' ' {
 			if tick, ok := parseCpuLine(line); ok {
 				cs.all.update(tick)
 			}
-		} else if strings.HasPrefix(line, "cpu") {
-			// "cpu0 ...", "cpu1 ...", etc.
+		} else {
 			sp := strings.IndexByte(line, ' ')
 			if sp < 0 {
 				continue
 			}
-			idxStr := line[3:sp]
-			idx, err := strconv.Atoi(idxStr)
+			idx, err := strconv.Atoi(line[3:sp])
 			if err != nil {
 				continue
 			}
-			// grow cores slice on first discovery
 			for len(cs.cores) <= idx {
 				cs.cores = append(cs.cores, newCpuTracker(cs.windowSize))
 			}
