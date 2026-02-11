@@ -115,6 +115,24 @@ func displayWidth(s string) int {
 	return cols
 }
 
+// truncateProcLabel shortens the process part of a "proc/syscall" label so the
+// total length fits within maxWidth. The syscall portion is never truncated.
+func truncateProcLabel(label string, maxWidth int) string {
+	if len(label) <= maxWidth {
+		return label
+	}
+	slash := strings.Index(label, "/")
+	if slash < 0 {
+		return label[:maxWidth]
+	}
+	syscall := label[slash:] // includes "/"
+	procMax := maxWidth - len(syscall)
+	if procMax <= 0 {
+		return label[:maxWidth]
+	}
+	return label[:procMax] + syscall
+}
+
 // padOrTrunc pads with spaces or truncates to exactly width display columns.
 func padOrTrunc(s string, width int) string {
 	off, cols := advanceCols(s, width)

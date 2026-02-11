@@ -134,7 +134,7 @@ func syscallName(id uint32) string {
 		return syscallNames[id]
 	}
 	if id == 0xFFFFFFFF {
-		return "sig-interrupted" // kernel sets orig_rax=-1 when signal interrupts a syscall
+		return "sig-int" // kernel sets orig_rax=-1 when signal interrupts a syscall
 	}
 	return fmt.Sprintf("sys_%d", id)
 }

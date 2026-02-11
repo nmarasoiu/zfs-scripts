@@ -680,6 +680,7 @@ func (d *Display) renderSummary(buf *strings.Builder, procStats map[string]map[u
 }
 
 func (d *Display) formatSummaryRow(name string, stats *simpleStats, percentiles []int64, secs float64) string {
+	name = truncateProcLabel(name, 28)
 	var buf strings.Builder
 	numPcts := len(d.quantiles)
 	n := stats.count
