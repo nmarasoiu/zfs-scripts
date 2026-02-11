@@ -11,6 +11,21 @@ import (
 	"github.com/hashicorp/golang-lru/v2/simplelru"
 )
 
+// mergeSimpleStats folds src into dst (min/max/sum/count).
+func mergeSimpleStats(dst, src *simpleStats) {
+	if src.count == 0 {
+		return
+	}
+	if src.min < dst.min {
+		dst.min = src.min
+	}
+	if src.max > dst.max {
+		dst.max = src.max
+	}
+	dst.sum += src.sum
+	dst.count += src.count
+}
+
 // commToString converts a kernel TASK_COMM_LEN array to a Go string.
 // Only used at display time (~2-4 FPS), never on the hot event path.
 func commToString(comm [16]int8) string {
@@ -78,21 +93,14 @@ type State struct {
 	sketches        *simplelru.LRU[sketchKey, *ddsketch.DDSketch]
 	sketchEvictions uint64
 
-	// Global lifetime sketch across all processes and syscalls
-	globalSketch *ddsketch.DDSketch
-	globalStats  *simpleStats
-
 	startTime time.Time
 }
 
 func newState(maxSketches int, alpha float64) *State {
-	sketch, _ := ddsketch.NewDefaultDDSketch(alpha)
 	s := &State{
-		alpha:        alpha,
-		stats:        make(map[sketchKey]*simpleStats),
-		globalSketch: sketch,
-		globalStats:  newSimpleStats(),
-		startTime:    time.Now(),
+		alpha:     alpha,
+		stats:     make(map[sketchKey]*simpleStats),
+		startTime: time.Now(),
 	}
 	s.sketches, _ = simplelru.NewLRU[sketchKey, *ddsketch.DDSketch](maxSketches, func(_ sketchKey, _ *ddsketch.DDSketch) {
 		s.sketchEvictions++
@@ -108,8 +116,7 @@ type StateView struct {
 	NSketches       int    // current DDSketches in LRU
 	NStats          int    // total persistent (proc, syscall) entries
 	SketchEvictions uint64
-	GlobalStats     *simpleStats
-	GlobalSketch    *ddsketch.DDSketch
+	GlobalStats     *simpleStats // computed on-the-fly in Read()
 	ProcStats       map[string]map[uint32]*syscallStats
 }
 
@@ -121,8 +128,11 @@ func (s *State) Read(fn func(StateView)) {
 
 	// Build nested map view from persistent stats, attaching sketches from LRU where available.
 	// String conversion of comm happens here at display rate, not on the hot event path.
+	// Also fold min/max/sum/count into globalStats in the same pass.
 	procStats := make(map[string]map[uint32]*syscallStats)
+	globalStats := newSimpleStats()
 	for key, st := range s.stats {
+		mergeSimpleStats(globalStats, st)
 		name := commToString(key.comm)
 		syscalls := procStats[name]
 		if syscalls == nil {
@@ -141,8 +151,7 @@ func (s *State) Read(fn func(StateView)) {
 		NSketches:       s.sketches.Len(),
 		NStats:          len(s.stats),
 		SketchEvictions: s.sketchEvictions,
-		GlobalStats:     s.globalStats,
-		GlobalSketch:    s.globalSketch,
+		GlobalStats:     globalStats,
 		ProcStats:       procStats,
 	})
 }
@@ -174,9 +183,6 @@ func (s *State) RecordBatch(batch []pendingEvent) {
 			s.sketches.Add(key, sk) // evicts LRU if over cap
 		}
 		sk.Add(float64(ev.latencyUs))
-
-		s.globalSketch.Add(float64(ev.latencyUs))
-		s.globalStats.Record(ev.latencyUs)
 	}
 	s.mu.Unlock()
 }

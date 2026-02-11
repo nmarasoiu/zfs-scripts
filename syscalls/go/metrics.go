@@ -42,11 +42,6 @@ type runtimeMetrics struct {
 	mapSamples atomic.Int64
 }
 
-// mapStats is a point-in-time snapshot of BPF LRU hash map occupancy.
-type mapStats struct {
-	capacityStats
-}
-
 func snapshotDrops(metrics *runtimeMetrics) frameDrops {
 	return frameDrops{
 		ringFull:  metrics.bpfDrops.ringFull.Load(),
@@ -55,7 +50,7 @@ func snapshotDrops(metrics *runtimeMetrics) frameDrops {
 	}
 }
 
-func snapshotMapStats(metrics *runtimeMetrics, mapCap int64) *mapStats {
+func snapshotMapStats(metrics *runtimeMetrics, mapCap int64) *capacityStats {
 	if mapCap <= 0 {
 		return nil
 	}
@@ -63,12 +58,10 @@ func snapshotMapStats(metrics *runtimeMetrics, mapCap int64) *mapStats {
 	if n := metrics.mapSamples.Load(); n > 0 {
 		avg = metrics.mapSumUsed.Load() / n
 	}
-	return &mapStats{
-		capacityStats: capacityStats{
-			avg: avg,
-			max: metrics.mapMaxUsed.Load(),
-			cap: mapCap,
-		},
+	return &capacityStats{
+		avg: avg,
+		max: metrics.mapMaxUsed.Load(),
+		cap: mapCap,
 	}
 }
 
@@ -78,7 +71,6 @@ type ringStats struct {
 	capacityStats
 	pending int     // current pending bytes
 	avg1    float64 // avg batch size (non-empty polls)
-	avg0    float64 // avg batch size (all polls)
 }
 
 // frameDrops holds per-reason drop counts for a single display frame.
@@ -95,7 +87,7 @@ func (d frameDrops) total() uint64 {
 // frameMetrics bundles the per-frame runtime metrics passed to render.
 type frameMetrics struct {
 	drops     frameDrops
-	mapStats  *mapStats
+	mapStats  *capacityStats
 	ringStats *ringStats
 	cpuTime   time.Duration
 }

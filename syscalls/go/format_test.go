@@ -91,26 +91,6 @@ func TestFormatDuration(t *testing.T) {
 	}
 }
 
-func TestFormatMicro(t *testing.T) {
-	tests := []struct {
-		d    time.Duration
-		want string
-	}{
-		{50 * time.Microsecond, "50µs"},
-		{999 * time.Microsecond, "999µs"},
-		{time.Millisecond, "1.0ms"},
-		{1500 * time.Microsecond, "1.5ms"},
-		{time.Second, "1.0s"},
-		{2500 * time.Millisecond, "2.5s"},
-	}
-	for _, tt := range tests {
-		got := formatMicro(tt.d)
-		if got != tt.want {
-			t.Errorf("formatMicro(%v) = %q, want %q", tt.d, got, tt.want)
-		}
-	}
-}
-
 func TestFormatRate(t *testing.T) {
 	tests := []struct {
 		count uint64

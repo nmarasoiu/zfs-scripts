@@ -70,17 +70,6 @@ func formatDuration(d time.Duration) string {
 	return fmt.Sprintf("%dh%dm", h, m)
 }
 
-func formatMicro(d time.Duration) string {
-	us := d.Microseconds()
-	if us < 1000 {
-		return fmt.Sprintf("%dµs", us)
-	}
-	if us < 1000000 {
-		return fmt.Sprintf("%.1fms", float64(us)/1000)
-	}
-	return fmt.Sprintf("%.1fs", d.Seconds())
-}
-
 func formatRate(count uint64, secs float64) string {
 	if secs <= 0 || count == 0 {
 		return "-"

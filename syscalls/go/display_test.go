@@ -495,8 +495,8 @@ func TestRenderDetailRow_Zero(t *testing.T) {
 func TestAvailableSortColumns_SummaryView(t *testing.T) {
 	d := &Display{quantiles: []float64{0.50, 0.99}}
 	cols := d.availableSortColumns()
-	// Summary view: avg, p50, p99, max, samples, rate (no min)
-	expected := []string{"avg", "p50", "p99", "max", "samples", "rate"}
+	// Summary view: min, avg, p50, p99, max, samples, rate, time
+	expected := []string{"min", "avg", "p50", "p99", "max", "samples", "rate", "time"}
 	if len(cols) != len(expected) {
 		t.Fatalf("cols = %v, want %v", cols, expected)
 	}
@@ -510,8 +510,8 @@ func TestAvailableSortColumns_SummaryView(t *testing.T) {
 func TestAvailableSortColumns_TableView(t *testing.T) {
 	d := &Display{focusProcesses: []string{"tor"}, quantiles: []float64{0.50, 0.99}}
 	cols := d.availableSortColumns()
-	// Table view: min, avg, p50, p99, max, samples (no rate)
-	expected := []string{"min", "avg", "p50", "p99", "max", "samples"}
+	// Table view: min, avg, p50, p99, max, samples, time (no rate)
+	expected := []string{"min", "avg", "p50", "p99", "max", "samples", "time"}
 	if len(cols) != len(expected) {
 		t.Fatalf("cols = %v, want %v", cols, expected)
 	}
@@ -628,8 +628,13 @@ func TestHandleKey_SortBackspaceEmpty(t *testing.T) {
 
 func TestHandleKey_SortAutoSelect(t *testing.T) {
 	d := &Display{interactive: true, mode: modeSort, sortText: "", quantiles: []float64{0.50, 0.99}, sortColumn: "rate"}
-	// Type "m" → uniquely matches "max"
+	// Type "m" → matches both "min" and "max", no auto-select
 	d.handleKey(keyEvent{kind: keyChar, ch: 'm'})
+	if d.mode != modeSort {
+		t.Errorf("mode = %d, want modeSort (ambiguous prefix)", d.mode)
+	}
+	// Type "a" → uniquely matches "max"
+	d.handleKey(keyEvent{kind: keyChar, ch: 'a'})
 	if d.mode != modeNormal {
 		t.Errorf("mode = %d, want modeNormal (auto-selected)", d.mode)
 	}

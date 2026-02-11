@@ -338,7 +338,7 @@ func (d *Display) render(state *State, frame frameMetrics) {
 		if len(d.focusProcesses) > 0 {
 			d.renderTable(&mainBuf, viewStats, elapsed.Seconds())
 		} else {
-			d.renderSummary(&mainBuf, viewStats, elapsed, v.GlobalStats, d.sketchPercentiles(v.GlobalSketch))
+			d.renderSummary(&mainBuf, viewStats, elapsed, v.GlobalStats)
 		}
 
 		nProcs = len(v.ProcStats)
@@ -509,10 +509,10 @@ func (d *Display) renderFooter(buf *strings.Builder, elapsed time.Duration, nPro
 	}
 	ringInfo := ""
 	if frame.ringStats != nil {
-		ringInfo = fmt.Sprintf(" | Ring %s  cur: %6s  avg1:%-6.0f avg0:%-6.1f",
+		ringInfo = fmt.Sprintf(" | Ring %s  cur: %6s  avg1:%-6.0f",
 			frame.ringStats.formatUsage(formatBytes),
 			formatBytes(int64(frame.ringStats.pending)),
-			frame.ringStats.avg1, frame.ringStats.avg0)
+			frame.ringStats.avg1)
 	}
 	fmt.Fprintf(buf, "Processes: %d | Drops: %s (%s/s) [%s]%s%s\n",
 		nProcs, formatCount(int64(total)), formatCount(int64(dropRate)), dropDetail, mapInfo, ringInfo)
@@ -599,7 +599,7 @@ func (d *Display) renderDetailRow(buf *strings.Builder, name string, stats *simp
 	fmt.Fprintf(buf, " %s │ %9s %s\n", formatLatencyPadded(stats.max), formatCount(int64(n)), formatLatencyPadded(int64(stats.sum)))
 }
 
-func (d *Display) renderSummary(buf *strings.Builder, procStats map[string]map[uint32]*syscallStats, elapsed time.Duration, globalStats *simpleStats, globalPercentiles []int64) {
+func (d *Display) renderSummary(buf *strings.Builder, procStats map[string]map[uint32]*syscallStats, elapsed time.Duration, globalStats *simpleStats) {
 	entries := d.collectEntries(procStats, false, elapsed.Seconds())
 
 	totalSecs := elapsed.Seconds()
@@ -671,7 +671,7 @@ func (d *Display) renderSummary(buf *strings.Builder, procStats map[string]map[u
 	title := fmt.Sprintf("Process × Syscall (top %d)", totalShown)
 	legend := d.summaryBarLegend()
 
-	globalRow := d.formatSummaryRow("LIFETIME(all)", globalStats, globalPercentiles, totalSecs)
+	globalRow := d.formatSummaryRow("LIFETIME(all)", globalStats, nil, totalSecs)
 	remaining := dualWidth - colWidth - 1
 	if remaining < 0 {
 		remaining = 0

@@ -199,12 +199,9 @@ func snapshotRingStats(rings *ringpoll.Group, acc *ringAvg) *ringStats {
 	g := rings.Snapshot()
 	acc.add(g.Pending)
 
-	var avg1, avg0 float64
+	var avg1 float64
 	if g.NonEmpty > 0 {
 		avg1 = float64(g.EventSum) / float64(g.NonEmpty)
-	}
-	if g.PollCount > 0 {
-		avg0 = float64(g.EventSum) / float64(g.PollCount)
 	}
 
 	return &ringStats{
@@ -215,7 +212,6 @@ func snapshotRingStats(rings *ringpoll.Group, acc *ringAvg) *ringStats {
 		},
 		pending: g.Pending,
 		avg1:    avg1,
-		avg0:    avg0,
 	}
 }
 
