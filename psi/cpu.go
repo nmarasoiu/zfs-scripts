@@ -33,13 +33,12 @@ type cpuTracker struct {
 	cur     float64
 	prev    cpuTick
 	hasPrev bool
-	ring    []float64
-	ringPos int
-	ringN   int // number of populated entries (grows until ring is full)
+	ema     float64 // exponential moving average for smoothed current
+	alpha   float64 // EMA smoothing factor (2 / (windowSize + 1))
 }
 
 func newCpuTracker(windowSize int) *cpuTracker {
-	return &cpuTracker{min: 101, ring: make([]float64, windowSize)}
+	return &cpuTracker{min: 101, alpha: 2.0 / (float64(windowSize) + 1)}
 }
 
 // update computes utilization from delta jiffies and feeds the buckets.
@@ -59,10 +58,10 @@ func (t *cpuTracker) update(tick cpuTick) {
 		t.cur = (dbusy / dtotal) * 100.0
 	}
 
-	t.ring[t.ringPos] = t.cur
-	t.ringPos = (t.ringPos + 1) % len(t.ring)
-	if t.ringN < len(t.ring) {
-		t.ringN++
+	if t.count == 0 {
+		t.ema = t.cur
+	} else {
+		t.ema += t.alpha * (t.cur - t.ema)
 	}
 
 	var idx int
@@ -95,16 +94,9 @@ func (t *cpuTracker) avg() float64 {
 	return t.sum / float64(t.count)
 }
 
-// smoothCur returns the average of the last windowSize samples.
+// smoothCur returns the EMA-smoothed current utilization.
 func (t *cpuTracker) smoothCur() float64 {
-	if t.ringN == 0 {
-		return t.cur
-	}
-	var sum float64
-	for i := 0; i < t.ringN; i++ {
-		sum += t.ring[i]
-	}
-	return sum / float64(t.ringN)
+	return t.ema
 }
 
 // cdf returns the percentage of samples with utilization < threshold*10%.
