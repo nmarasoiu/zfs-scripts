@@ -1,12 +1,8 @@
 // blk-ddsketch: Per-IO latency percentile tracker using eBPF + DDSketch
 //
-// Improvement over blk-latency: Uses DDSketch for provable relative error
-// guarantees on tail latencies (p99.9, p99.99, p99.999).
-//
-// DDSketch provides:
-// - Relative value error: true p99 is within +/-a% of reported value
-// - ~2-10KB memory per sketch (vs ~40KB for HDR)
-// - Mergeable sketches (useful for aggregation)
+// Uses DDSketch for percentiles, avg, max, count, and sum with provable
+// relative error guarantees on tail latencies (p99.9, p99.99, p99.999).
+// ~2-10KB memory per sketch (vs ~40KB for HDR).
 //
 //go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -target bpfel -type latency_event bpf bpf/latency.c -- -I/usr/include -I.
 
@@ -214,29 +210,6 @@ func parseDeviceFilter(filter string) ([]uint32, error) {
 	return devs, nil
 }
 
-// preciseStats tracks sum/count with full precision for exact average
-type preciseStats struct {
-	sum   float64
-	count uint64
-}
-
-func (p *preciseStats) Add(v float64) {
-	p.sum += v
-	p.count++
-}
-
-func (p *preciseStats) Avg() float64 {
-	if p.count == 0 {
-		return 0
-	}
-	return p.sum / float64(p.count)
-}
-
-func (p *preciseStats) Reset() {
-	p.sum = 0
-	p.count = 0
-}
-
 // newSketch creates a DDSketch with given alpha
 func newSketch(a float64) *ddsketch.DDSketch {
 	m, _ := mapping.NewLogarithmicMapping(a)
@@ -246,11 +219,9 @@ func newSketch(a float64) *ddsketch.DDSketch {
 
 // deviceStats holds both interval and lifetime sketches for a device
 type deviceStats struct {
-	interval        *ddsketch.DDSketch // Current interval (reset each period)
-	lifetime        *ddsketch.DDSketch // All-time accumulation
-	intervalPrecise preciseStats       // Precise sum/count for interval avg
-	lifetimePrecise preciseStats       // Precise sum/count for lifetime avg
-	alpha           float64            // Relative accuracy
+	interval *ddsketch.DDSketch // Current interval (reset each period)
+	lifetime *ddsketch.DDSketch // All-time accumulation
+	alpha    float64            // Relative accuracy
 }
 
 func newDeviceStats(a float64) *deviceStats {
@@ -265,14 +236,11 @@ func newDeviceStats(a float64) *deviceStats {
 func (ds *deviceStats) Record(latencyUs float64) {
 	ds.interval.Add(latencyUs)
 	ds.lifetime.Add(latencyUs)
-	ds.intervalPrecise.Add(latencyUs)
-	ds.lifetimePrecise.Add(latencyUs)
 }
 
 // ResetInterval clears the interval sketch (lifetime persists)
 func (ds *deviceStats) ResetInterval() {
 	ds.interval = newSketch(ds.alpha)
-	ds.intervalPrecise.Reset()
 }
 
 // pendingEvent holds a decoded event for batch processing
@@ -388,14 +356,14 @@ func (d *Display) render(state *State, intervalDur time.Duration, a float64, dro
 		ds := state.stats[dev]
 		name := lookupDevName(dev)
 		s := ds.interval
-		n := ds.intervalPrecise.count
+		n := uint64(s.GetCount())
 		if n == 0 {
 			fmt.Fprintf(&buf, "%-10s | %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s | %9s\n",
 				name, "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "0")
 			continue
 		}
 
-		avg := ds.intervalPrecise.Avg()
+		avg := s.GetSum() / s.GetCount()
 		p10, _ := getQuantileSafe(s, 0.10)
 		p20, _ := getQuantileSafe(s, 0.20)
 		p30, _ := getQuantileSafe(s, 0.30)
@@ -439,20 +407,18 @@ func (d *Display) render(state *State, intervalDur time.Duration, a float64, dro
 	buf.WriteString("\n")
 
 	// Lifetime stats
-	var totalSamples uint64
 	for _, dev := range devList {
 		ds := state.stats[dev]
 		name := lookupDevName(dev)
 		s := ds.lifetime
-		n := ds.lifetimePrecise.count
-		totalSamples += n
+		n := uint64(s.GetCount())
 		if n == 0 {
 			fmt.Fprintf(&buf, "%-10s | %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s | %9s\n",
 				name, "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "0")
 			continue
 		}
 
-		avg := ds.lifetimePrecise.Avg()
+		avg := s.GetSum() / s.GetCount()
 		p10, _ := getQuantileSafe(s, 0.10)
 		p20, _ := getQuantileSafe(s, 0.20)
 		p30, _ := getQuantileSafe(s, 0.30)
@@ -497,10 +463,6 @@ func (d *Display) render(state *State, intervalDur time.Duration, a float64, dro
 	state.mu.Unlock()
 
 	// Everything below is lock-free: computed values + ring stats (atomic reads)
-	rate := float64(0)
-	if elapsed.Seconds() > 0 {
-		rate = float64(totalSamples) / elapsed.Seconds()
-	}
 	dropRate := float64(0)
 	if elapsed.Seconds() > 0 {
 		dropRate = float64(drops) / elapsed.Seconds()
@@ -523,9 +485,8 @@ func (d *Display) render(state *State, intervalDur time.Duration, a float64, dro
 			avg1, avg0)
 	}
 
-	fmt.Fprintf(&buf, "Total: %s samples | Rate: %s/s | Devices: %d | Drops: %s (%s/s) | DDSketch: ~2-10KB/dev (a=%.2f%%)%s\n",
-		formatCount(totalSamples), formatCount(uint64(rate)), nDevices,
-		formatCount(drops), formatCount(uint64(dropRate)), a*100, ringInfo)
+	fmt.Fprintf(&buf, "Devices: %d | Drops: %s (%s/s)%s\n",
+		nDevices, formatCount(drops), formatCount(uint64(dropRate)), ringInfo)
 
 	if d.batchMode {
 		buf.WriteString("\n")
