@@ -238,12 +238,12 @@ func cpuSortUsage() string {
 }
 
 // buildSortChain returns the key functions for multi-key sorting.
-// The chain is: user's choice, then le99, avg as tiebreakers (deduped).
+// The chain is: user's choice, then le99..le10, avg as tiebreakers (deduped).
 // The caller adds cpu index as the final tiebreaker.
 func buildSortChain(sortBy string) []func(t *cpuTracker) float64 {
 	var chain []func(t *cpuTracker) float64
 	seen := map[string]bool{}
-	for _, key := range []string{sortBy, "le99", "avg"} {
+	for _, key := range []string{sortBy, "le99", "le95", "le90", "le80", "le70", "le60", "le50", "le40", "le30", "le20", "le10", "avg"} {
 		if key == "index" || seen[key] {
 			continue
 		}
