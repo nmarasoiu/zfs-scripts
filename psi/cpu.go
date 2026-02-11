@@ -217,6 +217,22 @@ func cpuSortUsage() string {
 	return "sort CPU rows: index, current, avg, le10..le90, le95, le99"
 }
 
+// buildSortChain returns the key functions for multi-key sorting.
+// The chain is: user's choice, then le99, avg as tiebreakers (deduped).
+// The caller adds cpu index as the final tiebreaker.
+func buildSortChain(sortBy string) []func(t *cpuTracker) float64 {
+	var chain []func(t *cpuTracker) float64
+	seen := map[string]bool{}
+	for _, key := range []string{sortBy, "le99", "avg"} {
+		if key == "index" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		chain = append(chain, cpuSortKeys[key])
+	}
+	return chain
+}
+
 func printCpuTable(w io.Writer, cs *cpuState, sortBy string) {
 	if !cs.ready {
 		return
@@ -237,9 +253,16 @@ func printCpuTable(w io.Writer, cs *cpuState, sortBy string) {
 		entries[i] = cpuEntry{i, core}
 	}
 
-	if keyFn := cpuSortKeys[sortBy]; keyFn != nil {
+	chain := buildSortChain(sortBy)
+	if len(chain) > 0 {
 		sort.SliceStable(entries, func(i, j int) bool {
-			return keyFn(entries[i].core) > keyFn(entries[j].core)
+			for _, keyFn := range chain {
+				vi, vj := keyFn(entries[i].core), keyFn(entries[j].core)
+				if vi != vj {
+					return vi > vj
+				}
+			}
+			return entries[i].idx < entries[j].idx
 		})
 	}
 
