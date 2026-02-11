@@ -298,44 +298,37 @@ func discoverPools() []poolStateFd {
 	return fds
 }
 
-var (
-	zpCachedPools []zpPool
-	zpLastRefresh time.Time
-)
-
-var zpRefreshInterval = 30 * time.Second
-
 // refreshZpoolCache runs zpool status if the cache is stale.
-func refreshZpoolCache() {
-	if time.Since(zpLastRefresh) < zpRefreshInterval {
+func refreshZpoolCache(pools *[]zpPool, lastRefresh *time.Time, interval time.Duration) {
+	if time.Since(*lastRefresh) < interval {
 		return
 	}
-	pools, err := parseZpoolStatus()
+	parsed, err := parseZpoolStatus()
 	if err != nil {
 		return
 	}
-	zpCachedPools = pools
-	zpLastRefresh = time.Now()
+	*pools = parsed
+	*lastRefresh = time.Now()
 }
 
 // updatePoolStates reads live pool state from kstat via pread (no subprocess).
-func updatePoolStates(poolFds []poolStateFd, buf []byte) {
+func updatePoolStates(poolFds []poolStateFd, buf []byte, pools []zpPool) {
 	for _, pf := range poolFds {
 		n := pread(pf.fd, buf)
 		if n <= 0 {
 			continue
 		}
 		state := strings.TrimSpace(string(buf[:n]))
-		for i := range zpCachedPools {
-			if zpCachedPools[i].name == pf.name {
-				zpCachedPools[i].state = state
+		for i := range pools {
+			if pools[i].name == pf.name {
+				pools[i].state = state
 			}
 		}
 	}
 }
 
-func printZpoolStatus(w io.Writer) {
-	for _, pool := range zpCachedPools {
+func printZpoolStatus(w io.Writer, pools []zpPool) {
+	for _, pool := range pools {
 		// header
 		stateStr := fmt.Sprintf("%-8s", pool.state)
 		if pool.state != "ONLINE" {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -15,11 +16,17 @@ var (
 	commit  = ""
 )
 
+type psiReading struct {
+	name       string
+	some, full pressure
+}
+
 func main() {
 	batchN := flag.Int("batch", 0, "run N iterations then exit (0 = infinite)")
-	psiInterval := flag.Duration("psi", 4*time.Second, "PSI/load refresh interval")
-	cpuInterval := flag.Duration("cpu", 4*time.Second, "CPU utilization refresh interval")
+	psiInterval := flag.Duration("psi", 4*time.Second, "PSI/load/zpool-state refresh interval")
+	cpuInterval := flag.Duration("cpu", 100*time.Millisecond, "CPU utilization sample interval")
 	zpoolInterval := flag.Duration("zpool", 30*time.Second, "zpool status subprocess interval")
+	displayInterval := flag.Duration("display", 100*time.Millisecond, "display refresh interval")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 
@@ -32,8 +39,7 @@ func main() {
 		return
 	}
 
-	zpRefreshInterval = *zpoolInterval
-
+	// Open file descriptors.
 	loadFd := mustOpen("/proc/loadavg")
 	defer syscall.Close(loadFd)
 	psiFiles := []psiFile{
@@ -57,63 +63,94 @@ func main() {
 		defer syscall.Close(cpuSt.fd)
 	}
 
+	// Shared state protected by mu.
+	var mu sync.Mutex
+	psiReadings := make([]psiReading, len(psiFiles))
+	var load loadSnapshot
+	var zpPools []zpPool
+	var zpLastRefresh time.Time
+
+	done := make(chan struct{})
+
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 
-	// Main loop ticks at the smallest component interval.
-	tick := *psiInterval
-	if *cpuInterval < tick {
-		tick = *cpuInterval
+	// Initial data collection (before starting goroutines, no lock needed).
+	{
+		var buf [512]byte
+		for j, pf := range psiFiles {
+			some, full := readPressure(pf.fd, buf[:])
+			psiReadings[j] = psiReading{pf.name, some, full}
+		}
+		load = readLoad(loadFd, buf[:])
+		refreshZpoolCache(&zpPools, &zpLastRefresh, *zpoolInterval)
+		updatePoolStates(poolFds, buf[:], zpPools)
+		if cpuSt != nil {
+			cpuSt.update() // seed first sample
+		}
 	}
-	if *zpoolInterval < tick {
-		tick = *zpoolInterval
+
+	// --- CPU collector goroutine ---
+	if cpuSt != nil {
+		go func() {
+			ticker := time.NewTicker(*cpuInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-done:
+					return
+				case <-ticker.C:
+				}
+				mu.Lock()
+				cpuSt.update()
+				mu.Unlock()
+			}
+		}()
 	}
 
-	var buf [512]byte
-	var w bytes.Buffer
-
-	// Cached PSI readings — re-read only on psiInterval.
-	type psiReading struct {
-		name       string
-		some, full pressure
-	}
-	psiReadings := make([]psiReading, len(psiFiles))
-	var lastPsi, lastCpu time.Time
-
-	ticker := time.NewTicker(tick)
-	defer ticker.Stop()
-
-	for i := 0; *batchN == 0 || i < *batchN; i++ {
-		now := time.Now()
-
-		refreshZpoolCache()
-		updatePoolStates(poolFds, buf[:])
-
-		if i == 0 || now.Sub(lastPsi) >= *psiInterval {
+	// --- PSI/load/zpool collector goroutine ---
+	go func() {
+		var buf [512]byte
+		ticker := time.NewTicker(*psiInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+			}
+			mu.Lock()
 			for j, pf := range psiFiles {
 				some, full := readPressure(pf.fd, buf[:])
 				psiReadings[j] = psiReading{pf.name, some, full}
 			}
-			lastPsi = now
+			load = readLoad(loadFd, buf[:])
+			refreshZpoolCache(&zpPools, &zpLastRefresh, *zpoolInterval)
+			updatePoolStates(poolFds, buf[:], zpPools)
+			mu.Unlock()
 		}
+	}()
 
-		if cpuSt != nil && (i == 0 || now.Sub(lastCpu) >= *cpuInterval) {
-			cpuSt.update()
-			lastCpu = now
-		}
+	// --- Display loop (main goroutine) ---
+	var w bytes.Buffer
+	displayTicker := time.NewTicker(*displayInterval)
+	defer displayTicker.Stop()
 
+	for i := 0; *batchN == 0 || i < *batchN; i++ {
+		mu.Lock()
 		w.Reset()
 		if *batchN == 0 {
 			fmt.Fprint(&w, "\033[H\033[2J")
 		}
-		printLoadTable(&w, loadFd, buf[:])
+		printLoadTable(&w, load)
 		for _, r := range psiReadings {
 			printTable(&w, r.name, r.some, r.full)
 		}
 		if cpuSt != nil {
 			printCpuTable(&w, cpuSt)
 		}
-		printZpoolStatus(&w)
+		printZpoolStatus(&w, zpPools)
+		mu.Unlock()
 		os.Stdout.Write(w.Bytes())
 
 		if *batchN > 0 && i == *batchN-1 {
@@ -121,8 +158,10 @@ func main() {
 		}
 		select {
 		case <-sig:
+			close(done)
 			return
-		case <-ticker.C:
+		case <-displayTicker.C:
 		}
 	}
+	close(done)
 }

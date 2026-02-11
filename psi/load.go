@@ -6,16 +6,23 @@ import (
 	"strings"
 )
 
-func printLoadTable(w io.Writer, fd int, buf []byte) {
+type loadSnapshot struct {
+	min1, min5, min15, procs string
+}
+
+func readLoad(fd int, buf []byte) loadSnapshot {
 	n := pread(fd, buf)
 	fields := strings.Fields(string(buf[:n]))
-	min1, min5, min15 := fields[0], fields[1], fields[2]
-	procs := ""
+	snap := loadSnapshot{min1: fields[0], min5: fields[1], min15: fields[2]}
 	if len(fields) >= 4 {
-		procs = fields[3]
+		snap.procs = fields[3]
 	}
+	return snap
+}
+
+func printLoadTable(w io.Writer, snap loadSnapshot) {
 	fmt.Fprintf(w, "%-6s │ %7s │ %7s │ %7s │ %10s\n", "LOAD", "1min", "5min", "15min", "procs")
 	fmt.Fprintf(w, "───────┼─────────┼─────────┼─────────┼───────────\n")
-	fmt.Fprintf(w, "%-6s │ %7s │ %7s │ %7s │ %10s\n", "", min1, min5, min15, procs)
+	fmt.Fprintf(w, "%-6s │ %7s │ %7s │ %7s │ %10s\n", "", snap.min1, snap.min5, snap.min15, snap.procs)
 	fmt.Fprintln(w)
 }
