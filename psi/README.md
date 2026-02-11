@@ -16,6 +16,7 @@ psi [flags]
 | `-psi` | `5s` | PSI / load / zpool-state refresh interval |
 | `-zpool` | `15s` | `zpool status` subprocess interval |
 | `-display` | `100ms` | Screen refresh interval |
+| `-cpu-sort` | `le99` | Sort CPU rows: `index`, `current`, `avg`, `le10`..`le90`, `le95`, `le99` |
 | `-batch N` | `0` | Print N frames then exit (0 = loop forever) |
 | `-version` | | Print version and exit |
 
@@ -33,6 +34,9 @@ psi -cpu 1s -psi 30s -zpool 60s
 
 # single snapshot for scripting (no ANSI clear-screen)
 psi -batch 1
+
+# sort CPU cores by current utilization (busiest first)
+psi -cpu-sort current
 ```
 
 ## Display sections

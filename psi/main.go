@@ -27,8 +27,14 @@ func main() {
 	cpuInterval := flag.Duration("cpu", 40*time.Millisecond, "CPU utilization sample interval")
 	zpoolInterval := flag.Duration("zpool", 15*time.Second, "zpool status subprocess interval")
 	displayInterval := flag.Duration("display", 100*time.Millisecond, "display refresh interval")
+	cpuSort := flag.String("cpu-sort", "le99", cpuSortUsage())
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
+
+	if _, ok := cpuSortKeys[*cpuSort]; !ok {
+		fmt.Fprintf(os.Stderr, "unknown -cpu-sort value: %s\n", *cpuSort)
+		os.Exit(1)
+	}
 
 	if *showVersion {
 		if commit != "" {
@@ -151,7 +157,7 @@ func main() {
 			printTable(&w, r.name, r.some, r.full)
 		}
 		if cpuSt != nil {
-			printCpuTable(&w, cpuSt)
+			printCpuTable(&w, cpuSt, *cpuSort)
 		}
 		printZpoolStatus(&w, zpPools)
 		mu.Unlock()

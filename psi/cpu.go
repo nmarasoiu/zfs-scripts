@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -192,7 +193,31 @@ func (cs *cpuState) update() {
 	}
 }
 
-func printCpuTable(w io.Writer, cs *cpuState) {
+// cpuSortKey maps a sort flag value to a function returning the sort key.
+// For CDF columns, lower value = busier core, so we negate to get descending.
+// For current/avg, higher value = busier core, returned as-is (sorted descending).
+var cpuSortKeys = map[string]func(t *cpuTracker) float64{
+	"index":   nil, // sentinel: preserve CPU index order
+	"current": func(t *cpuTracker) float64 { return t.smoothCur() },
+	"avg":     func(t *cpuTracker) float64 { return t.avg() },
+	"le10":    func(t *cpuTracker) float64 { return -t.cdf(1) },
+	"le20":    func(t *cpuTracker) float64 { return -t.cdf(2) },
+	"le30":    func(t *cpuTracker) float64 { return -t.cdf(3) },
+	"le40":    func(t *cpuTracker) float64 { return -t.cdf(4) },
+	"le50":    func(t *cpuTracker) float64 { return -t.cdf(5) },
+	"le60":    func(t *cpuTracker) float64 { return -t.cdf(6) },
+	"le70":    func(t *cpuTracker) float64 { return -t.cdf(7) },
+	"le80":    func(t *cpuTracker) float64 { return -t.cdf(8) },
+	"le90":    func(t *cpuTracker) float64 { return -t.cdf(9) },
+	"le95":    func(t *cpuTracker) float64 { return -t.cdf(10) },
+	"le99":    func(t *cpuTracker) float64 { return -t.cdf(11) },
+}
+
+func cpuSortUsage() string {
+	return "sort CPU rows: index, current, avg, le10..le90, le95, le99"
+}
+
+func printCpuTable(w io.Writer, cs *cpuState, sortBy string) {
 	if !cs.ready {
 		return
 	}
@@ -202,8 +227,24 @@ func printCpuTable(w io.Writer, cs *cpuState) {
 	fmt.Fprintln(w, "───────┼─────────┼─────────┼─────────┼─────────┼─────────┼─────────┼─────────┼─────────┼─────────┼─────────┼─────────┼─────────┼─────────")
 
 	printCpuRow(w, "all", cs.all)
+
+	type cpuEntry struct {
+		idx  int
+		core *cpuTracker
+	}
+	entries := make([]cpuEntry, len(cs.cores))
 	for i, core := range cs.cores {
-		printCpuRow(w, fmt.Sprintf("cpu%d", i), core)
+		entries[i] = cpuEntry{i, core}
+	}
+
+	if keyFn := cpuSortKeys[sortBy]; keyFn != nil {
+		sort.SliceStable(entries, func(i, j int) bool {
+			return keyFn(entries[i].core) > keyFn(entries[j].core)
+		})
+	}
+
+	for _, e := range entries {
+		printCpuRow(w, fmt.Sprintf("cpu%d", e.idx), e.core)
 	}
 	fmt.Fprintln(w)
 }
