@@ -3,12 +3,9 @@ package main
 import (
 	"fmt"
 	"io"
-	"math"
 	"strconv"
 	"strings"
 	"syscall"
-
-	"github.com/DataDog/sketches-go/ddsketch"
 )
 
 // cpuTick holds raw jiffy counters from a /proc/stat cpu line.
@@ -26,21 +23,21 @@ func (t cpuTick) busy() uint64 {
 
 // cpuTracker accumulates utilization stats for one core (or the aggregate).
 type cpuTracker struct {
-	sketch       *ddsketch.DDSketch
-	min, max     float64
-	sum          float64
-	count        int
-	cur          float64
-	prev         cpuTick
-	hasPrev      bool
+	buckets [10]int // [0]=0–10%, [1]=10–20%, ..., [9]=90–100%
+	min     float64
+	max     float64
+	sum     float64
+	count   int
+	cur     float64
+	prev    cpuTick
+	hasPrev bool
 }
 
 func newCpuTracker() *cpuTracker {
-	sk, _ := ddsketch.NewDefaultDDSketch(0.01)
-	return &cpuTracker{sketch: sk, min: math.MaxFloat64, max: -1}
+	return &cpuTracker{min: 101} // >100 means no data yet
 }
 
-// update computes utilization from delta jiffies and feeds the sketch.
+// update computes utilization from delta jiffies and feeds the buckets.
 func (t *cpuTracker) update(tick cpuTick) {
 	if !t.hasPrev {
 		t.prev = tick
@@ -57,7 +54,12 @@ func (t *cpuTracker) update(tick cpuTick) {
 		t.cur = (dbusy / dtotal) * 100.0
 	}
 
-	t.sketch.Add(t.cur)
+	idx := int(t.cur / 10)
+	if idx > 9 {
+		idx = 9
+	}
+	t.buckets[idx]++
+
 	t.sum += t.cur
 	t.count++
 	if t.cur < t.min {
@@ -75,12 +77,16 @@ func (t *cpuTracker) avg() float64 {
 	return t.sum / float64(t.count)
 }
 
-func (t *cpuTracker) quantile(q float64) float64 {
-	v, err := t.sketch.GetValueAtQuantile(q)
-	if err != nil {
+// cdf returns the percentage of samples with utilization < threshold*10%.
+func (t *cpuTracker) cdf(threshold int) float64 {
+	if t.count == 0 {
 		return 0
 	}
-	return v
+	var cum int
+	for i := 0; i < threshold; i++ {
+		cum += t.buckets[i]
+	}
+	return float64(cum) / float64(t.count) * 100
 }
 
 // cpuState holds fd and per-core trackers for /proc/stat.
@@ -161,9 +167,9 @@ func printCpuTable(w io.Writer, cs *cpuState) {
 		return
 	}
 
-	fmt.Fprintf(w, "%-6s │ %7s │ %7s │ %7s │ %7s │ %7s │ %7s │ %7s │ %7s │ %7s\n",
-		"CPU%", "current", "avg", "min", "p25", "p50", "p75", "p90", "p99", "max")
-	fmt.Fprintln(w, "───────┼─────────┼─────────┼─────────┼─────────┼─────────┼─────────┼─────────┼─────────┼─────────")
+	fmt.Fprintf(w, "%-6s │ %7s │ %7s │ %7s │ %7s │ %7s │ %7s │ %7s │ %7s │ %7s │ %7s\n",
+		"CPU%", "current", "≤10%", "≤20%", "≤30%", "≤40%", "≤50%", "≤60%", "≤70%", "≤80%", "≤90%")
+	fmt.Fprintln(w, "───────┼─────────┼─────────┼─────────┼─────────┼─────────┼─────────┼─────────┼─────────┼─────────┼─────────")
 
 	printCpuRow(w, "all", cs.all)
 	for i, core := range cs.cores {
@@ -173,16 +179,17 @@ func printCpuTable(w io.Writer, cs *cpuState) {
 }
 
 func printCpuRow(w io.Writer, name string, t *cpuTracker) {
-	fmt.Fprintf(w, "%-6s │ %s │ %s │ %s │ %s │ %s │ %s │ %s │ %s │ %s\n",
+	fmt.Fprintf(w, "%-6s │ %s │ %s │ %s │ %s │ %s │ %s │ %s │ %s │ %s │ %s\n",
 		name,
 		formatPct(t.cur),
-		formatPct(t.avg()),
-		formatPct(t.min),
-		formatPct(t.quantile(0.25)),
-		formatPct(t.quantile(0.50)),
-		formatPct(t.quantile(0.75)),
-		formatPct(t.quantile(0.90)),
-		formatPct(t.quantile(0.99)),
-		formatPct(t.max),
+		formatPct(t.cdf(1)),
+		formatPct(t.cdf(2)),
+		formatPct(t.cdf(3)),
+		formatPct(t.cdf(4)),
+		formatPct(t.cdf(5)),
+		formatPct(t.cdf(6)),
+		formatPct(t.cdf(7)),
+		formatPct(t.cdf(8)),
+		formatPct(t.cdf(9)),
 	)
 }
