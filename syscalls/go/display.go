@@ -430,7 +430,12 @@ func (d *Display) handleKey(ev keyEvent) bool {
 	case modeSort:
 		switch ev.kind {
 		case keyChar:
-			if ev.ch == 's' && d.sortText == "" {
+			if ev.ch == '/' {
+				// switch to filter mode, discard sort input
+				d.sortText = ""
+				d.mode = modeFilter
+				d.filterText = ""
+			} else if ev.ch == 's' && d.sortText == "" {
 				// 's' again on empty → cancel
 				d.mode = modeNormal
 			} else {
