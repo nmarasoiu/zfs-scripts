@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -158,8 +159,8 @@ func condenseScan(lines []string) string {
 	return s
 }
 
-func parseZpoolStatus() ([]zpPool, error) {
-	out, err := exec.Command("zpool", "status", "-sv").CombinedOutput()
+func parseZpoolStatus(ctx context.Context) ([]zpPool, error) {
+	out, err := exec.CommandContext(ctx, "zpool", "status", "-sv").CombinedOutput()
 	if err != nil {
 		return nil, err
 	}
@@ -299,16 +300,20 @@ func discoverPools() []poolStateFd {
 }
 
 // refreshZpoolCache runs zpool status if the cache is stale.
-func refreshZpoolCache(pools *[]zpPool, lastRefresh *time.Time, interval time.Duration) {
+// Returns new pools if refreshed, nil otherwise. Safe to call without locks
+// since the subprocess can block on degraded pools.
+func refreshZpoolCache(lastRefresh *time.Time, interval time.Duration) []zpPool {
 	if time.Since(*lastRefresh) < interval {
-		return
+		return nil
 	}
-	parsed, err := parseZpoolStatus()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	parsed, err := parseZpoolStatus(ctx)
 	if err != nil {
-		return
+		return nil
 	}
-	*pools = parsed
 	*lastRefresh = time.Now()
+	return parsed
 }
 
 // updatePoolStates reads live pool state from kstat via pread (no subprocess).

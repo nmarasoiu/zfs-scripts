@@ -93,7 +93,9 @@ func main() {
 			psiReadings[j] = psiReading{pf.name, some, full}
 		}
 		load = readLoad(loadFd, buf[:])
-		refreshZpoolCache(&zpPools, &zpLastRefresh, *zpoolInterval)
+		if p := refreshZpoolCache(&zpLastRefresh, *zpoolInterval); p != nil {
+			zpPools = p
+		}
 		updatePoolStates(poolFds, buf[:], zpPools)
 		if cpuSt != nil {
 			cpuSt.update() // seed first sample
@@ -129,13 +131,18 @@ func main() {
 				return
 			case <-ticker.C:
 			}
+			// Subprocess runs outside lock to avoid deadlock on degraded pools.
+			newPools := refreshZpoolCache(&zpLastRefresh, *zpoolInterval)
+
 			mu.Lock()
 			for j, pf := range psiFiles {
 				some, full := readPressure(pf.fd, buf[:])
 				psiReadings[j] = psiReading{pf.name, some, full}
 			}
 			load = readLoad(loadFd, buf[:])
-			refreshZpoolCache(&zpPools, &zpLastRefresh, *zpoolInterval)
+			if newPools != nil {
+				zpPools = newPools
+			}
 			updatePoolStates(poolFds, buf[:], zpPools)
 			mu.Unlock()
 		}
