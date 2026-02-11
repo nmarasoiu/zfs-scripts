@@ -175,9 +175,9 @@ func printCpuTable(w io.Writer, cs *cpuState) {
 		return
 	}
 
-	fmt.Fprintf(w, "%-6s │ %7s │ %7s │ %7s │ %7s │ %7s │ %7s │ %7s │ %7s │ %7s │ %7s │ %7s │ %7s\n",
-		"CPU%", "current", "≤10%", "≤20%", "≤30%", "≤40%", "≤50%", "≤60%", "≤70%", "≤80%", "≤90%", "≤95%", "≤99%")
-	fmt.Fprintln(w, "───────┼─────────┼─────────┼─────────┼─────────┼─────────┼─────────┼─────────┼─────────┼─────────┼─────────┼─────────┼─────────")
+	fmt.Fprintf(w, "%-6s │ %7s │ %7s │ %7s │ %7s │ %7s │ %7s │ %7s │ %7s │ %7s │ %7s │ %7s │ %7s │ %7s\n",
+		"CPU%", "current", "avg", "≤10%", "≤20%", "≤30%", "≤40%", "≤50%", "≤60%", "≤70%", "≤80%", "≤90%", "≤95%", "≤99%")
+	fmt.Fprintln(w, "───────┼─────────┼─────────┼─────────┼─────────┼─────────┼─────────┼─────────┼─────────┼─────────┼─────────┼─────────┼─────────┼─────────")
 
 	printCpuRow(w, "all", cs.all)
 	for i, core := range cs.cores {
@@ -187,9 +187,10 @@ func printCpuTable(w io.Writer, cs *cpuState) {
 }
 
 func printCpuRow(w io.Writer, name string, t *cpuTracker) {
-	fmt.Fprintf(w, "%-6s │ %s │ %s │ %s │ %s │ %s │ %s │ %s │ %s │ %s │ %s │ %s │ %s\n",
+	fmt.Fprintf(w, "%-6s │ %s │ %s │ %s │ %s │ %s │ %s │ %s │ %s │ %s │ %s │ %s │ %s │ %s\n",
 		name,
 		formatPct(t.cur),
+		formatPct(t.avg()),
 		formatPct(t.cdf(1)),
 		formatPct(t.cdf(2)),
 		formatPct(t.cdf(3)),
