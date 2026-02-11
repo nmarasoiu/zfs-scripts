@@ -114,7 +114,7 @@ func (t *cpuTracker) cdf(threshold int) float64 {
 // cpuState holds fd and per-core trackers for /proc/stat.
 type cpuState struct {
 	fd         int
-	buf        [4096]byte
+	buf        [16384]byte
 	all        *cpuTracker
 	cores      []*cpuTracker
 	ready      bool // true after first update (need two ticks to diff)
