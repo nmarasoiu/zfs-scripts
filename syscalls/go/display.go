@@ -305,8 +305,10 @@ func (d *Display) render(state *State, frame frameMetrics) {
 		const sketchBytesEach = 2048 // ~2KB per DDSketch: 0.7KB narrow, 4KB wide range (measured via protobuf + struct overhead)
 		totalMB := float64(v.NSketches) * sketchBytesEach / 1024 / 1024
 
-		fmt.Fprintf(&mainBuf, "Syscall Latency Monitor - %s (uptime: %s) -- %d entries  %d sketches × 2KB ≈ %.1fMB  evict:%s\n",
-			now.Format("15:04:05"), formatDuration(elapsed), v.NStats, v.NSketches, totalMB, formatCount(int64(v.SketchEvictions)))
+		evicted := v.NStats - v.NSketches
+
+		fmt.Fprintf(&mainBuf, "Syscall Latency Monitor - %s (uptime: %s) -- %d entries  %d sketches × 2KB ≈ %.1fMB  evict:%s churn:%s\n",
+			now.Format("15:04:05"), formatDuration(elapsed), v.NStats, v.NSketches, totalMB, formatCount(int64(evicted)), formatCount(int64(v.SketchEvictions)))
 
 		d.lastSummaries = d.collectProcessSummaries(v.ProcStats, elapsed.Seconds())
 
