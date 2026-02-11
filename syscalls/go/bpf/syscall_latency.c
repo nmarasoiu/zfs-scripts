@@ -56,7 +56,7 @@ struct {
 // Drop counters indexed by reason.
 enum drop_reason {
     DROP_RING_FULL   = 0, // bpf_ringbuf_reserve returned NULL
-    DROP_NO_START_TS = 1, // sys_exit with no matching sys_enter (LRU eviction or startup race)
+    DROP_NO_START_TS = 1, // sys_exit with no matching sys_enter (LRU eviction, startup race, or unknown)
     DROP__MAX        = 2,
 };
 
@@ -107,10 +107,18 @@ int trace_syscall_enter(struct trace_event_raw_sys_enter *ctx) {
 
 SEC("tracepoint/raw_syscalls/sys_exit")
 int trace_syscall_exit(struct trace_event_raw_sys_exit *ctx) {
+    if (!should_trace())
+        return 0;
+
     __u32 tid = bpf_get_current_pid_tgid();
 
     __u64 *start_ts = bpf_map_lookup_elem(&start_times, &tid);
     if (!start_ts) {
+        // fork/clone/vfork: child returns from the parent's syscall
+        // with a new tid that was never in start_times — not a real drop.
+        __u32 id = ctx->id;
+        if (id == 56 || id == 57 || id == 58 || id == 435)
+            return 0;
         inc_drop(DROP_NO_START_TS);
         return 0;
     }
