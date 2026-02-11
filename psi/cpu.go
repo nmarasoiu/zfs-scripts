@@ -22,8 +22,9 @@ func (t cpuTick) busy() uint64 {
 }
 
 // cpuTracker accumulates utilization stats for one core (or the aggregate).
+// Buckets: [0]=0–10% .. [8]=80–90%, [9]=90–95%, [10]=95–99%, [11]=99–100%
 type cpuTracker struct {
-	buckets [10]int // [0]=0–10%, [1]=10–20%, ..., [9]=90–100%
+	buckets [12]int
 	min     float64
 	max     float64
 	sum     float64
@@ -54,9 +55,16 @@ func (t *cpuTracker) update(tick cpuTick) {
 		t.cur = (dbusy / dtotal) * 100.0
 	}
 
-	idx := int(t.cur / 10)
-	if idx > 9 {
+	var idx int
+	switch {
+	case t.cur >= 99:
+		idx = 11
+	case t.cur >= 95:
+		idx = 10
+	case t.cur >= 90:
 		idx = 9
+	default:
+		idx = int(t.cur / 10)
 	}
 	t.buckets[idx]++
 
@@ -167,9 +175,9 @@ func printCpuTable(w io.Writer, cs *cpuState) {
 		return
 	}
 
-	fmt.Fprintf(w, "%-6s │ %7s │ %7s │ %7s │ %7s │ %7s │ %7s │ %7s │ %7s │ %7s │ %7s\n",
-		"CPU%", "current", "≤10%", "≤20%", "≤30%", "≤40%", "≤50%", "≤60%", "≤70%", "≤80%", "≤90%")
-	fmt.Fprintln(w, "───────┼─────────┼─────────┼─────────┼─────────┼─────────┼─────────┼─────────┼─────────┼─────────┼─────────")
+	fmt.Fprintf(w, "%-6s │ %7s │ %7s │ %7s │ %7s │ %7s │ %7s │ %7s │ %7s │ %7s │ %7s │ %7s │ %7s\n",
+		"CPU%", "current", "≤10%", "≤20%", "≤30%", "≤40%", "≤50%", "≤60%", "≤70%", "≤80%", "≤90%", "≤95%", "≤99%")
+	fmt.Fprintln(w, "───────┼─────────┼─────────┼─────────┼─────────┼─────────┼─────────┼─────────┼─────────┼─────────┼─────────┼─────────┼─────────")
 
 	printCpuRow(w, "all", cs.all)
 	for i, core := range cs.cores {
@@ -179,7 +187,7 @@ func printCpuTable(w io.Writer, cs *cpuState) {
 }
 
 func printCpuRow(w io.Writer, name string, t *cpuTracker) {
-	fmt.Fprintf(w, "%-6s │ %s │ %s │ %s │ %s │ %s │ %s │ %s │ %s │ %s │ %s\n",
+	fmt.Fprintf(w, "%-6s │ %s │ %s │ %s │ %s │ %s │ %s │ %s │ %s │ %s │ %s │ %s │ %s\n",
 		name,
 		formatPct(t.cur),
 		formatPct(t.cdf(1)),
@@ -191,5 +199,7 @@ func printCpuRow(w io.Writer, name string, t *cpuTracker) {
 		formatPct(t.cdf(7)),
 		formatPct(t.cdf(8)),
 		formatPct(t.cdf(9)),
+		formatPct(t.cdf(10)),
+		formatPct(t.cdf(11)),
 	)
 }
