@@ -23,9 +23,9 @@ type psiReading struct {
 
 func main() {
 	batchN := flag.Int("batch", 0, "run N iterations then exit (0 = infinite)")
-	psiInterval := flag.Duration("psi", 4*time.Second, "PSI/load/zpool-state refresh interval")
-	cpuInterval := flag.Duration("cpu", 100*time.Millisecond, "CPU utilization sample interval")
-	zpoolInterval := flag.Duration("zpool", 30*time.Second, "zpool status subprocess interval")
+	psiInterval := flag.Duration("psi", 5*time.Second, "PSI/load/zpool-state refresh interval")
+	cpuInterval := flag.Duration("cpu", 40*time.Millisecond, "CPU utilization sample interval")
+	zpoolInterval := flag.Duration("zpool", 15*time.Second, "zpool status subprocess interval")
 	displayInterval := flag.Duration("display", 100*time.Millisecond, "display refresh interval")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
@@ -58,7 +58,11 @@ func main() {
 			syscall.Close(pf.fd)
 		}
 	}()
-	cpuSt := newCpuState()
+	cpuWindow := int(time.Second / *cpuInterval)
+	if cpuWindow < 1 {
+		cpuWindow = 1
+	}
+	cpuSt := newCpuState(cpuWindow)
 	if cpuSt != nil {
 		defer syscall.Close(cpuSt.fd)
 	}

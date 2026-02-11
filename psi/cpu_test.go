@@ -62,7 +62,7 @@ func TestCpuTickBusy(t *testing.T) {
 }
 
 func TestCpuTrackerUpdate(t *testing.T) {
-	tr := newCpuTracker()
+	tr := newCpuTracker(1)
 
 	// First update: no delta yet
 	tr.update(cpuTick{100, 0, 50, 800, 50, 0, 0, 0})
@@ -81,7 +81,7 @@ func TestCpuTrackerUpdate(t *testing.T) {
 }
 
 func TestCpuTrackerAvg(t *testing.T) {
-	tr := newCpuTracker()
+	tr := newCpuTracker(1)
 	if tr.avg() != 0 {
 		t.Errorf("avg of empty tracker = %f, want 0", tr.avg())
 	}

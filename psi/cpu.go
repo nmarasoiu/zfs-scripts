@@ -32,10 +32,13 @@ type cpuTracker struct {
 	cur     float64
 	prev    cpuTick
 	hasPrev bool
+	ring    []float64
+	ringPos int
+	ringN   int // number of populated entries (grows until ring is full)
 }
 
-func newCpuTracker() *cpuTracker {
-	return &cpuTracker{min: 101} // >100 means no data yet
+func newCpuTracker(windowSize int) *cpuTracker {
+	return &cpuTracker{min: 101, ring: make([]float64, windowSize)}
 }
 
 // update computes utilization from delta jiffies and feeds the buckets.
@@ -53,6 +56,12 @@ func (t *cpuTracker) update(tick cpuTick) {
 		t.cur = 0
 	} else {
 		t.cur = (dbusy / dtotal) * 100.0
+	}
+
+	t.ring[t.ringPos] = t.cur
+	t.ringPos = (t.ringPos + 1) % len(t.ring)
+	if t.ringN < len(t.ring) {
+		t.ringN++
 	}
 
 	var idx int
@@ -85,6 +94,18 @@ func (t *cpuTracker) avg() float64 {
 	return t.sum / float64(t.count)
 }
 
+// smoothCur returns the average of the last windowSize samples.
+func (t *cpuTracker) smoothCur() float64 {
+	if t.ringN == 0 {
+		return t.cur
+	}
+	var sum float64
+	for i := 0; i < t.ringN; i++ {
+		sum += t.ring[i]
+	}
+	return sum / float64(t.ringN)
+}
+
 // cdf returns the percentage of samples with utilization < threshold*10%.
 func (t *cpuTracker) cdf(threshold int) float64 {
 	if t.count == 0 {
@@ -99,19 +120,20 @@ func (t *cpuTracker) cdf(threshold int) float64 {
 
 // cpuState holds fd and per-core trackers for /proc/stat.
 type cpuState struct {
-	fd    int
-	buf   [4096]byte
-	all   *cpuTracker
-	cores []*cpuTracker
-	ready bool // true after first update (need two ticks to diff)
+	fd         int
+	buf        [4096]byte
+	all        *cpuTracker
+	cores      []*cpuTracker
+	ready      bool // true after first update (need two ticks to diff)
+	windowSize int
 }
 
-func newCpuState() *cpuState {
+func newCpuState(windowSize int) *cpuState {
 	fd, err := syscall.Open("/proc/stat", syscall.O_RDONLY, 0)
 	if err != nil {
 		return nil
 	}
-	return &cpuState{fd: fd, all: newCpuTracker()}
+	return &cpuState{fd: fd, all: newCpuTracker(windowSize), windowSize: windowSize}
 }
 
 func parseCpuLine(line string) (cpuTick, bool) {
@@ -156,7 +178,7 @@ func (cs *cpuState) update() {
 			}
 			// grow cores slice on first discovery
 			for len(cs.cores) <= idx {
-				cs.cores = append(cs.cores, newCpuTracker())
+				cs.cores = append(cs.cores, newCpuTracker(cs.windowSize))
 			}
 			if tick, ok := parseCpuLine(line); ok {
 				cs.cores[idx].update(tick)
@@ -189,7 +211,7 @@ func printCpuTable(w io.Writer, cs *cpuState) {
 func printCpuRow(w io.Writer, name string, t *cpuTracker) {
 	fmt.Fprintf(w, "%-6s │ %s │ %s │ %s │ %s │ %s │ %s │ %s │ %s │ %s │ %s │ %s │ %s │ %s\n",
 		name,
-		formatPct(t.cur),
+		formatPct(t.smoothCur()),
 		formatPct(t.avg()),
 		formatPct(t.cdf(1)),
 		formatPct(t.cdf(2)),
