@@ -16,7 +16,7 @@ psi [flags]
 | `-psi` | `5s` | PSI / load / zpool-state refresh interval |
 | `-zpool` | `15s` | `zpool status` subprocess interval |
 | `-display` | `100ms` | Screen refresh interval |
-| `-cpu-sort` | `le99` | Sort CPU rows: `index`, `current`, `avg`, `le10`..`le90`, `le95`, `le99` |
+| `-cpu-sort` | `le99` | Sort CPU rows: `index`, `current`, `avg`, `le10`..`le90`, `le95`, `le99`. Tiebreakers: `≤99%`, `avg`, cpu index |
 | `-batch N` | `0` | Print N frames then exit (0 = loop forever) |
 | `-version` | | Print version and exit |
 
