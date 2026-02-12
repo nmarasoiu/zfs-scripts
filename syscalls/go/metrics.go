@@ -35,33 +35,12 @@ type runtimeMetrics struct {
 
 	// Go-side reader drops
 	goShortEvents atomic.Uint64 // rec.RawSample too short
-
-	// Map avg/max tracking (updated each map-count tick)
-	mapMaxUsed atomic.Int64
-	mapSumUsed atomic.Int64
-	mapSamples atomic.Int64
 }
 
 func snapshotDrops(metrics *runtimeMetrics) frameDrops {
 	return frameDrops{
 		ringFull:  metrics.bpfDrops.ringFull.Load(),
 		noStartTS: metrics.bpfDrops.noStartTS.Load(),
-		goShort:   metrics.goShortEvents.Load(),
-	}
-}
-
-func snapshotMapStats(metrics *runtimeMetrics, mapCap int64) *capacityStats {
-	if mapCap <= 0 {
-		return nil
-	}
-	var avg int64
-	if n := metrics.mapSamples.Load(); n > 0 {
-		avg = metrics.mapSumUsed.Load() / n
-	}
-	return &capacityStats{
-		avg: avg,
-		max: metrics.mapMaxUsed.Load(),
-		cap: mapCap,
 	}
 }
 
@@ -75,19 +54,17 @@ type ringStats struct {
 
 // frameDrops holds per-reason drop counts for a single display frame.
 type frameDrops struct {
-	ringFull    uint64 // BPF: ring buffer full
-	noStartTS   uint64 // BPF: sys_exit without matching sys_enter
-	goShort     uint64 // Go: truncated ring buffer record
+	ringFull  uint64 // BPF: ring buffer full
+	noStartTS uint64 // BPF: sys_exit without matching sys_enter
 }
 
 func (d frameDrops) total() uint64 {
-	return d.ringFull + d.noStartTS + d.goShort
+	return d.ringFull + d.noStartTS
 }
 
 // frameMetrics bundles the per-frame runtime metrics passed to render.
 type frameMetrics struct {
 	drops     frameDrops
-	mapStats  *capacityStats
 	ringStats *ringStats
 	cpuTime   time.Duration
 }

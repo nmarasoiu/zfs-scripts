@@ -55,7 +55,6 @@ var (
 	// Timing
 	displayRefreshInterval = flag.Duration("display-refresh-interval", 100*time.Millisecond, "display refresh interval (e.g. 100ms, 200ms)")
 	batchSize              = flag.Int("batch-size", 1024, "event batch: max events before flush to stats")
-	mapSampleInterval      = flag.Duration("map-sample-interval", 2*time.Second, "BPF map occupancy sample interval")
 
 	// BPF
 	ringSizeFlag   = flag.String("ring-size", "2M", "per-ring buffer size (e.g. 512K, 2M, 8M); must be power of 2, ≥4K; 4 rings total")
@@ -343,7 +342,6 @@ func run() error {
 	defer rings.Cleanup()
 
 	state := newState(*maxSketches, *alphaFlag)
-	mapCap := int64(objs.StartTimes.MaxEntries())
 	interactive := !*batch && isTerminal(int(os.Stdin.Fd())) && isTerminal(int(os.Stdout.Fd()))
 	display := &Display{
 		batchMode:      *batch,
@@ -401,25 +399,6 @@ func run() error {
 		go runInput(keyCh)
 	}
 
-	// Map occupancy goroutine
-	mapTicker := time.NewTicker(*mapSampleInterval)
-	go func() {
-		defer mapTicker.Stop()
-		for {
-			select {
-			case <-done:
-				return
-			case <-mapTicker.C:
-				used := countMapEntries(objs.StartTimes)
-				metrics.mapSumUsed.Add(used)
-				metrics.mapSamples.Add(1)
-				if cur := metrics.mapMaxUsed.Load(); used > cur {
-					metrics.mapMaxUsed.Store(used)
-				}
-			}
-		}
-	}()
-
 	// Display goroutine
 	displayTicker := time.NewTicker(*displayRefreshInterval)
 	go func() {
@@ -430,27 +409,26 @@ func run() error {
 			case <-done:
 				return
 			case <-displayTicker.C:
-				readDropCounts(objs.DropCount, &metrics.bpfDrops)
-				display.render(state, frameMetrics{
-					drops:     snapshotDrops(metrics),
-					mapStats:  snapshotMapStats(metrics, mapCap),
-					ringStats: snapshotRingStats(rings, &ringAcc),
-					cpuTime:   getCPUTime(),
-				})
-			case ev := <-keyCh:
-				if display.handleKey(ev) {
-					// 'q' pressed — trigger shutdown via signal
-					sig <- syscall.SIGINT
-					return
-				}
-				readDropCounts(objs.DropCount, &metrics.bpfDrops)
-				display.render(state, frameMetrics{
-					drops:     snapshotDrops(metrics),
-					mapStats:  snapshotMapStats(metrics, mapCap),
-					ringStats: snapshotRingStats(rings, &ringAcc),
-					cpuTime:   getCPUTime(),
-				})
 			}
+			// Drain pending key events (accumulated since last tick)
+			for {
+				select {
+				case ev := <-keyCh:
+					if display.handleKey(ev) {
+						sig <- syscall.SIGINT
+						return
+					}
+				default:
+					goto render
+				}
+			}
+		render:
+			readDropCounts(objs.DropCount, &metrics.bpfDrops)
+			display.render(state, frameMetrics{
+				drops:     snapshotDrops(metrics),
+				ringStats: snapshotRingStats(rings, &ringAcc),
+				cpuTime:   getCPUTime(),
+			})
 		}
 	}()
 
@@ -468,7 +446,6 @@ func run() error {
 	readDropCounts(objs.DropCount, &metrics.bpfDrops)
 	display.render(state, frameMetrics{
 		drops:     snapshotDrops(metrics),
-		mapStats:  snapshotMapStats(metrics, mapCap),
 		ringStats: snapshotRingStats(rings, &ringAvg{}),
 		cpuTime:   getCPUTime(),
 	})

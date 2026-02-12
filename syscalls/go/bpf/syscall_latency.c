@@ -123,9 +123,13 @@ int trace_syscall_exit(struct trace_event_raw_sys_exit *ctx) {
         return 0;
     }
 
-    __u64 latency = bpf_ktime_get_ns() - *start_ts;
+    // Copy value and delete before ring ops — single delete path.
+    __u64 start_val = *start_ts;
+    bpf_map_delete_elem(&start_times, &tid);
 
-    __u32 ring = (__u32)*start_ts % NUM_RINGS;
+    __u64 latency = bpf_ktime_get_ns() - start_val;
+
+    __u32 ring = (__u32)start_val % NUM_RINGS;
     struct latency_event *event = NULL;
     switch (ring) {
         case 0: event = bpf_ringbuf_reserve(&events0, sizeof(*event), 0); break;
@@ -135,7 +139,6 @@ int trace_syscall_exit(struct trace_event_raw_sys_exit *ctx) {
     }
     if (!event) {
         inc_drop(DROP_RING_FULL);
-        bpf_map_delete_elem(&start_times, &tid);
         return 0;
     }
 
@@ -144,8 +147,6 @@ int trace_syscall_exit(struct trace_event_raw_sys_exit *ctx) {
     bpf_get_current_comm(&event->comm, sizeof(event->comm));
 
     bpf_ringbuf_submit(event, BPF_RB_NO_WAKEUP);
-
-    bpf_map_delete_elem(&start_times, &tid);
 
     return 0;
 }
