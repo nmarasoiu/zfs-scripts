@@ -154,6 +154,67 @@ func TestState_LRUEviction(t *testing.T) {
 	})
 }
 
+func TestState_ProcCountersSurviveEviction(t *testing.T) {
+	state := newState(2, 0.25) // only 2 sketches allowed
+	state.RecordBatch([]pendingEvent{
+		{testComm("a"), 0, 10},
+		{testComm("b"), 1, 20},
+		{testComm("c"), 2, 30}, // evicts a sketch from cache
+	})
+
+	state.Read(func(v StateView) {
+		// "a" is evicted from sketch cache
+		if v.ProcStats["a"] != nil {
+			t.Error("expected 'a' to be absent from sketch cache (evicted)")
+		}
+		// But "a" survives in persistent procCounters
+		pcA := v.ProcCounters["a"]
+		if pcA == nil {
+			t.Fatal("expected 'a' in ProcCounters (survives eviction)")
+		}
+		if pcA.count != 1 {
+			t.Errorf("a counter count = %d, want 1", pcA.count)
+		}
+		if pcA.sum != 10 {
+			t.Errorf("a counter sum = %d, want 10", pcA.sum)
+		}
+	})
+}
+
+func TestState_ProcCountersAccumulateAcrossSyscalls(t *testing.T) {
+	state := newState(100, 0.25)
+	state.RecordBatch([]pendingEvent{
+		{testComm("tor"), 0, 100},  // read
+		{testComm("tor"), 1, 200},  // write
+		{testComm("tor"), 0, 300},  // read again
+		{testComm("sshd"), 0, 50},
+	})
+
+	state.Read(func(v StateView) {
+		torPC := v.ProcCounters["tor"]
+		if torPC == nil {
+			t.Fatal("missing tor in ProcCounters")
+		}
+		if torPC.count != 3 {
+			t.Errorf("tor count = %d, want 3", torPC.count)
+		}
+		if torPC.sum != 600 {
+			t.Errorf("tor sum = %d, want 600", torPC.sum)
+		}
+
+		sshdPC := v.ProcCounters["sshd"]
+		if sshdPC == nil {
+			t.Fatal("missing sshd in ProcCounters")
+		}
+		if sshdPC.count != 1 {
+			t.Errorf("sshd count = %d, want 1", sshdPC.count)
+		}
+		if sshdPC.sum != 50 {
+			t.Errorf("sshd sum = %d, want 50", sshdPC.sum)
+		}
+	})
+}
+
 func TestState_RecordBatchPreservesLRUOrder(t *testing.T) {
 	state := newState(2, 0.25)
 	// Add a, b

@@ -108,23 +108,17 @@ func filterStatsGeneral(procStats map[string]map[uint32]*ddsketch.DDSketch, text
 	return filtered
 }
 
-// collectProcessSummaries aggregates per-process totals, sorted by d.sortColumn.
-func (d *Display) collectProcessSummaries(procStats map[string]map[uint32]*ddsketch.DDSketch, elapsedSecs float64) []processSummary {
+// collectProcessSummaries aggregates per-process totals from persistent counters, sorted by d.sortColumn.
+func (d *Display) collectProcessSummaries(procCounters map[string]*processCounter, elapsedSecs float64) []processSummary {
 	sortByRate := d.sortColumn == "rate"
 	sortByTime := d.sortColumn == "time"
-	summaries := make([]processSummary, 0, len(procStats))
-	for proc, syscalls := range procStats {
-		var total uint64
-		var totalTime uint64
-		for _, sk := range syscalls {
-			total += uint64(sk.GetCount())
-			totalTime += uint64(sk.GetSum())
-		}
+	summaries := make([]processSummary, 0, len(procCounters))
+	for proc, pc := range procCounters {
 		rate := float64(0)
 		if elapsedSecs > 0 {
-			rate = float64(total) / elapsedSecs
+			rate = float64(pc.count) / elapsedSecs
 		}
-		summaries = append(summaries, processSummary{name: proc, count: total, rate: rate, timeUs: totalTime})
+		summaries = append(summaries, processSummary{name: proc, count: pc.count, rate: rate, timeUs: pc.sum})
 	}
 	if sortByTime {
 		sort.Slice(summaries, func(i, j int) bool {
@@ -322,7 +316,7 @@ func (d *Display) render(state *State, frame frameMetrics) {
 		fmt.Fprintf(&mainBuf, "Syscall Latency Monitor - %s (uptime: %s, cpu: %s = %.1f%%) -- %d sketches × 2KB ≈ %.1fMB  churn:%s\n",
 			now.Format("15:04:05"), formatDuration(elapsed), formatDuration(frame.cpuTime), cpuPct, v.NSketches, totalMB, formatCount(int64(v.SketchEvictions)))
 
-		d.lastSummaries = d.collectProcessSummaries(v.ProcStats, elapsed.Seconds())
+		d.lastSummaries = d.collectProcessSummaries(v.ProcCounters, elapsed.Seconds())
 
 		viewStats := v.ProcStats
 		if d.mode == modeFilter && d.filterText != "" {

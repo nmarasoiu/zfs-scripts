@@ -48,7 +48,7 @@ var (
 	batch       = flag.Bool("batch", false, "batch mode (no screen clearing)")
 	colsFlag    = flag.Int("cols", 0, "override terminal width (enables panel in batch mode)")
 	pollSleep   = flag.Duration("poll-sleep", 20*time.Millisecond, "ring buffer poll sleep when all rings are empty")
-	maxSketches = flag.Int("max-sketches", 0, "max process×syscall sketches to keep (LRU eviction; 0=auto: 4×n)")
+	maxSketches = flag.Int("max-sketches", 0, "max process×syscall sketches to keep (2Q eviction; 0=auto: 20×n)")
 	sortFlag    = flag.String("sort", "rate", "sort column (e.g. rate, samples, avg, p99, max)")
 	showVersion = flag.Bool("version", false, "print version and exit")
 
@@ -262,7 +262,7 @@ func run() error {
 
 	if *maxSketches <= 0 {
 		if *topProcs > 0 {
-			*maxSketches = 4 * *topProcs // 2× what fits on screen (n×2 columns)
+			*maxSketches = 20 * *topProcs
 		} else {
 			*maxSketches = 4096
 		}

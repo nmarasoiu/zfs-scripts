@@ -7,7 +7,7 @@ import (
 	"unsafe"
 
 	"github.com/DataDog/sketches-go/ddsketch"
-	"github.com/hashicorp/golang-lru/v2/simplelru"
+	lru "github.com/hashicorp/golang-lru/v2"
 )
 
 // commToString converts a kernel TASK_COMM_LEN array to a Go string.
@@ -20,11 +20,18 @@ func commToString(comm [16]int8) string {
 	return string(buf[:])
 }
 
-// sketchKey is the flat composite key for the LRU sketch cache.
+// sketchKey is the flat composite key for the sketch cache.
 // Uses [16]int8 (value type, no pointers) so the hot path avoids heap allocations.
 type sketchKey struct {
 	comm    [16]int8
 	syscall uint32
+}
+
+// processCounter tracks persistent per-process-name totals that survive sketch eviction.
+// Typically ~30-50 entries, never evicted, ~1KB total.
+type processCounter struct {
+	count uint64
+	sum   uint64
 }
 
 // State holds all per-process and per-syscall stats via DDSketch.
@@ -33,21 +40,23 @@ type State struct {
 	mu    sync.Mutex
 	alpha float64 // DDSketch relative accuracy
 
-	// Per-(process, syscall) DDSketches, capped by LRU eviction.
-	sketches        *simplelru.LRU[sketchKey, *ddsketch.DDSketch]
+	// Per-(process, syscall) DDSketches, capped by 2Q eviction.
+	sketches        *lru.TwoQueueCache[sketchKey, *ddsketch.DDSketch]
 	sketchEvictions uint64
+
+	// Per-process-name persistent counters (never evicted).
+	procCounters map[[16]int8]*processCounter
 
 	startTime time.Time
 }
 
 func newState(maxSketches int, alpha float64) *State {
 	s := &State{
-		alpha:     alpha,
-		startTime: time.Now(),
+		alpha:        alpha,
+		procCounters: make(map[[16]int8]*processCounter),
+		startTime:    time.Now(),
 	}
-	s.sketches, _ = simplelru.NewLRU[sketchKey, *ddsketch.DDSketch](maxSketches, func(_ sketchKey, _ *ddsketch.DDSketch) {
-		s.sketchEvictions++
-	})
+	s.sketches, _ = lru.New2Q[sketchKey, *ddsketch.DDSketch](maxSketches)
 	return s
 }
 
@@ -55,9 +64,10 @@ func newState(maxSketches int, alpha float64) *State {
 // Only valid for the duration of the callback passed to State.Read.
 type StateView struct {
 	StartTime       time.Time
-	NSketches       int    // current DDSketches in LRU
+	NSketches       int    // current DDSketches in cache
 	SketchEvictions uint64
 	ProcStats       map[string]map[uint32]*ddsketch.DDSketch
+	ProcCounters    map[string]*processCounter
 }
 
 // Read calls fn with a read-only view of the state under the lock.
@@ -68,7 +78,7 @@ func (s *State) Read(fn func(StateView)) {
 
 	procStats := make(map[string]map[uint32]*ddsketch.DDSketch)
 	for _, key := range s.sketches.Keys() {
-		sk, _ := s.sketches.Peek(key) // Peek: no LRU promotion during display
+		sk, _ := s.sketches.Peek(key) // Peek: no promotion during display
 		name := commToString(key.comm)
 		syscalls := procStats[name]
 		if syscalls == nil {
@@ -78,11 +88,17 @@ func (s *State) Read(fn func(StateView)) {
 		syscalls[key.syscall] = sk
 	}
 
+	procCounters := make(map[string]*processCounter, len(s.procCounters))
+	for comm, pc := range s.procCounters {
+		procCounters[commToString(comm)] = pc
+	}
+
 	fn(StateView{
 		StartTime:       s.startTime,
 		NSketches:       s.sketches.Len(),
 		SketchEvictions: s.sketchEvictions,
 		ProcStats:       procStats,
+		ProcCounters:    procCounters,
 	})
 }
 
@@ -96,12 +112,26 @@ func (s *State) RecordBatch(batch []pendingEvent) {
 	s.mu.Lock()
 	for i := range batch {
 		ev := &batch[i]
+
+		// Persistent per-process counters (never evicted)
+		pc := s.procCounters[ev.comm]
+		if pc == nil {
+			pc = &processCounter{}
+			s.procCounters[ev.comm] = pc
+		}
+		pc.count++
+		pc.sum += uint64(ev.latencyUs)
+
 		key := sketchKey{ev.comm, ev.syscallID}
 
 		sk, ok := s.sketches.Get(key) // Get promotes to most-recent
 		if !ok {
 			sk, _ = ddsketch.NewDefaultDDSketch(s.alpha)
-			s.sketches.Add(key, sk) // evicts LRU if over cap
+			lenBefore := s.sketches.Len()
+			s.sketches.Add(key, sk)
+			if s.sketches.Len() <= lenBefore {
+				s.sketchEvictions++
+			}
 		}
 		sk.Add(float64(ev.latencyUs))
 	}

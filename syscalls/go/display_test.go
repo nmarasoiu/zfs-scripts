@@ -174,14 +174,11 @@ func TestFilterStatsGeneral_CaseInsensitive(t *testing.T) {
 // --- collectProcessSummaries ---
 
 func TestCollectProcessSummaries_AggregatesAcrossSyscalls(t *testing.T) {
-	procStats := map[string]map[uint32]*ddsketch.DDSketch{
-		"tor": {
-			0: sketchWithCount(100),
-			1: sketchWithCount(50),
-		},
+	procCounters := map[string]*processCounter{
+		"tor": {count: 150, sum: 7500},
 	}
 
-	summaries := testDisplay("rate").collectProcessSummaries(procStats, 10.0)
+	summaries := testDisplay("rate").collectProcessSummaries(procCounters, 10.0)
 	if len(summaries) != 1 {
 		t.Fatalf("len = %d, want 1", len(summaries))
 	}
@@ -194,13 +191,13 @@ func TestCollectProcessSummaries_AggregatesAcrossSyscalls(t *testing.T) {
 }
 
 func TestCollectProcessSummaries_SortedByRateDesc(t *testing.T) {
-	procStats := map[string]map[uint32]*ddsketch.DDSketch{
-		"low":  {0: sketchWithCount(10)},
-		"high": {0: sketchWithCount(100)},
-		"mid":  {0: sketchWithCount(50)},
+	procCounters := map[string]*processCounter{
+		"low":  {count: 10, sum: 100},
+		"high": {count: 100, sum: 1000},
+		"mid":  {count: 50, sum: 500},
 	}
 
-	summaries := testDisplay("rate").collectProcessSummaries(procStats, 1.0)
+	summaries := testDisplay("rate").collectProcessSummaries(procCounters, 1.0)
 	if len(summaries) != 3 {
 		t.Fatalf("len = %d, want 3", len(summaries))
 	}
@@ -216,11 +213,11 @@ func TestCollectProcessSummaries_SortedByRateDesc(t *testing.T) {
 }
 
 func TestCollectProcessSummaries_ZeroElapsed(t *testing.T) {
-	procStats := map[string]map[uint32]*ddsketch.DDSketch{
-		"p": {0: sketchWithCount(10)},
+	procCounters := map[string]*processCounter{
+		"p": {count: 10, sum: 100},
 	}
 
-	summaries := testDisplay("rate").collectProcessSummaries(procStats, 0)
+	summaries := testDisplay("rate").collectProcessSummaries(procCounters, 0)
 	if summaries[0].rate != 0 {
 		t.Errorf("rate = %f, want 0 when elapsed=0", summaries[0].rate)
 	}
