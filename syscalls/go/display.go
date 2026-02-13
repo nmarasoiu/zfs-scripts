@@ -491,9 +491,16 @@ func (d *Display) renderFooter(buf *strings.Builder, elapsed time.Duration, nPro
 	if elapsed.Seconds() > 0 {
 		dropRate = float64(total) / elapsed.Seconds()
 	}
-	dropDetail := fmt.Sprintf("ring:%s miss:%s",
+	dropDetail := fmt.Sprintf("ring:%s evict:%s startup:%s",
 		formatCount(int64(frame.drops.ringFull)),
-		formatCount(int64(frame.drops.noStartTS)))
+		formatCount(int64(frame.drops.lruEvict)),
+		formatCount(int64(frame.drops.startupMiss)))
+	mapInfo := ""
+	if frame.mapCap > 0 {
+		pct := float64(frame.mapUsed) / float64(frame.mapCap) * 100
+		mapInfo = fmt.Sprintf(" | Map %s/%s (%.1f%%)",
+			formatCount(frame.mapUsed), formatCount(frame.mapCap), pct)
+	}
 	ringInfo := ""
 	if frame.ringStats != nil {
 		ringInfo = fmt.Sprintf(" | Ring %s  cur: %6s  avg1:%-6.0f",
@@ -501,8 +508,8 @@ func (d *Display) renderFooter(buf *strings.Builder, elapsed time.Duration, nPro
 			formatBytes(int64(frame.ringStats.pending)),
 			frame.ringStats.avg1)
 	}
-	fmt.Fprintf(buf, "Processes: %d | Drops: %s (%s/s) [%s]%s\n",
-		nProcs, formatCount(int64(total)), formatCount(int64(dropRate)), dropDetail, ringInfo)
+	fmt.Fprintf(buf, "Processes: %d | Drops: %s (%s/s) [%s]%s%s\n",
+		nProcs, formatCount(int64(total)), formatCount(int64(dropRate)), dropDetail, mapInfo, ringInfo)
 
 	if d.batchMode {
 		buf.WriteString("\n")

@@ -20,8 +20,9 @@ func configureBPFFilters(objs *bpfObjects, focusList []string) error {
 
 // BPF drop reason indices — must match enum drop_reason in syscall_latency.c.
 const (
-	dropRingFull   uint32 = 0
-	dropNoStartTS  uint32 = 1
+	dropRingFull    uint32 = 0
+	dropLRUEvict    uint32 = 1
+	dropStartupMiss uint32 = 2
 )
 
 func readDropCounts(m *ebpf.Map, dst *dropCounts) {
@@ -29,8 +30,27 @@ func readDropCounts(m *ebpf.Map, dst *dropCounts) {
 	if err := m.Lookup(dropRingFull, &val); err == nil {
 		dst.ringFull.Store(val)
 	}
-	if err := m.Lookup(dropNoStartTS, &val); err == nil {
-		dst.noStartTS.Store(val)
+	if err := m.Lookup(dropLRUEvict, &val); err == nil {
+		dst.lruEvict.Store(val)
 	}
+	if err := m.Lookup(dropStartupMiss, &val); err == nil {
+		dst.startupMiss.Store(val)
+	}
+}
+
+// readMapUsed reads the map_used_count BPF array counter.
+// Returns approximate start_times occupancy, clamped to [0, cap].
+func readMapUsed(m *ebpf.Map, cap int64) int64 {
+	var val int64
+	if err := m.Lookup(uint32(0), &val); err != nil {
+		return 0
+	}
+	if val < 0 {
+		return 0
+	}
+	if val > cap {
+		return cap
+	}
+	return val
 }
 

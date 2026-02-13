@@ -153,7 +153,7 @@ func parsePercentiles(s string) ([]float64, error) {
 
 // runReader busy-polls ring buffers via Group round-robin, batches events,
 // and flushes to state. Single goroutine — no new contention points.
-func runReader(rings *ringpoll.Group, pollSleep time.Duration, maxBatch int, state *State, metrics *runtimeMetrics) {
+func runReader(rings *ringpoll.Group, pollSleep time.Duration, maxBatch int, state *State) {
 	var rec ringpoll.Record
 	eventSize := int(unsafe.Sizeof(bpfLatencyEvent{}))
 	pending := make([]pendingEvent, 0, maxBatch)
@@ -162,7 +162,6 @@ func runReader(rings *ringpoll.Group, pollSleep time.Duration, maxBatch int, sta
 		quiet := rings.MaxFill() < 0.05
 		for rings.Poll(&rec) {
 			if len(rec.RawSample) < eventSize {
-				metrics.goShortEvents.Add(1)
 				continue
 			}
 			event := *(*bpfLatencyEvent)(unsafe.Pointer(&rec.RawSample[0]))
@@ -342,6 +341,7 @@ func run() error {
 	defer rings.Cleanup()
 
 	state := newState(*maxSketches, *alphaFlag)
+	mapCap := int64(objs.StartTimes.MaxEntries())
 	interactive := !*batch && isTerminal(int(os.Stdin.Fd())) && isTerminal(int(os.Stdout.Fd()))
 	display := &Display{
 		batchMode:      *batch,
@@ -390,7 +390,7 @@ func run() error {
 	readerDone.Add(1)
 	go func() {
 		defer readerDone.Done()
-		runReader(rings, *pollSleep, *batchSize, state, metrics)
+		runReader(rings, *pollSleep, *batchSize, state)
 	}()
 
 	// Input goroutine for interactive mode
@@ -426,6 +426,8 @@ func run() error {
 			readDropCounts(objs.DropCount, &metrics.bpfDrops)
 			display.render(state, frameMetrics{
 				drops:     snapshotDrops(metrics),
+				mapUsed:   readMapUsed(objs.MapUsedCount, mapCap),
+				mapCap:    mapCap,
 				ringStats: snapshotRingStats(rings, &ringAcc),
 				cpuTime:   getCPUTime(),
 			})
@@ -446,6 +448,8 @@ func run() error {
 	readDropCounts(objs.DropCount, &metrics.bpfDrops)
 	display.render(state, frameMetrics{
 		drops:     snapshotDrops(metrics),
+		mapUsed:   readMapUsed(objs.MapUsedCount, mapCap),
+		mapCap:    mapCap,
 		ringStats: snapshotRingStats(rings, &ringAvg{}),
 		cpuTime:   getCPUTime(),
 	})

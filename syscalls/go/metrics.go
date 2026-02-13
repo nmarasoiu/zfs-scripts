@@ -25,22 +25,21 @@ func (cs capacityStats) formatUsage(formatVal func(int64) string) string {
 
 // dropCounts holds per-reason BPF drop counters (read from kernel).
 type dropCounts struct {
-	ringFull  atomic.Uint64 // bpf_ringbuf_reserve failed
-	noStartTS atomic.Uint64 // sys_exit with no matching sys_enter
+	ringFull    atomic.Uint64 // bpf_ringbuf_reserve failed
+	lruEvict    atomic.Uint64 // sys_exit miss while map at capacity
+	startupMiss atomic.Uint64 // sys_exit miss while map below capacity (benign)
 }
 
 // runtimeMetrics groups atomic counters shared between goroutines.
 type runtimeMetrics struct {
 	bpfDrops dropCounts
-
-	// Go-side reader drops
-	goShortEvents atomic.Uint64 // rec.RawSample too short
 }
 
 func snapshotDrops(metrics *runtimeMetrics) frameDrops {
 	return frameDrops{
-		ringFull:  metrics.bpfDrops.ringFull.Load(),
-		noStartTS: metrics.bpfDrops.noStartTS.Load(),
+		ringFull:    metrics.bpfDrops.ringFull.Load(),
+		lruEvict:    metrics.bpfDrops.lruEvict.Load(),
+		startupMiss: metrics.bpfDrops.startupMiss.Load(),
 	}
 }
 
@@ -54,17 +53,20 @@ type ringStats struct {
 
 // frameDrops holds per-reason drop counts for a single display frame.
 type frameDrops struct {
-	ringFull  uint64 // BPF: ring buffer full
-	noStartTS uint64 // BPF: sys_exit without matching sys_enter
+	ringFull    uint64 // BPF: ring buffer full
+	lruEvict    uint64 // BPF: LRU eviction — map undersized
+	startupMiss uint64 // BPF: benign startup race
 }
 
 func (d frameDrops) total() uint64 {
-	return d.ringFull + d.noStartTS
+	return d.ringFull + d.lruEvict + d.startupMiss
 }
 
 // frameMetrics bundles the per-frame runtime metrics passed to render.
 type frameMetrics struct {
 	drops     frameDrops
+	mapUsed   int64 // current start_times occupancy (from BPF counter)
+	mapCap    int64 // start_times max_entries
 	ringStats *ringStats
 	cpuTime   time.Duration
 }

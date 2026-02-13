@@ -418,6 +418,43 @@ func TestRenderFooter_ContainsDropInfo(t *testing.T) {
 	}
 }
 
+func TestRenderFooter_WithMapStats(t *testing.T) {
+	d := &Display{}
+	var buf strings.Builder
+	d.renderFooter(&buf, 10*1e9, 5, frameMetrics{
+		mapUsed: 1234,
+		mapCap:  65536,
+	})
+	s := buf.String()
+	if !strings.Contains(s, "Map") {
+		t.Errorf("footer should contain Map info, got %q", s)
+	}
+	if !strings.Contains(s, "1.2K") {
+		t.Errorf("footer should contain formatted map used count, got %q", s)
+	}
+	if !strings.Contains(s, "65.5K") {
+		t.Errorf("footer should contain formatted map cap, got %q", s)
+	}
+}
+
+func TestRenderFooter_SplitDropReasons(t *testing.T) {
+	d := &Display{}
+	var buf strings.Builder
+	d.renderFooter(&buf, 10*1e9, 5, frameMetrics{
+		drops: frameDrops{ringFull: 10, lruEvict: 77, startupMiss: 33},
+	})
+	s := buf.String()
+	if !strings.Contains(s, "evict:") {
+		t.Errorf("footer should contain evict label, got %q", s)
+	}
+	if !strings.Contains(s, "startup:") {
+		t.Errorf("footer should contain startup label, got %q", s)
+	}
+	if !strings.Contains(s, "120") { // total = 10+77+33
+		t.Errorf("footer should contain total 120, got %q", s)
+	}
+}
+
 func TestRenderFooter_WithRingStats(t *testing.T) {
 	d := &Display{}
 	var buf strings.Builder

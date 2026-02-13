@@ -29,6 +29,24 @@ struct latency_event {
 // Force BTF type emission
 struct latency_event *unused_event __attribute__((unused));
 
+// Approximate count of entries currently in start_times.
+// Incremented on every sys_enter insert, decremented on explicit delete
+// (sys_exit) and on DROP_NO_START_TS (compensates for LRU evictions).
+// May briefly go negative at program startup; userspace clamps to 0.
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, __s64);
+} map_used_count SEC(".maps");
+
+static __always_inline void adj_map_used(__s64 delta) {
+    __u32 zero = 0;
+    __s64 *cnt = bpf_map_lookup_elem(&map_used_count, &zero);
+    if (cnt)
+        __sync_fetch_and_add(cnt, delta);
+}
+
 // Start timestamp per thread (LRU: kernel auto-evicts oldest on full)
 struct {
     __uint(type, BPF_MAP_TYPE_LRU_HASH);
@@ -55,14 +73,15 @@ struct {
 
 // Drop counters indexed by reason.
 enum drop_reason {
-    DROP_RING_FULL   = 0, // bpf_ringbuf_reserve returned NULL
-    DROP_NO_START_TS = 1, // sys_exit with no matching sys_enter (LRU eviction, startup race, or unknown)
-    DROP__MAX        = 2,
+    DROP_RING_FULL    = 0, // bpf_ringbuf_reserve returned NULL
+    DROP_LRU_EVICT    = 1, // sys_exit miss while map at capacity — map undersized
+    DROP_STARTUP_MISS = 2, // sys_exit miss while map below capacity — benign startup race
+    DROP__MAX         = 3,
 };
 
 struct {
     __uint(type, BPF_MAP_TYPE_ARRAY);
-    __uint(max_entries, 2); // DROP__MAX
+    __uint(max_entries, 3); // DROP__MAX
     __type(key, __u32);
     __type(value, __u64);
 } drop_count SEC(".maps");
@@ -101,6 +120,7 @@ int trace_syscall_enter(struct trace_event_raw_sys_enter *ctx) {
     __u64 ts = bpf_ktime_get_ns();
 
     bpf_map_update_elem(&start_times, &tid, &ts, BPF_ANY);
+    adj_map_used(1);
 
     return 0;
 }
@@ -119,13 +139,25 @@ int trace_syscall_exit(struct trace_event_raw_sys_exit *ctx) {
         __u32 id = ctx->id;
         if (id == 56 || id == 57 || id == 58 || id == 435)
             return 0;
-        inc_drop(DROP_NO_START_TS);
+        // Classify before decrementing: if map is at capacity, the miss
+        // was caused by LRU eviction; otherwise it's a startup race
+        // (thread was mid-syscall when we attached).
+        {
+            __u32 zero = 0;
+            __s64 *used = bpf_map_lookup_elem(&map_used_count, &zero);
+            if (used && *used >= MAX_ENTRIES)
+                inc_drop(DROP_LRU_EVICT);
+            else
+                inc_drop(DROP_STARTUP_MISS);
+        }
+        adj_map_used(-1);
         return 0;
     }
 
     // Copy value and delete before ring ops — single delete path.
     __u64 start_val = *start_ts;
     bpf_map_delete_elem(&start_times, &tid);
+    adj_map_used(-1);
 
     __u64 latency = bpf_ktime_get_ns() - start_val;
 
