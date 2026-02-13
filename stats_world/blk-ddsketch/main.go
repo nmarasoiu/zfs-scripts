@@ -58,7 +58,7 @@ var (
 
 // formatLatency formats a latency value (in us) to human-readable string
 func formatLatency(us float64) string {
-	if us < 100_000 {
+	if us < 10_000 {
 		return fmt.Sprintf("%.0fus", us)
 	}
 	if us < 1_000_000 {

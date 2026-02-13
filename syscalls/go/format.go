@@ -7,7 +7,7 @@ import (
 )
 
 func formatLatency(us int64) string {
-	if us < 100_000 {
+	if us < 10_000 {
 		return fmt.Sprintf("%dµs", us)
 	}
 	if us < 1_000_000 {
