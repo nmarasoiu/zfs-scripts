@@ -216,11 +216,54 @@ struct percpu_counters {     // 24 bytes — fits in one 64-byte cache line
    prefix overhead (~10-20ns) and the store buffer flush that `seq_cst` atomics
    impose.
 
-**Start map splitting follows the same principle.** The single `start_times`
-LRU hash is split into 4 maps (`start0`..`start3`), selected by `cpu_id % 4`.
-Most sys_exit lookups hit the local slot (same CPU as the matching sys_enter),
-avoiding cross-slot contention. The rare cross-CPU case (thread migration
-between enter and exit) falls back to scanning the other 3 slots.
+### Per-CPU isolation of all BPF data structures
+
+Every BPF map in the program is designed for minimal cross-CPU interaction.
+The table below summarizes the allocation strategy, who writes, and the
+remaining contention:
+
+| Structure | BPF type | Writer contention | Reader contention |
+|-----------|----------|-------------------|-------------------|
+| `counters` | `PERCPU_ARRAY` | **None** — plain stores to per-CPU memory | 10 Hz `bpf()` syscall from userspace |
+| `start0-3` | 4× `LRU_HASH` routed by `cpu%4` | Bucket spinlocks, near-zero (see below) | None — BPF-only access |
+| `events0-3` | 4× `RINGBUF` routed by `cpu%4` | CAS on `prod_pos`, ≤`ncpu/4` writers | Single goroutine busy-poll |
+| `target_comms` | `HASH` | None — read-only after init | RCU lookups, zero contention |
+
+**Why the start maps use 4 separate `LRU_HASH` instead of `PERCPU_HASH`.**
+~99% of syscall exits happen on the same CPU as the matching enter, so a
+per-CPU design seems natural. But `BPF_MAP_TYPE_PERCPU_HASH` doesn't actually
+help here — despite the name, it shares the hash table structure (same buckets,
+same bucket spinlocks). Only the *values* get per-CPU storage. Two CPUs
+inserting different TIDs that hash to the same bucket still contend on the same
+spinlock, identical to regular `HASH`. Additionally, `bpf_map_lookup_elem()`
+on a `PERCPU_HASH` returns only the current CPU's value — cross-CPU reads are
+impossible from BPF context. A thread that migrated between enter and exit
+would be an unrecoverable miss with no way to clean up the stale entry.
+
+Four separate regular `LRU_HASH` maps are strictly better: truly independent
+hash tables (separate buckets, separate locks, separate LRU lists), and any CPU
+can read any map for the rare fallback case. On the hot path (99% same-CPU),
+only the local slot's map is touched. On the ~1% migration path, the fallback
+scans 3 other maps (3 hash lookups) to recover the sample. This costs ~0.03
+extra lookups per syscall amortized — effectively free — while recovering real
+latency data that would otherwise be lost.
+
+Stale entries from migrations where even the fallback misses are handled by LRU
+eviction: the kernel auto-evicts the oldest entries when the map fills, and the
+`map_used` counter was already decremented on the miss, so accounting stays
+correct.
+
+**Ring buffers (`RINGBUF`) cannot be truly per-CPU.** There is no
+`PERCPU_RINGBUF` map type. The alternative is `BPF_MAP_TYPE_PERF_EVENT_ARRAY`,
+which does provide per-CPU rings, but at significant cost: it uses copy
+semantics (`bpf_perf_event_output` memcpy's the event) instead of the zero-copy
+`reserve`/`submit` pattern, memory is fixed per-CPU (can't share capacity when
+one CPU is busier), and the consumer model requires epoll or a per-CPU
+busy-poll reader. Our 4-ring split with `cpu_id % 4` routing covers 4-core
+systems with zero producer contention. On 8-core systems, 2 CPUs share each
+ring — the CAS on `prod_pos` is a single cache line that typically resolves in
+one retry. Increasing to 8 or 16 rings is a mechanical change (more map
+declarations, more switch cases) if needed for higher core counts.
 
 ## Build requirements
 
