@@ -8,7 +8,7 @@
 //
 // Usage: syscall-latency [-c procs] [-n top_n] [-sort column]
 //
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -target bpfel -type latency_event bpf bpf/syscall_latency.c -- -I/usr/include -I.
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -target bpfel -type latency_event -type percpu_counters bpf bpf/syscall_latency.c -- -I/usr/include -I.
 
 package main
 
@@ -212,6 +212,18 @@ func snapshotRingStats(rings *ringpoll.Group, acc *ringAvg) *ringStats {
 	}
 }
 
+func snapshotMapStats(used int64, mapCap int64, acc *mapAccumulator) *mapStats {
+	acc.add(used)
+	return &mapStats{
+		capacityStats: capacityStats{
+			avg: acc.avg(),
+			max: acc.max,
+			cap: mapCap,
+		},
+		cur: used,
+	}
+}
+
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintf(os.Stderr, "syscall-latency: %v\n", err)
@@ -305,8 +317,12 @@ func run() error {
 	for _, name := range []string{"events0", "events1", "events2", "events3"} {
 		spec.Maps[name].MaxEntries = ringSize
 	}
-	for _, name := range []string{"start_times"} {
-		spec.Maps[name].MaxEntries = uint32(*mapEntriesFlag)
+	slotEntries := uint32(*mapEntriesFlag) / 4
+	if slotEntries == 0 {
+		slotEntries = 1
+	}
+	for _, name := range []string{"start0", "start1", "start2", "start3"} {
+		spec.Maps[name].MaxEntries = slotEntries
 	}
 
 	objs := bpfObjects{}
@@ -341,7 +357,7 @@ func run() error {
 	defer rings.Cleanup()
 
 	state := newState(*maxSketches, *alphaFlag)
-	mapCap := int64(objs.StartTimes.MaxEntries())
+	mapCap := int64(objs.Start0.MaxEntries()) * 4
 	interactive := !*batch && isTerminal(int(os.Stdin.Fd())) && isTerminal(int(os.Stdout.Fd()))
 	display := &Display{
 		batchMode:      *batch,
@@ -404,6 +420,7 @@ func run() error {
 	go func() {
 		defer displayTicker.Stop()
 		var ringAcc ringAvg
+		var mapAcc mapAccumulator
 		for {
 			select {
 			case <-done:
@@ -423,11 +440,11 @@ func run() error {
 				}
 			}
 		render:
-			readDropCounts(objs.DropCount, &metrics.bpfDrops)
+			mapUsed, dropRing, dropMiss := readCounters(objs.Counters, mapCap)
+			metrics.bpfDrops = dropCounts{ringFull: dropRing, miss: dropMiss}
 			display.render(state, frameMetrics{
 				drops:     snapshotDrops(metrics),
-				mapUsed:   readMapUsed(objs.MapUsedCount, mapCap),
-				mapCap:    mapCap,
+				mapStats:  snapshotMapStats(mapUsed, mapCap, &mapAcc),
 				ringStats: snapshotRingStats(rings, &ringAcc),
 				cpuTime:   getCPUTime(),
 			})
@@ -445,13 +462,15 @@ func run() error {
 	<-done
 	readerDone.Wait()
 
-	readDropCounts(objs.DropCount, &metrics.bpfDrops)
-	display.render(state, frameMetrics{
-		drops:     snapshotDrops(metrics),
-		mapUsed:   readMapUsed(objs.MapUsedCount, mapCap),
-		mapCap:    mapCap,
-		ringStats: snapshotRingStats(rings, &ringAvg{}),
-		cpuTime:   getCPUTime(),
-	})
+	{
+		mapUsed, dropRing, dropMiss := readCounters(objs.Counters, mapCap)
+		metrics.bpfDrops = dropCounts{ringFull: dropRing, miss: dropMiss}
+		display.render(state, frameMetrics{
+			drops:     snapshotDrops(metrics),
+			mapStats:  snapshotMapStats(mapUsed, mapCap, &mapAccumulator{}),
+			ringStats: snapshotRingStats(rings, &ringAvg{}),
+			cpuTime:   getCPUTime(),
+		})
+	}
 	return nil
 }

@@ -19,6 +19,12 @@ type bpfLatencyEvent struct {
 	Comm      [16]int8
 }
 
+type bpfPercpuCounters struct {
+	MapUsed  int64
+	DropRing uint64
+	DropMiss uint64
+}
+
 // loadBpf returns the embedded CollectionSpec for bpf.
 func loadBpf() (*ebpf.CollectionSpec, error) {
 	reader := bytes.NewReader(_BpfBytes)
@@ -68,14 +74,16 @@ type bpfProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type bpfMapSpecs struct {
-	DropCount    *ebpf.MapSpec `ebpf:"drop_count"`
-	Events0      *ebpf.MapSpec `ebpf:"events0"`
-	Events1      *ebpf.MapSpec `ebpf:"events1"`
-	Events2      *ebpf.MapSpec `ebpf:"events2"`
-	Events3      *ebpf.MapSpec `ebpf:"events3"`
-	MapUsedCount *ebpf.MapSpec `ebpf:"map_used_count"`
-	StartTimes   *ebpf.MapSpec `ebpf:"start_times"`
-	TargetComms  *ebpf.MapSpec `ebpf:"target_comms"`
+	Counters    *ebpf.MapSpec `ebpf:"counters"`
+	Events0     *ebpf.MapSpec `ebpf:"events0"`
+	Events1     *ebpf.MapSpec `ebpf:"events1"`
+	Events2     *ebpf.MapSpec `ebpf:"events2"`
+	Events3     *ebpf.MapSpec `ebpf:"events3"`
+	Start0      *ebpf.MapSpec `ebpf:"start0"`
+	Start1      *ebpf.MapSpec `ebpf:"start1"`
+	Start2      *ebpf.MapSpec `ebpf:"start2"`
+	Start3      *ebpf.MapSpec `ebpf:"start3"`
+	TargetComms *ebpf.MapSpec `ebpf:"target_comms"`
 }
 
 // bpfObjects contains all objects after they have been loaded into the kernel.
@@ -97,25 +105,29 @@ func (o *bpfObjects) Close() error {
 //
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type bpfMaps struct {
-	DropCount    *ebpf.Map `ebpf:"drop_count"`
-	Events0      *ebpf.Map `ebpf:"events0"`
-	Events1      *ebpf.Map `ebpf:"events1"`
-	Events2      *ebpf.Map `ebpf:"events2"`
-	Events3      *ebpf.Map `ebpf:"events3"`
-	MapUsedCount *ebpf.Map `ebpf:"map_used_count"`
-	StartTimes   *ebpf.Map `ebpf:"start_times"`
-	TargetComms  *ebpf.Map `ebpf:"target_comms"`
+	Counters    *ebpf.Map `ebpf:"counters"`
+	Events0     *ebpf.Map `ebpf:"events0"`
+	Events1     *ebpf.Map `ebpf:"events1"`
+	Events2     *ebpf.Map `ebpf:"events2"`
+	Events3     *ebpf.Map `ebpf:"events3"`
+	Start0      *ebpf.Map `ebpf:"start0"`
+	Start1      *ebpf.Map `ebpf:"start1"`
+	Start2      *ebpf.Map `ebpf:"start2"`
+	Start3      *ebpf.Map `ebpf:"start3"`
+	TargetComms *ebpf.Map `ebpf:"target_comms"`
 }
 
 func (m *bpfMaps) Close() error {
 	return _BpfClose(
-		m.DropCount,
+		m.Counters,
 		m.Events0,
 		m.Events1,
 		m.Events2,
 		m.Events3,
-		m.MapUsedCount,
-		m.StartTimes,
+		m.Start0,
+		m.Start1,
+		m.Start2,
+		m.Start3,
 		m.TargetComms,
 	)
 }

@@ -491,15 +491,13 @@ func (d *Display) renderFooter(buf *strings.Builder, elapsed time.Duration, nPro
 	if elapsed.Seconds() > 0 {
 		dropRate = float64(total) / elapsed.Seconds()
 	}
-	dropDetail := fmt.Sprintf("ring:%s evict:%s startup:%s",
+	dropDetail := fmt.Sprintf("ring:%s miss:%s",
 		formatCount(int64(frame.drops.ringFull)),
-		formatCount(int64(frame.drops.lruEvict)),
-		formatCount(int64(frame.drops.startupMiss)))
+		formatCount(int64(frame.drops.miss)))
 	mapInfo := ""
-	if frame.mapCap > 0 {
-		pct := float64(frame.mapUsed) / float64(frame.mapCap) * 100
-		mapInfo = fmt.Sprintf(" | Map %s/%s (%.1f%%)",
-			formatCount(frame.mapUsed), formatCount(frame.mapCap), pct)
+	if frame.mapStats != nil {
+		mapInfo = fmt.Sprintf(" | Map %s",
+			frame.mapStats.formatUsage(formatCount))
 	}
 	ringInfo := ""
 	if frame.ringStats != nil {

@@ -18,39 +18,24 @@ func configureBPFFilters(objs *bpfObjects, focusList []string) error {
 	return nil
 }
 
-// BPF drop reason indices — must match enum drop_reason in syscall_latency.c.
-const (
-	dropRingFull    uint32 = 0
-	dropLRUEvict    uint32 = 1
-	dropStartupMiss uint32 = 2
-)
-
-func readDropCounts(m *ebpf.Map, dst *dropCounts) {
-	var val uint64
-	if err := m.Lookup(dropRingFull, &val); err == nil {
-		dst.ringFull.Store(val)
+// readCounters reads the per-CPU counters map, sums across all CPUs,
+// and returns aggregate map_used (clamped to [0, mapCap]), dropRing, dropMiss.
+func readCounters(m *ebpf.Map, mapCap int64) (mapUsed int64, dropRing, dropMiss uint64) {
+	var vals []bpfPercpuCounters
+	if err := m.Lookup(uint32(0), &vals); err != nil {
+		return 0, 0, 0
 	}
-	if err := m.Lookup(dropLRUEvict, &val); err == nil {
-		dst.lruEvict.Store(val)
+	var used int64
+	for _, v := range vals {
+		used += v.MapUsed
+		dropRing += v.DropRing
+		dropMiss += v.DropMiss
 	}
-	if err := m.Lookup(dropStartupMiss, &val); err == nil {
-		dst.startupMiss.Store(val)
+	if used < 0 {
+		used = 0
 	}
+	if used > mapCap {
+		used = mapCap
+	}
+	return used, dropRing, dropMiss
 }
-
-// readMapUsed reads the map_used_count BPF array counter.
-// Returns approximate start_times occupancy, clamped to [0, cap].
-func readMapUsed(m *ebpf.Map, cap int64) int64 {
-	var val int64
-	if err := m.Lookup(uint32(0), &val); err != nil {
-		return 0
-	}
-	if val < 0 {
-		return 0
-	}
-	if val > cap {
-		return cap
-	}
-	return val
-}
-

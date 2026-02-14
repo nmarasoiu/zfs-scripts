@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -23,23 +22,21 @@ func (cs capacityStats) formatUsage(formatVal func(int64) string) string {
 		formatVal(cs.max), formatVal(cs.cap), maxPct)
 }
 
-// dropCounts holds per-reason BPF drop counters (read from kernel).
+// dropCounts holds BPF drop counters (read from kernel per-CPU map).
 type dropCounts struct {
-	ringFull    atomic.Uint64 // bpf_ringbuf_reserve failed
-	lruEvict    atomic.Uint64 // sys_exit miss while map at capacity
-	startupMiss atomic.Uint64 // sys_exit miss while map below capacity (benign)
+	ringFull uint64
+	miss     uint64
 }
 
-// runtimeMetrics groups atomic counters shared between goroutines.
+// runtimeMetrics groups counters shared between goroutines.
 type runtimeMetrics struct {
 	bpfDrops dropCounts
 }
 
 func snapshotDrops(metrics *runtimeMetrics) frameDrops {
 	return frameDrops{
-		ringFull:    metrics.bpfDrops.ringFull.Load(),
-		lruEvict:    metrics.bpfDrops.lruEvict.Load(),
-		startupMiss: metrics.bpfDrops.startupMiss.Load(),
+		ringFull: metrics.bpfDrops.ringFull,
+		miss:     metrics.bpfDrops.miss,
 	}
 }
 
@@ -53,20 +50,24 @@ type ringStats struct {
 
 // frameDrops holds per-reason drop counts for a single display frame.
 type frameDrops struct {
-	ringFull    uint64 // BPF: ring buffer full
-	lruEvict    uint64 // BPF: LRU eviction — map undersized
-	startupMiss uint64 // BPF: benign startup race
+	ringFull uint64 // BPF: ring buffer full
+	miss     uint64 // BPF: sys_exit miss (evict or startup)
 }
 
 func (d frameDrops) total() uint64 {
-	return d.ringFull + d.lruEvict + d.startupMiss
+	return d.ringFull + d.miss
+}
+
+// mapStats is a point-in-time snapshot of map occupancy metrics.
+type mapStats struct {
+	capacityStats
+	cur int64 // current occupancy
 }
 
 // frameMetrics bundles the per-frame runtime metrics passed to render.
 type frameMetrics struct {
 	drops     frameDrops
-	mapUsed   int64 // current start_times occupancy (from BPF counter)
-	mapCap    int64 // start_times max_entries
+	mapStats  *mapStats
 	ringStats *ringStats
 	cpuTime   time.Duration
 }
@@ -97,4 +98,26 @@ func (ra *ringAvg) avg() int64 {
 		return 0
 	}
 	return ra.sum / ra.samples
+}
+
+// mapAccumulator tracks running average and high-water mark of map occupancy.
+type mapAccumulator struct {
+	sum     int64
+	samples int64
+	max     int64
+}
+
+func (ma *mapAccumulator) add(used int64) {
+	ma.sum += used
+	ma.samples++
+	if used > ma.max {
+		ma.max = used
+	}
+}
+
+func (ma *mapAccumulator) avg() int64 {
+	if ma.samples == 0 {
+		return 0
+	}
+	return ma.sum / ma.samples
 }
