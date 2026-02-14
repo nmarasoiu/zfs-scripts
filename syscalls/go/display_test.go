@@ -471,17 +471,17 @@ func TestRenderFooter_WithRingStats(t *testing.T) {
 	}
 }
 
-// --- formatSummaryRow ---
+// --- formatRow ---
 
 var testQuantiles = []float64{0.25, 0.50, 0.75, 0.90, 0.99, 0.999}
 
-func TestFormatSummaryRow_NonZero(t *testing.T) {
+func TestFormatRow_NonZero(t *testing.T) {
 	sk := newTestSketch(0.25)
 	for i := int64(1); i <= 100; i++ {
 		sk.Add(float64(i))
 	}
 	d := &Display{quantiles: testQuantiles}
-	row := d.formatSummaryRow("tor/read", sk, 10.0)
+	row := d.formatRow("tor/read", 28, sk, 10.0)
 	if !strings.Contains(row, "tor/read") {
 		t.Errorf("row should contain name, got %q", row)
 	}
@@ -490,39 +490,24 @@ func TestFormatSummaryRow_NonZero(t *testing.T) {
 	}
 }
 
-func TestFormatSummaryRow_Zero(t *testing.T) {
+func TestFormatRow_Zero(t *testing.T) {
 	sk := newTestSketch(0.25)
 	d := &Display{quantiles: testQuantiles}
-	row := d.formatSummaryRow("empty", sk, 10.0)
+	row := d.formatRow("empty", 28, sk, 10.0)
 	if !strings.Contains(row, "-") {
 		t.Errorf("zero row should contain dashes, got %q", row)
 	}
 }
 
-// --- renderDetailRow ---
-
-func TestRenderDetailRow_NonZero(t *testing.T) {
+func TestFormatRow_DynamicWidth(t *testing.T) {
 	sk := newTestSketch(0.25)
 	for i := int64(1); i <= 50; i++ {
 		sk.Add(float64(i))
 	}
 	d := &Display{quantiles: testQuantiles}
-	var buf strings.Builder
-	d.renderDetailRow(&buf, "tor/read        ", sk, 10.0)
-	s := buf.String()
-	if !strings.Contains(s, "tor/read") {
-		t.Errorf("row should contain name, got %q", s)
-	}
-}
-
-func TestRenderDetailRow_Zero(t *testing.T) {
-	sk := newTestSketch(0.25)
-	d := &Display{quantiles: testQuantiles}
-	var buf strings.Builder
-	d.renderDetailRow(&buf, "empty           ", sk, 10.0)
-	s := buf.String()
-	if !strings.Contains(s, "-") {
-		t.Errorf("zero row should contain dashes, got %q", s)
+	row := d.formatRow("tor/read", 16, sk, 10.0)
+	if !strings.Contains(row, "tor/read") {
+		t.Errorf("row should contain name, got %q", row)
 	}
 }
 

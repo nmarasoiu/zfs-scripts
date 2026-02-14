@@ -216,18 +216,58 @@ func (d *Display) sortIndicator(col string, width int) string {
 	return fmt.Sprintf("%*s", width, col)
 }
 
-// summaryLineWidth computes the width of a summary row given the number of percentile columns.
-// Layout: %-28s │ avg [pcts...] max │ samples rate
-func summaryLineWidth(numPcts int) int {
-	// 28 (name) + 3 (│) + 9 (avg) + 9*numPcts + 8 (max) + 3 (│) + 9 (samples) + 1 + 9 (rate)
-	return 28 + 3 + 9*numPcts + 17 + 3 + 19
+// rowWidth returns total row width: nameWidth + separator + data columns.
+// Layout: %-nameWidth + " │" + avg [pcts...] max + " │" + samples + rate
+func (d *Display) rowWidth(nameWidth int) int {
+	// nameWidth + 2 ( │) + 9*(2+numPcts) (avg + pcts + max) + 3 ( │ ) + 9 (samples) + 1 ( ) + 9 (rate)
+	return nameWidth + 2 + 9*(2+len(d.quantiles)) + 3 + 19
 }
 
-// tableDataWidth computes the data area width (after label) for the table view.
-// Layout: │ avg [pcts...] max │ samples rate
-func tableDataWidth(numPcts int) int {
-	// 2 (│) + 9 (avg) + 9*numPcts + 9 (max) + 3 (│) + 9 (samples) + 1 + 9 (rate)
-	return 9*numPcts + 42
+// writeHeader writes the column header line: "LIFETIME │ avg [pcts...] max │ samples rate"
+// followed by a dash separator line.
+func (d *Display) writeHeader(buf *strings.Builder, nameWidth int, lineWidth int) {
+	nameFmt := fmt.Sprintf("%%-%ds", nameWidth)
+	buf.WriteString(fmt.Sprintf(nameFmt, "LIFETIME"))
+	buf.WriteString(" │")
+	fmt.Fprintf(buf, " %s", d.sortIndicator("avg", 8))
+	for _, q := range d.quantiles {
+		fmt.Fprintf(buf, " %s", d.sortIndicator(quantileHeader(q), 8))
+	}
+	fmt.Fprintf(buf, " %s │ %s %s\n", d.sortIndicator("max", 8), d.sortIndicator("samples", 9), d.sortIndicator("rate", 9))
+	buf.WriteString(strings.Repeat("-", lineWidth))
+	buf.WriteString("\n")
+}
+
+// formatRow formats a single data row with the given name, sketch, and elapsed time.
+// The name is padded/truncated to nameWidth. No trailing newline.
+func (d *Display) formatRow(name string, nameWidth int, sketch *ddsketch.DDSketch, elapsedSecs float64) string {
+	nameFmt := fmt.Sprintf("%%-%ds", nameWidth)
+	paddedName := fmt.Sprintf(nameFmt, truncateProcLabel(name, nameWidth))
+
+	var buf strings.Builder
+	numPcts := len(d.quantiles)
+	count := uint64(sketch.GetCount())
+	if count == 0 {
+		buf.WriteString(paddedName)
+		buf.WriteString(" │")
+		for i := 0; i < 2+numPcts; i++ {
+			fmt.Fprintf(&buf, " %8s", "-")
+		}
+		fmt.Fprintf(&buf, " │ %9s %9s", "0", "-")
+		return buf.String()
+	}
+	avg := int64(sketch.GetSum() / sketch.GetCount())
+	maxVal, _ := sketch.GetMaxValue()
+
+	buf.WriteString(paddedName)
+	buf.WriteString(" │")
+	fmt.Fprintf(&buf, " %s", formatLatencyPadded(avg))
+	percentiles := d.sketchPercentiles(sketch)
+	for _, pct := range percentiles {
+		fmt.Fprintf(&buf, " %s", formatLatencyPadded(pct))
+	}
+	fmt.Fprintf(&buf, " %s │ %9s %9s", formatLatencyPadded(int64(maxVal)), formatCount(int64(count)), formatRate(count, elapsedSecs))
+	return buf.String()
 }
 
 func (d *Display) resetCursor() {
@@ -521,55 +561,19 @@ func (d *Display) renderTable(buf *strings.Builder, procStats map[string]map[uin
 
 	// Section title
 	title := strings.Join(d.focusProcesses, ",")
-	lineWidth := labelWidth + tableDataWidth(len(d.quantiles))
+	lineWidth := d.rowWidth(labelWidth)
 	sectionHeader(buf, fmt.Sprintf("%s (%d)", title, shown), lineWidth)
 
-	// Column headers: LIFETIME │ avg [pcts...] max │ samples rate
-	nameFmt := fmt.Sprintf("%%-%ds", labelWidth)
-	buf.WriteString(fmt.Sprintf(nameFmt, "LIFETIME"))
-	buf.WriteString(" │")
-	fmt.Fprintf(buf, " %s", d.sortIndicator("avg", 8))
-	for _, q := range d.quantiles {
-		fmt.Fprintf(buf, " %s", d.sortIndicator(quantileHeader(q), 8))
-	}
-	fmt.Fprintf(buf, " %s │ %s %s\n", d.sortIndicator("max", 8), d.sortIndicator("samples", 9), d.sortIndicator("rate", 9))
-	buf.WriteString(strings.Repeat("-", lineWidth))
-	buf.WriteString("\n")
+	d.writeHeader(buf, labelWidth, lineWidth)
 
 	// Data rows
 	for i := 0; i < shown; i++ {
 		e := entries[i]
-		name := fmt.Sprintf(nameFmt, e.label)
-		d.renderDetailRow(buf, name, e.sketch, elapsedSecs)
+		buf.WriteString(d.formatRow(e.label, labelWidth, e.sketch, elapsedSecs))
+		buf.WriteByte('\n')
 	}
 
 	buf.WriteString("\n")
-}
-
-func (d *Display) renderDetailRow(buf *strings.Builder, name string, sketch *ddsketch.DDSketch, elapsedSecs float64) {
-	numPcts := len(d.quantiles)
-	count := uint64(sketch.GetCount())
-	if count == 0 {
-		buf.WriteString(name)
-		buf.WriteString(" │")
-		// avg + percentiles + max = 2 + numPcts dashes
-		for i := 0; i < 2+numPcts; i++ {
-			fmt.Fprintf(buf, " %8s", "-")
-		}
-		fmt.Fprintf(buf, " │ %9s %9s\n", "0", "-")
-		return
-	}
-	avg := int64(sketch.GetSum() / sketch.GetCount())
-	maxVal, _ := sketch.GetMaxValue()
-
-	buf.WriteString(name)
-	buf.WriteString(" │")
-	fmt.Fprintf(buf, " %s", formatLatencyPadded(avg))
-	percentiles := d.sketchPercentiles(sketch)
-	for _, pct := range percentiles {
-		fmt.Fprintf(buf, " %s", formatLatencyPadded(pct))
-	}
-	fmt.Fprintf(buf, " %s │ %9s %9s\n", formatLatencyPadded(int64(maxVal)), formatCount(int64(count)), formatRate(count, elapsedSecs))
 }
 
 func (d *Display) renderSummary(buf *strings.Builder, procStats map[string]map[uint32]*ddsketch.DDSketch, elapsed time.Duration) {
@@ -585,18 +589,16 @@ func (d *Display) renderSummary(buf *strings.Builder, procStats map[string]map[u
 		totalShown = len(entries)
 	}
 
-	colWidth := summaryLineWidth(len(d.quantiles))
+	const nameWidth = 28
+	colWidth := d.rowWidth(nameWidth)
 	dualWidth := colWidth + 3 + colWidth
 
-	// Column headers: LIFETIME │ avg [pcts...] max │ samples rate
+	// Dual column headers
 	var header strings.Builder
-	fmt.Fprintf(&header, "%-28s │", "LIFETIME")
-	fmt.Fprintf(&header, " %s", d.sortIndicator("avg", 8))
-	for _, q := range d.quantiles {
-		fmt.Fprintf(&header, " %s", d.sortIndicator(quantileHeader(q), 8))
-	}
-	fmt.Fprintf(&header, " %s │ %s %s", d.sortIndicator("max", 8), d.sortIndicator("samples", 9), d.sortIndicator("rate", 9))
-	headerStr := header.String()
+	d.writeHeader(&header, nameWidth, colWidth)
+	// writeHeader produces "header\n---\n"; extract the header line (before first \n)
+	headerLines := strings.SplitN(header.String(), "\n", 3)
+	headerStr := headerLines[0]
 	fmt.Fprintf(buf, "%s │ %s\n", headerStr, headerStr)
 	buf.WriteString(strings.Repeat("-", dualWidth))
 	buf.WriteString("\n")
@@ -626,13 +628,13 @@ func (d *Display) renderSummary(buf *strings.Builder, procStats map[string]map[u
 		var leftStr, rightStr string
 
 		if i < len(leftSlice) {
-			leftStr = d.formatSummaryRow(leftSlice[i].label, leftSlice[i].sketch, totalSecs)
+			leftStr = d.formatRow(leftSlice[i].label, nameWidth, leftSlice[i].sketch, totalSecs)
 		} else {
 			leftStr = strings.Repeat(" ", colWidth)
 		}
 
 		if i < len(rightSlice) {
-			rightStr = d.formatSummaryRow(rightSlice[i].label, rightSlice[i].sketch, totalSecs)
+			rightStr = d.formatRow(rightSlice[i].label, nameWidth, rightSlice[i].sketch, totalSecs)
 		} else {
 			rightStr = strings.Repeat(" ", colWidth)
 		}
@@ -644,33 +646,6 @@ func (d *Display) renderSummary(buf *strings.Builder, procStats map[string]map[u
 	title := fmt.Sprintf("Process × Syscall (top %d)", totalShown)
 	legend := d.summaryBarLegend()
 	fmt.Fprintf(buf, "%s\n", buildSepLine(dualWidth, title, legend))
-}
-
-func (d *Display) formatSummaryRow(name string, sketch *ddsketch.DDSketch, secs float64) string {
-	name = truncateProcLabel(name, 28)
-	var buf strings.Builder
-	numPcts := len(d.quantiles)
-	count := uint64(sketch.GetCount())
-	if count == 0 {
-		fmt.Fprintf(&buf, "%-28s │", name)
-		// avg + percentiles + max = 2 + numPcts dashes
-		for i := 0; i < 2+numPcts; i++ {
-			fmt.Fprintf(&buf, " %8s", "-")
-		}
-		fmt.Fprintf(&buf, " │ %9s %9s", "0", "-")
-		return buf.String()
-	}
-	avg := int64(sketch.GetSum() / sketch.GetCount())
-	maxVal, _ := sketch.GetMaxValue()
-
-	fmt.Fprintf(&buf, "%-28s │", name)
-	fmt.Fprintf(&buf, " %s", formatLatencyPadded(avg))
-	percentiles := d.sketchPercentiles(sketch)
-	for _, pct := range percentiles {
-		fmt.Fprintf(&buf, " %s", formatLatencyPadded(pct))
-	}
-	fmt.Fprintf(&buf, " %s │ %9s %9s", formatLatencyPadded(int64(maxVal)), formatCount(int64(count)), formatRate(count, secs))
-	return buf.String()
 }
 
 // renderProcPanel builds the right-side top-processes panel lines.
