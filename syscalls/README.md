@@ -164,13 +164,63 @@ syscalls (~200ns for `getpid`).
   contention between the reader and display goroutines
 - **String interning**: process comm strings are interned to avoid ~80K
   allocations/sec from repeated byte-to-string conversions
-- **LRU maps in BPF**: `start_times` and `syscall_ids` use `LRU_HASH` so the
-  kernel auto-evicts stale entries — no userspace cleanup needed
+- **LRU maps in BPF**: start maps use `LRU_HASH` so the kernel auto-evicts
+  stale entries — no userspace cleanup needed
 - **Single-writer stats**: `ringAvg`, `commIntern`, and poll counters are
   goroutine-local, avoiding atomic operations in the hot path
 - **Snapshot publishing**: ring buffer stats are published via a single
   `atomic.Pointer` swap instead of 7 separate atomic loads, giving the display
   goroutine a consistent view
+
+### Per-CPU counters and cache coherence
+
+The BPF program needs to track map occupancy (entries inserted minus removed)
+and drop counts (ring-full, exit-miss). An earlier design used global
+`BPF_MAP_TYPE_ARRAY` counters with `__sync_fetch_and_add` — a single cache line
+hammered by every CPU on every syscall via x86 `LOCK XADD`. At 100K+ syscalls/sec
+this causes ~100ns of cache-line bouncing per operation (MESI invalidation
+round-trips between cores).
+
+The current design uses a `BPF_MAP_TYPE_PERCPU_ARRAY` with a single struct:
+
+```c
+struct percpu_counters {     // 24 bytes — fits in one 64-byte cache line
+    __s64 map_used;          // offset 0:  +1 enter, -1 exit
+    __u64 drop_ring;         // offset 8:  ring reserve failures
+    __u64 drop_miss;         // offset 16: sys_exit with no matching enter
+};
+```
+
+**Why this is optimal (no padding needed):**
+
+1. **Per-CPU allocator isolates CPUs.** The kernel's `__alloc_percpu()` places
+   each CPU's copy at a separate address in that CPU's per-CPU memory region.
+   CPU 0's struct and CPU 1's struct are never on the same cache line — false
+   sharing between CPUs is impossible by construction.
+
+2. **All 3 fields share one cache line.** At 24 bytes the struct fits well
+   within a 64-byte line. Since there's a single writer (the BPF program on
+   that CPU), the first write acquires the line in Modified state and subsequent
+   writes are pure L1 hits — no coherence traffic. Splitting fields across
+   lines would cost extra L1 misses for no benefit.
+
+3. **Reader cost is negligible.** Userspace reads all CPUs' slots via a single
+   `bpf()` syscall (`Lookup` on the per-CPU array) at display rate (10 Hz).
+   The kernel iterates `for_each_possible_cpu()` and memcpy's each slot. This
+   pulls each CPU's line from Modified to Shared once per 100ms — the writer
+   won't notice the occasional downgrade.
+
+4. **No atomics in the hot path.** Per-CPU writes are plain stores (`c->map_used++`),
+   not `__sync_fetch_and_add`. The per-CPU guarantee means no other CPU touches
+   the same memory, so atomics are unnecessary. This avoids both the `LOCK`
+   prefix overhead (~10-20ns) and the store buffer flush that `seq_cst` atomics
+   impose.
+
+**Start map splitting follows the same principle.** The single `start_times`
+LRU hash is split into 4 maps (`start0`..`start3`), selected by `cpu_id % 4`.
+Most sys_exit lookups hit the local slot (same CPU as the matching sys_enter),
+avoiding cross-slot contention. The rare cross-CPU case (thread migration
+between enter and exit) falls back to scanning the other 3 slots.
 
 ## Build requirements
 
