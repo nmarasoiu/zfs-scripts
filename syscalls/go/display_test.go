@@ -175,7 +175,7 @@ func TestFilterStatsGeneral_CaseInsensitive(t *testing.T) {
 
 func TestCollectProcessSummaries_AggregatesAcrossSyscalls(t *testing.T) {
 	procCounters := map[string]*processCounter{
-		"tor": {count: 150, sum: 7500},
+		"tor": {count: 150},
 	}
 
 	summaries := testDisplay("rate").collectProcessSummaries(procCounters, 10.0)
@@ -192,9 +192,9 @@ func TestCollectProcessSummaries_AggregatesAcrossSyscalls(t *testing.T) {
 
 func TestCollectProcessSummaries_SortedByRateDesc(t *testing.T) {
 	procCounters := map[string]*processCounter{
-		"low":  {count: 10, sum: 100},
-		"high": {count: 100, sum: 1000},
-		"mid":  {count: 50, sum: 500},
+		"low":  {count: 10},
+		"high": {count: 100},
+		"mid":  {count: 50},
 	}
 
 	summaries := testDisplay("rate").collectProcessSummaries(procCounters, 1.0)
@@ -214,7 +214,7 @@ func TestCollectProcessSummaries_SortedByRateDesc(t *testing.T) {
 
 func TestCollectProcessSummaries_ZeroElapsed(t *testing.T) {
 	procCounters := map[string]*processCounter{
-		"p": {count: 10, sum: 100},
+		"p": {count: 10},
 	}
 
 	summaries := testDisplay("rate").collectProcessSummaries(procCounters, 0)
@@ -508,7 +508,7 @@ func TestRenderDetailRow_NonZero(t *testing.T) {
 	}
 	d := &Display{quantiles: testQuantiles}
 	var buf strings.Builder
-	d.renderDetailRow(&buf, "tor/read        ", sk)
+	d.renderDetailRow(&buf, "tor/read        ", sk, 10.0)
 	s := buf.String()
 	if !strings.Contains(s, "tor/read") {
 		t.Errorf("row should contain name, got %q", s)
@@ -519,7 +519,7 @@ func TestRenderDetailRow_Zero(t *testing.T) {
 	sk := newTestSketch(0.25)
 	d := &Display{quantiles: testQuantiles}
 	var buf strings.Builder
-	d.renderDetailRow(&buf, "empty           ", sk)
+	d.renderDetailRow(&buf, "empty           ", sk, 10.0)
 	s := buf.String()
 	if !strings.Contains(s, "-") {
 		t.Errorf("zero row should contain dashes, got %q", s)
@@ -531,8 +531,9 @@ func TestRenderDetailRow_Zero(t *testing.T) {
 func TestAvailableSortColumns_SummaryView(t *testing.T) {
 	d := &Display{quantiles: []float64{0.50, 0.99}}
 	cols := d.availableSortColumns()
-	// Summary view: avg, p50, p99, max, samples, rate, time
-	expected := []string{"avg", "p50", "p99", "max", "samples", "rate", "time"}
+	// Summary view: avg, p50, p99, max, samples, rate
+	expected := []string{"avg", "p50", "p99", "max", "samples", "rate"}
+
 	if len(cols) != len(expected) {
 		t.Fatalf("cols = %v, want %v", cols, expected)
 	}
@@ -546,8 +547,8 @@ func TestAvailableSortColumns_SummaryView(t *testing.T) {
 func TestAvailableSortColumns_TableView(t *testing.T) {
 	d := &Display{focusProcesses: []string{"tor"}, quantiles: []float64{0.50, 0.99}}
 	cols := d.availableSortColumns()
-	// Table view: avg, p50, p99, max, samples, time (no rate)
-	expected := []string{"avg", "p50", "p99", "max", "samples", "time"}
+	// Table view: avg, p50, p99, max, samples, rate
+	expected := []string{"avg", "p50", "p99", "max", "samples", "rate"}
 	if len(cols) != len(expected) {
 		t.Fatalf("cols = %v, want %v", cols, expected)
 	}

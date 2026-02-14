@@ -175,9 +175,6 @@ func TestState_ProcCountersSurviveEviction(t *testing.T) {
 		if pcA.count != 1 {
 			t.Errorf("a counter count = %d, want 1", pcA.count)
 		}
-		if pcA.sum != 10 {
-			t.Errorf("a counter sum = %d, want 10", pcA.sum)
-		}
 	})
 }
 
@@ -198,9 +195,6 @@ func TestState_ProcCountersAccumulateAcrossSyscalls(t *testing.T) {
 		if torPC.count != 3 {
 			t.Errorf("tor count = %d, want 3", torPC.count)
 		}
-		if torPC.sum != 600 {
-			t.Errorf("tor sum = %d, want 600", torPC.sum)
-		}
 
 		sshdPC := v.ProcCounters["sshd"]
 		if sshdPC == nil {
@@ -208,9 +202,6 @@ func TestState_ProcCountersAccumulateAcrossSyscalls(t *testing.T) {
 		}
 		if sshdPC.count != 1 {
 			t.Errorf("sshd count = %d, want 1", sshdPC.count)
-		}
-		if sshdPC.sum != 50 {
-			t.Errorf("sshd sum = %d, want 50", sshdPC.sum)
 		}
 	})
 }

@@ -14,7 +14,7 @@
 
 **TOCTOU on lookup+delete** (syscall_latency.c:150-156): Not a real race — a given tid can only have one concurrent `sys_exit` (thread is on exactly one CPU), so no duplicate events.
 
-**DDSketch values**: Latency added in µs, sum accumulated in µs, `processCounter.sum` also in µs. Consistent everywhere.
+**DDSketch values**: Latency added in µs, sum accumulated in µs. Consistent everywhere.
 
 ### Minor Correctness Issues
 

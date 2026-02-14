@@ -31,7 +31,6 @@ type sketchKey struct {
 // Typically ~30-50 entries, never evicted, ~1KB total.
 type processCounter struct {
 	count uint64
-	sum   uint64
 }
 
 // State holds all per-process and per-syscall stats via DDSketch.
@@ -120,7 +119,6 @@ func (s *State) RecordBatch(batch []pendingEvent) {
 			s.procCounters[ev.comm] = pc
 		}
 		pc.count++
-		pc.sum += uint64(ev.latencyUs)
 
 		key := sketchKey{ev.comm, ev.syscallID}
 
