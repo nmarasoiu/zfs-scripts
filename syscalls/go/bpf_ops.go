@@ -18,22 +18,16 @@ func configureBPFFilters(objs *bpfObjects, focusList []string) error {
 	return nil
 }
 
-// counterResults holds the aggregated per-CPU counter values.
-type counterResults struct {
-	dropRing uint64
-	dropMiss uint64
-}
-
 // readCounters reads the per-CPU counters map and sums across all CPUs.
-func readCounters(m *ebpf.Map) counterResults {
+func readCounters(m *ebpf.Map) dropCounts {
 	var vals []bpfPercpuCounters
 	if err := m.Lookup(uint32(0), &vals); err != nil {
-		return counterResults{}
+		return dropCounts{}
 	}
-	var r counterResults
+	var r dropCounts
 	for _, v := range vals {
-		r.dropRing += v.DropRing
-		r.dropMiss += v.DropMiss
+		r.ringFull += v.DropRing
+		r.miss += v.DropMiss
 	}
 	return r
 }

@@ -6,61 +6,35 @@ import (
 	"time"
 )
 
-// capacityStats captures avg/max occupancy of a bounded resource.
-type capacityStats struct {
+// dropCounts holds BPF drop counters summed across all CPUs.
+type dropCounts struct {
+	ringFull uint64
+	miss     uint64
+}
+
+func (d dropCounts) total() uint64 {
+	return d.ringFull + d.miss
+}
+
+// ringStats is a point-in-time snapshot of ring buffer occupancy.
+type ringStats struct {
 	avg int64
 	max int64
 	cap int64
 }
 
 // formatUsage returns "avg: V/C (P%)  max: V/C (P%)" using formatVal for values.
-func (cs capacityStats) formatUsage(formatVal func(int64) string) string {
-	avgPct := float64(cs.avg) / float64(cs.cap) * 100
-	maxPct := float64(cs.max) / float64(cs.cap) * 100
+func (rs ringStats) formatUsage(formatVal func(int64) string) string {
+	avgPct := float64(rs.avg) / float64(rs.cap) * 100
+	maxPct := float64(rs.max) / float64(rs.cap) * 100
 	return fmt.Sprintf("avg: %6s/%s (%4.1f%%)  max: %6s/%s (%4.1f%%)",
-		formatVal(cs.avg), formatVal(cs.cap), avgPct,
-		formatVal(cs.max), formatVal(cs.cap), maxPct)
-}
-
-// dropCounts holds BPF drop counters (read from kernel per-CPU map).
-type dropCounts struct {
-	ringFull uint64
-	miss     uint64
-}
-
-// runtimeMetrics groups counters shared between goroutines.
-type runtimeMetrics struct {
-	bpfDrops dropCounts
-}
-
-func snapshotDrops(metrics *runtimeMetrics) frameDrops {
-	return frameDrops{
-		ringFull: metrics.bpfDrops.ringFull,
-		miss:     metrics.bpfDrops.miss,
-	}
-}
-
-// ringStats is a point-in-time snapshot of ring buffer metrics,
-// decoupling display from the ringpoll.Reader type.
-type ringStats struct {
-	capacityStats
-	pending int     // current pending bytes
-	avg1    float64 // avg batch size (non-empty polls)
-}
-
-// frameDrops holds per-reason drop counts for a single display frame.
-type frameDrops struct {
-	ringFull uint64 // BPF: ring buffer full
-	miss     uint64 // BPF: sys_exit miss (evict or startup)
-}
-
-func (d frameDrops) total() uint64 {
-	return d.ringFull + d.miss
+		formatVal(rs.avg), formatVal(rs.cap), avgPct,
+		formatVal(rs.max), formatVal(rs.cap), maxPct)
 }
 
 // frameMetrics bundles the per-frame runtime metrics passed to render.
 type frameMetrics struct {
-	drops     frameDrops
+	drops     dropCounts
 	ringStats *ringStats
 	cpuTime   time.Duration
 }
@@ -92,4 +66,3 @@ func (ra *ringAvg) avg() int64 {
 	}
 	return ra.sum / ra.samples
 }
-

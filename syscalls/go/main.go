@@ -194,20 +194,10 @@ func runReader(rings *ringpoll.Group, pollSleep time.Duration, maxBatch int, sta
 func snapshotRingStats(rings *ringpoll.Group, acc *ringAvg) *ringStats {
 	g := rings.Snapshot()
 	acc.add(g.Pending)
-
-	var avg1 float64
-	if g.NonEmpty > 0 {
-		avg1 = float64(g.EventSum) / float64(g.NonEmpty)
-	}
-
 	return &ringStats{
-		capacityStats: capacityStats{
-			avg: acc.avg(),
-			max: g.MaxPending,
-			cap: g.Cap,
-		},
-		pending: g.Pending,
-		avg1:    avg1,
+		avg: acc.avg(),
+		max: g.MaxPending,
+		cap: g.Cap,
 	}
 }
 
@@ -347,8 +337,6 @@ func run() error {
 	if !display.isValidSortColumn(sortColumn) {
 		return fmt.Errorf("-sort: invalid column %q (available: %s)", *sortFlag, strings.Join(display.availableSortColumns(), ", "))
 	}
-	metrics := &runtimeMetrics{}
-
 	// Terminal raw mode for interactive input
 	var origTermios *unix.Termios
 	if interactive {
@@ -414,10 +402,8 @@ func run() error {
 				}
 			}
 		render:
-			ctr := readCounters(objs.Counters)
-			metrics.bpfDrops = dropCounts{ringFull: ctr.dropRing, miss: ctr.dropMiss}
 			display.render(state, frameMetrics{
-				drops:     snapshotDrops(metrics),
+				drops:     readCounters(objs.Counters),
 				ringStats: snapshotRingStats(rings, &ringAcc),
 				cpuTime:   getCPUTime(),
 			})
@@ -435,14 +421,10 @@ func run() error {
 	<-done
 	readerDone.Wait()
 
-	{
-		ctr := readCounters(objs.Counters)
-		metrics.bpfDrops = dropCounts{ringFull: ctr.dropRing, miss: ctr.dropMiss}
-		display.render(state, frameMetrics{
-			drops:     snapshotDrops(metrics),
-			ringStats: snapshotRingStats(rings, &ringAcc),
-			cpuTime:   getCPUTime(),
-		})
-	}
+	display.render(state, frameMetrics{
+		drops:     readCounters(objs.Counters),
+		ringStats: snapshotRingStats(rings, &ringAcc),
+		cpuTime:   getCPUTime(),
+	})
 	return nil
 }

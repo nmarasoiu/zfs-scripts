@@ -44,11 +44,6 @@ struct {
     __type(value, struct percpu_counters);
 } counters SEC(".maps");
 
-static __always_inline struct percpu_counters *get_counters(void) {
-    __u32 zero = 0;
-    return bpf_map_lookup_elem(&counters, &zero);
-}
-
 // Per-task start timestamp — storage attached to task_struct, no hash lookup.
 // Allocated on first sys_enter (BPF_LOCAL_STORAGE_GET_F_CREATE),
 // automatically freed when the task exits — no leaks from exit/exit_group.
@@ -105,10 +100,6 @@ int trace_syscall_exit(struct trace_event_raw_sys_exit *ctx) {
     if (!should_trace())
         return 0;
 
-    struct percpu_counters *c = get_counters();
-    if (!c)
-        return 0;
-
     struct task_struct *task = bpf_get_current_task_btf();
     __u64 end_ts = bpf_ktime_get_ns();
 
@@ -119,7 +110,9 @@ int trace_syscall_exit(struct trace_event_raw_sys_exit *ctx) {
         __u32 id = ctx->id;
         if (id == 56 || id == 57 || id == 58 || id == 435)
             return 0;
-        c->drop_miss++;
+        __u32 zero = 0;
+        struct percpu_counters *c = bpf_map_lookup_elem(&counters, &zero);
+        if (c) c->drop_miss++;
         return 0;
     }
 
@@ -136,7 +129,9 @@ int trace_syscall_exit(struct trace_event_raw_sys_exit *ctx) {
         case 3: event = bpf_ringbuf_reserve(&events3, sizeof(*event), 0); break;
     }
     if (!event) {
-        c->drop_ring++;
+        __u32 zero = 0;
+        struct percpu_counters *c = bpf_map_lookup_elem(&counters, &zero);
+        if (c) c->drop_ring++;
         return 0;
     }
 

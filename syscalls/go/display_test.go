@@ -408,7 +408,7 @@ func TestSummaryBarLegend_FilterMode(t *testing.T) {
 func TestRenderFooter_ContainsDropInfo(t *testing.T) {
 	d := &Display{}
 	var buf strings.Builder
-	d.renderFooter(&buf, 10*1e9, 5, frameMetrics{drops: frameDrops{ringFull: 42}})
+	d.renderFooter(&buf, 10*1e9, 5, frameMetrics{drops: dropCounts{ringFull: 42}})
 	s := buf.String()
 	if !strings.Contains(s, "42") {
 		t.Errorf("footer should contain drop count 42, got %q", s)
@@ -422,7 +422,7 @@ func TestRenderFooter_SplitDropReasons(t *testing.T) {
 	d := &Display{}
 	var buf strings.Builder
 	d.renderFooter(&buf, 10*1e9, 5, frameMetrics{
-		drops: frameDrops{ringFull: 10, miss: 110},
+		drops: dropCounts{ringFull: 10, miss: 110},
 	})
 	s := buf.String()
 	if !strings.Contains(s, "miss:") {
@@ -436,10 +436,7 @@ func TestRenderFooter_SplitDropReasons(t *testing.T) {
 func TestRenderFooter_WithRingStats(t *testing.T) {
 	d := &Display{}
 	var buf strings.Builder
-	rs := &ringStats{
-		capacityStats: capacityStats{avg: 4096, max: 8192, cap: 8 * 1024 * 1024},
-		pending:       1024,
-	}
+	rs := &ringStats{avg: 4096, max: 8192, cap: 8 * 1024 * 1024}
 	d.renderFooter(&buf, 10*1e9, 3, frameMetrics{ringStats: rs})
 	s := buf.String()
 	if !strings.Contains(s, "Ring") {
