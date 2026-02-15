@@ -417,10 +417,10 @@ func run() error {
 
 	// Display goroutine
 	displayTicker := time.NewTicker(*displayRefreshInterval)
+	var ringAcc ringAvg
+	var mapAcc mapAccumulator
 	go func() {
 		defer displayTicker.Stop()
-		var ringAcc ringAvg
-		var mapAcc mapAccumulator
 		for {
 			select {
 			case <-done:
@@ -467,8 +467,8 @@ func run() error {
 		metrics.bpfDrops = dropCounts{ringFull: dropRing, miss: dropMiss}
 		display.render(state, frameMetrics{
 			drops:     snapshotDrops(metrics),
-			mapStats:  snapshotMapStats(mapUsed, mapCap, &mapAccumulator{}),
-			ringStats: snapshotRingStats(rings, &ringAvg{}),
+			mapStats:  snapshotMapStats(mapUsed, mapCap, &mapAcc),
+			ringStats: snapshotRingStats(rings, &ringAcc),
 			cpuTime:   getCPUTime(),
 		})
 	}
