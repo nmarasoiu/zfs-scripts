@@ -57,8 +57,7 @@ var (
 	batchSize              = flag.Int("batch-size", 1024, "event batch: max events before flush to stats")
 
 	// BPF
-	ringSizeFlag   = flag.String("ring-size", "2M", "per-ring buffer size (e.g. 512K, 2M, 8M); must be power of 2, ≥4K; 4 rings total")
-	mapEntriesFlag = flag.Int("map-entries", 65536, "BPF LRU hash map max entries (in-flight syscall tracking capacity)")
+	ringSizeFlag = flag.String("ring-size", "2M", "per-ring buffer size (e.g. 512K, 2M, 8M); must be power of 2, ≥4K; 4 rings total")
 
 	// DDSketch
 	alphaFlag       = flag.Float64("alpha", 0.25, "DDSketch relative accuracy — 0.25 means any reported\n\tpercentile is within ±25% of the true value; lower values\n\tuse more memory but give tighter bounds.\n\tSee: https://arxiv.org/abs/1908.10693")
@@ -212,18 +211,6 @@ func snapshotRingStats(rings *ringpoll.Group, acc *ringAvg) *ringStats {
 	}
 }
 
-func snapshotMapStats(used int64, mapCap int64, acc *mapAccumulator) *mapStats {
-	acc.add(used)
-	return &mapStats{
-		capacityStats: capacityStats{
-			avg: acc.avg(),
-			max: acc.max,
-			cap: mapCap,
-		},
-		cur: used,
-	}
-}
-
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintf(os.Stderr, "syscall-latency: %v\n", err)
@@ -266,10 +253,6 @@ func run() error {
 	if sortColumn == "count" || sortColumn == "total" {
 		sortColumn = "samples"
 	}
-	if *mapEntriesFlag <= 0 {
-		return fmt.Errorf("-map-entries: must be > 0 (got %d)", *mapEntriesFlag)
-	}
-
 	if *maxSketches <= 0 {
 		if *topProcs > 0 {
 			*maxSketches = 20 * *topProcs
@@ -313,16 +296,9 @@ func run() error {
 		}
 	}
 
-	// Resize BPF maps from CLI flags before loading into kernel
+	// Resize BPF ring buffers from CLI flags before loading into kernel
 	for _, name := range []string{"events0", "events1", "events2", "events3"} {
 		spec.Maps[name].MaxEntries = ringSize
-	}
-	slotEntries := uint32(*mapEntriesFlag) / 4
-	if slotEntries == 0 {
-		slotEntries = 1
-	}
-	for _, name := range []string{"start0", "start1", "start2", "start3"} {
-		spec.Maps[name].MaxEntries = slotEntries
 	}
 
 	objs := bpfObjects{}
@@ -357,7 +333,6 @@ func run() error {
 	defer rings.Cleanup()
 
 	state := newState(*maxSketches, *alphaFlag)
-	mapCap := int64(objs.Start0.MaxEntries()) * 4
 	interactive := !*batch && isTerminal(int(os.Stdin.Fd())) && isTerminal(int(os.Stdout.Fd()))
 	display := &Display{
 		batchMode:      *batch,
@@ -418,7 +393,6 @@ func run() error {
 	// Display goroutine
 	displayTicker := time.NewTicker(*displayRefreshInterval)
 	var ringAcc ringAvg
-	var mapAcc mapAccumulator
 	go func() {
 		defer displayTicker.Stop()
 		for {
@@ -440,15 +414,12 @@ func run() error {
 				}
 			}
 		render:
-			ctr := readCounters(objs.Counters, mapCap)
+			ctr := readCounters(objs.Counters)
 			metrics.bpfDrops = dropCounts{ringFull: ctr.dropRing, miss: ctr.dropMiss}
 			display.render(state, frameMetrics{
-				drops:      snapshotDrops(metrics),
-				mapStats:   snapshotMapStats(ctr.mapUsed, mapCap, &mapAcc),
-				ringStats:  snapshotRingStats(rings, &ringAcc),
-				cpuTime:    getCPUTime(),
-				probeTotal: ctr.probeTotal,
-				probeExits: ctr.probeExits,
+				drops:     snapshotDrops(metrics),
+				ringStats: snapshotRingStats(rings, &ringAcc),
+				cpuTime:   getCPUTime(),
 			})
 		}
 	}()
@@ -465,15 +436,12 @@ func run() error {
 	readerDone.Wait()
 
 	{
-		ctr := readCounters(objs.Counters, mapCap)
+		ctr := readCounters(objs.Counters)
 		metrics.bpfDrops = dropCounts{ringFull: ctr.dropRing, miss: ctr.dropMiss}
 		display.render(state, frameMetrics{
-			drops:      snapshotDrops(metrics),
-			mapStats:   snapshotMapStats(ctr.mapUsed, mapCap, &mapAcc),
-			ringStats:  snapshotRingStats(rings, &ringAcc),
-			cpuTime:    getCPUTime(),
-			probeTotal: ctr.probeTotal,
-			probeExits: ctr.probeExits,
+			drops:     snapshotDrops(metrics),
+			ringStats: snapshotRingStats(rings, &ringAcc),
+			cpuTime:   getCPUTime(),
 		})
 	}
 	return nil

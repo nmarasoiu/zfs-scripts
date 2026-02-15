@@ -20,11 +20,8 @@ type bpfLatencyEvent struct {
 }
 
 type bpfPercpuCounters struct {
-	MapUsed    int64
-	DropRing   uint64
-	DropMiss   uint64
-	ProbeTotal uint64
-	ProbeExits uint64
+	DropRing uint64
+	DropMiss uint64
 }
 
 // loadBpf returns the embedded CollectionSpec for bpf.
@@ -81,10 +78,7 @@ type bpfMapSpecs struct {
 	Events1     *ebpf.MapSpec `ebpf:"events1"`
 	Events2     *ebpf.MapSpec `ebpf:"events2"`
 	Events3     *ebpf.MapSpec `ebpf:"events3"`
-	Start0      *ebpf.MapSpec `ebpf:"start0"`
-	Start1      *ebpf.MapSpec `ebpf:"start1"`
-	Start2      *ebpf.MapSpec `ebpf:"start2"`
-	Start3      *ebpf.MapSpec `ebpf:"start3"`
+	StartTimes  *ebpf.MapSpec `ebpf:"start_times"`
 	TargetComms *ebpf.MapSpec `ebpf:"target_comms"`
 }
 
@@ -112,10 +106,7 @@ type bpfMaps struct {
 	Events1     *ebpf.Map `ebpf:"events1"`
 	Events2     *ebpf.Map `ebpf:"events2"`
 	Events3     *ebpf.Map `ebpf:"events3"`
-	Start0      *ebpf.Map `ebpf:"start0"`
-	Start1      *ebpf.Map `ebpf:"start1"`
-	Start2      *ebpf.Map `ebpf:"start2"`
-	Start3      *ebpf.Map `ebpf:"start3"`
+	StartTimes  *ebpf.Map `ebpf:"start_times"`
 	TargetComms *ebpf.Map `ebpf:"target_comms"`
 }
 
@@ -126,10 +117,7 @@ func (m *bpfMaps) Close() error {
 		m.Events1,
 		m.Events2,
 		m.Events3,
-		m.Start0,
-		m.Start1,
-		m.Start2,
-		m.Start3,
+		m.StartTimes,
 		m.TargetComms,
 	)
 }

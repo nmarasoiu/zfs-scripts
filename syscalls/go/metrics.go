@@ -58,20 +58,11 @@ func (d frameDrops) total() uint64 {
 	return d.ringFull + d.miss
 }
 
-// mapStats is a point-in-time snapshot of map occupancy metrics.
-type mapStats struct {
-	capacityStats
-	cur int64 // current occupancy
-}
-
 // frameMetrics bundles the per-frame runtime metrics passed to render.
 type frameMetrics struct {
-	drops      frameDrops
-	mapStats   *mapStats
-	ringStats  *ringStats
-	cpuTime    time.Duration
-	probeTotal uint64 // total map lookups across all sys_exit
-	probeExits uint64 // total sys_exit attempts
+	drops     frameDrops
+	ringStats *ringStats
+	cpuTime   time.Duration
 }
 
 // getCPUTime returns the process's cumulative user+system CPU time.
@@ -102,24 +93,3 @@ func (ra *ringAvg) avg() int64 {
 	return ra.sum / ra.samples
 }
 
-// mapAccumulator tracks running average and high-water mark of map occupancy.
-type mapAccumulator struct {
-	sum     int64
-	samples int64
-	max     int64
-}
-
-func (ma *mapAccumulator) add(used int64) {
-	ma.sum += used
-	ma.samples++
-	if used > ma.max {
-		ma.max = used
-	}
-}
-
-func (ma *mapAccumulator) avg() int64 {
-	if ma.samples == 0 {
-		return 0
-	}
-	return ma.sum / ma.samples
-}

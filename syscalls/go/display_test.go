@@ -418,30 +418,6 @@ func TestRenderFooter_ContainsDropInfo(t *testing.T) {
 	}
 }
 
-func TestRenderFooter_WithMapStats(t *testing.T) {
-	d := &Display{}
-	var buf strings.Builder
-	d.renderFooter(&buf, 10*1e9, 5, frameMetrics{
-		mapStats: &mapStats{
-			capacityStats: capacityStats{avg: 1234, max: 2000, cap: 65536},
-			cur:           1234,
-		},
-	})
-	s := buf.String()
-	if !strings.Contains(s, "Map") {
-		t.Errorf("footer should contain Map info, got %q", s)
-	}
-	if !strings.Contains(s, "1.2K") {
-		t.Errorf("footer should contain formatted map avg count, got %q", s)
-	}
-	if !strings.Contains(s, "65.5K") {
-		t.Errorf("footer should contain formatted map cap, got %q", s)
-	}
-	if !strings.Contains(s, "max:") {
-		t.Errorf("footer should contain max label, got %q", s)
-	}
-}
-
 func TestRenderFooter_SplitDropReasons(t *testing.T) {
 	d := &Display{}
 	var buf strings.Builder
