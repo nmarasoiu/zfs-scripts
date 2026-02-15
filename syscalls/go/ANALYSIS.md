@@ -14,35 +14,26 @@
 
 **TOCTOU on lookup+delete** (syscall_latency.c:150-156): Not a real race — a given tid can only have one concurrent `sys_exit` (thread is on exactly one CPU), so no duplicate events.
 
-**DDSketch values**: Latency added in µs, sum accumulated in µs. Consistent everywhere.
+**DDSketch values**: Latency added in ns, sum accumulated in ns. Consistent everywhere. Display converts to human-readable units (ns/µs/ms/s) at render time.
 
 ### Minor Correctness Issues
 
-**1. Latency includes BPF exit overhead** — `syscall_latency.c:201`
+**1. ~~Latency includes BPF exit overhead~~ (FIXED)**
 
-```c
-// Enter: timestamp BEFORE map insert
-__u64 ts = bpf_ktime_get_ns();    // line 134
-INSERT_START(...);                  // line 138
-
-// Exit: timestamp AFTER map lookup+delete
-TRY_LOOKUP_DELETE(...);             // line 174
-__u64 latency = bpf_ktime_get_ns() - start_val;  // line 201
-```
-
-The measured latency = actual syscall + exit-side map lookup/delete overhead (~100-500ns). This is a **systematic positive bias**. Moving the `bpf_ktime_get_ns()` call before the map scan in `sys_exit` would eliminate it. For µs-range syscalls (getpid, clock_gettime) the bias is measurable (~10-50%); for ms-range syscalls it's negligible.
+The `sys_exit` handler now captures `end_ts = bpf_ktime_get_ns()` before the
+map lookup/delete, then computes `latency = end_ts - start_val`. This
+eliminates the ~100-500ns systematic positive bias that previously inflated
+µs-range syscalls by 10-50%.
 
 **2. `should_trace()` comm change between enter/exit** — `syscall_latency.c:160`
 
 If a process calls `prctl(PR_SET_NAME)` between `sys_enter` and `sys_exit`, and the new name doesn't match the `-c` filter, `sys_exit` returns early at line 160-161 without deleting the start map entry. This leaks the entry (cleaned only by LRU eviction) and skews `map_used` upward. Extremely rare in practice — most processes never change comm.
 
-**3. Latency floor hides sub-µs resolution** — `main.go:169`
+**3. ~~Latency floor hides sub-µs resolution~~ (FIXED)**
 
-```go
-if latencyUs < 1 { latencyUs = 1 }
-```
-
-All sub-µs syscalls are recorded as exactly 1µs. For fast syscalls like `clock_gettime` (~200ns), this inflates measured values by 5x. DDSketch requires positive values, so a floor is needed, but recording in nanoseconds instead of µs would preserve resolution (DDSketch handles large value ranges fine with relative accuracy).
+Values are now recorded in nanoseconds with a floor of 1ns. DDSketch handles
+the full ns-to-seconds range with relative accuracy (α=0.25). The display
+layer converts to human-readable units (ns/µs/ms/s) at render time.
 
 ---
 
@@ -105,4 +96,4 @@ Two events fit per cache line in the batch slice. Sequential access pattern duri
 | Go State.mu | **Structural** | Reader and display need consistent view; batching makes it cheap |
 | DDSketch random heap access | **Structural** | Inherent to sketch data structure |
 
-**No incidental/accidental contention found.** Every shared cache line access is there for a good reason and is mitigated by the right technique (per-CPU, sharding, batching). The one actionable correctness item is the latency measurement bias in `sys_exit` (issue #1 above) — easy to fix by moving the timestamp earlier. The sub-µs floor (#3) is a design choice worth revisiting if you want accuracy on fast syscalls.
+**No incidental/accidental contention found.** Every shared cache line access is there for a good reason and is mitigated by the right technique (per-CPU, sharding, batching). The latency measurement bias (#1) and sub-µs floor (#3) have both been fixed.

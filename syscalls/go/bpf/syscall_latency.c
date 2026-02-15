@@ -165,6 +165,7 @@ int trace_syscall_exit(struct trace_event_raw_sys_exit *ctx) {
         return 0;
 
     __u32 tid = bpf_get_current_pid_tgid();
+    __u64 end_ts = bpf_ktime_get_ns();
     __u64 start_val = 0;
     int found = 0;
 
@@ -198,7 +199,7 @@ int trace_syscall_exit(struct trace_event_raw_sys_exit *ctx) {
 
     c->map_used--;
 
-    __u64 latency = bpf_ktime_get_ns() - start_val;
+    __u64 latency = end_ts - start_val;
 
     // Ring selection by CPU for better locality
     __u32 ring = bpf_get_smp_processor_id() % NUM_RINGS;

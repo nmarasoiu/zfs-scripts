@@ -6,7 +6,11 @@ import (
 	"time"
 )
 
-func formatLatency(us int64) string {
+func formatLatency(ns int64) string {
+	if ns < 1_000 {
+		return fmt.Sprintf("%dns", ns)
+	}
+	us := ns / 1000
 	if us < 10_000 {
 		return fmt.Sprintf("%dµs", us)
 	}
@@ -26,8 +30,8 @@ func formatLatency(us int64) string {
 	return fmt.Sprintf("%.1fh", h)
 }
 
-func formatLatencyPadded(us int64) string {
-	return fmt.Sprintf("%8s", formatLatency(us))
+func formatLatencyPadded(ns int64) string {
+	return fmt.Sprintf("%8s", formatLatency(ns))
 }
 
 func formatCount(n int64) string {

@@ -172,7 +172,7 @@ func quantileHeader(q float64) string {
 }
 
 // sketchPercentiles extracts d.quantiles from a DDSketch.
-// Returns values in µs. Only called at display rate.
+// Returns values in ns. Only called at display rate.
 func (d *Display) sketchPercentiles(sketch *ddsketch.DDSketch) []int64 {
 	if sketch == nil {
 		return nil

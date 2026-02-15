@@ -104,7 +104,7 @@ func (s *State) Read(fn func(StateView)) {
 type pendingEvent struct {
 	comm      [16]int8
 	syscallID uint32
-	latencyUs int64
+	latencyNs int64
 }
 
 func (s *State) RecordBatch(batch []pendingEvent) {
@@ -131,7 +131,7 @@ func (s *State) RecordBatch(batch []pendingEvent) {
 				s.sketchEvictions++
 			}
 		}
-		sk.Add(float64(ev.latencyUs))
+		sk.Add(float64(ev.latencyNs))
 	}
 	s.mu.Unlock()
 }

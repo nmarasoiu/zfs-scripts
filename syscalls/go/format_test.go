@@ -7,26 +7,29 @@ import (
 
 func TestFormatLatency(t *testing.T) {
 	tests := []struct {
-		us   int64
+		ns   int64
 		want string
 	}{
-		{0, "0µs"},
-		{1, "1µs"},
-		{999, "999µs"},
-		{9_999, "9999µs"},
-		{10_000, "10ms"},
-		{99_999, "100ms"},
-		{100_000, "100ms"},
-		{500_000, "500ms"},
-		{999_500, "1000ms"},
-		{1_000_000, "1.0s"},
-		{1_500_000, "1.5s"},
-		{60_000_000, "60.0s"},
+		{0, "0ns"},
+		{1, "1ns"},
+		{200, "200ns"},
+		{999, "999ns"},
+		{1_000, "1µs"},
+		{999_000, "999µs"},
+		{9_999_000, "9999µs"},
+		{10_000_000, "10ms"},
+		{99_999_000, "100ms"},
+		{100_000_000, "100ms"},
+		{500_000_000, "500ms"},
+		{999_500_000, "1000ms"},
+		{1_000_000_000, "1.0s"},
+		{1_500_000_000, "1.5s"},
+		{60_000_000_000, "60.0s"},
 	}
 	for _, tt := range tests {
-		got := formatLatency(tt.us)
+		got := formatLatency(tt.ns)
 		if got != tt.want {
-			t.Errorf("formatLatency(%d) = %q, want %q", tt.us, got, tt.want)
+			t.Errorf("formatLatency(%d) = %q, want %q", tt.ns, got, tt.want)
 		}
 	}
 }
@@ -174,12 +177,17 @@ func TestDisplayWidth(t *testing.T) {
 }
 
 func TestFormatLatencyPadded(t *testing.T) {
-	got := formatLatencyPadded(42)
+	got := formatLatencyPadded(42_000)
 	if got != "    42µs" {
-		t.Errorf("formatLatencyPadded(42) = %q, want %q", got, "    42µs")
+		t.Errorf("formatLatencyPadded(42000) = %q, want %q", got, "    42µs")
 	}
 	// 8 display columns: 4 spaces + "42" + "µs" (µ is 2 bytes but 1 display column)
 	if displayWidth(got) != 8 {
-		t.Errorf("formatLatencyPadded(42) display width = %d, want 8", displayWidth(got))
+		t.Errorf("formatLatencyPadded(42000) display width = %d, want 8", displayWidth(got))
+	}
+	// Sub-µs value
+	got2 := formatLatencyPadded(200)
+	if got2 != "   200ns" {
+		t.Errorf("formatLatencyPadded(200) = %q, want %q", got2, "   200ns")
 	}
 }

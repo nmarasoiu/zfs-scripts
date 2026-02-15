@@ -165,11 +165,11 @@ func runReader(rings *ringpoll.Group, pollSleep time.Duration, maxBatch int, sta
 				continue
 			}
 			event := *(*bpfLatencyEvent)(unsafe.Pointer(&rec.RawSample[0]))
-			latencyUs := int64(event.LatencyNs / 1000)
-			if latencyUs < 1 {
-				latencyUs = 1
+			latencyNs := int64(event.LatencyNs)
+			if latencyNs < 1 {
+				latencyNs = 1
 			}
-			pending = append(pending, pendingEvent{event.Comm, event.SyscallId, latencyUs})
+			pending = append(pending, pendingEvent{event.Comm, event.SyscallId, latencyNs})
 
 			if len(pending) >= maxBatch {
 				state.RecordBatch(pending)
