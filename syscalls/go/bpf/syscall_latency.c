@@ -34,6 +34,8 @@ struct percpu_counters {
     __s64 map_used;     // +1 sys_enter, -1 sys_exit/miss (can go negative per-CPU)
     __u64 drop_ring;    // ring reserve failures
     __u64 drop_miss;    // sys_exit miss (merged evict+startup)
+    __u64 probe_total;  // total map lookups across all sys_exit
+    __u64 probe_exits;  // total sys_exit attempts (found + miss)
 };
 
 // Force BTF type emission for Go codegen
@@ -145,8 +147,9 @@ int trace_syscall_enter(struct trace_event_raw_sys_enter *ctx) {
     return 0;
 }
 
-// Lookup and delete from a start map; sets *val on success.
-#define TRY_LOOKUP_DELETE(MAP, tid, val, found) do { \
+// Lookup and delete from a start map; sets *val on success, increments probes.
+#define TRY_LOOKUP_DELETE(MAP, tid, val, found, probes) do { \
+    probes++; \
     __u64 *_ts = bpf_map_lookup_elem(&MAP, &tid); \
     if (_ts) { \
         val = *_ts; \
@@ -168,23 +171,27 @@ int trace_syscall_exit(struct trace_event_raw_sys_exit *ctx) {
     __u64 end_ts = bpf_ktime_get_ns();
     __u64 start_val = 0;
     int found = 0;
+    __u64 probes = 0;
 
     // Check local slot first (most likely hit), then scan others
     __u32 slot = bpf_get_smp_processor_id() % NUM_SLOTS;
     switch (slot) {
-        case 0: TRY_LOOKUP_DELETE(start0, tid, start_val, found); break;
-        case 1: TRY_LOOKUP_DELETE(start1, tid, start_val, found); break;
-        case 2: TRY_LOOKUP_DELETE(start2, tid, start_val, found); break;
-        case 3: TRY_LOOKUP_DELETE(start3, tid, start_val, found); break;
+        case 0: TRY_LOOKUP_DELETE(start0, tid, start_val, found, probes); break;
+        case 1: TRY_LOOKUP_DELETE(start1, tid, start_val, found, probes); break;
+        case 2: TRY_LOOKUP_DELETE(start2, tid, start_val, found, probes); break;
+        case 3: TRY_LOOKUP_DELETE(start3, tid, start_val, found, probes); break;
     }
 
     // Fallback: scan other 3 slots
     if (!found) {
-        if (slot != 0) { TRY_LOOKUP_DELETE(start0, tid, start_val, found); }
-        if (!found && slot != 1) { TRY_LOOKUP_DELETE(start1, tid, start_val, found); }
-        if (!found && slot != 2) { TRY_LOOKUP_DELETE(start2, tid, start_val, found); }
-        if (!found && slot != 3) { TRY_LOOKUP_DELETE(start3, tid, start_val, found); }
+        if (slot != 0) { TRY_LOOKUP_DELETE(start0, tid, start_val, found, probes); }
+        if (!found && slot != 1) { TRY_LOOKUP_DELETE(start1, tid, start_val, found, probes); }
+        if (!found && slot != 2) { TRY_LOOKUP_DELETE(start2, tid, start_val, found, probes); }
+        if (!found && slot != 3) { TRY_LOOKUP_DELETE(start3, tid, start_val, found, probes); }
     }
+
+    c->probe_total += probes;
+    c->probe_exits++;
 
     if (!found) {
         // fork/clone/vfork: child returns from the parent's syscall

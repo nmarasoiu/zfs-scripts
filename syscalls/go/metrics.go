@@ -66,10 +66,12 @@ type mapStats struct {
 
 // frameMetrics bundles the per-frame runtime metrics passed to render.
 type frameMetrics struct {
-	drops     frameDrops
-	mapStats  *mapStats
-	ringStats *ringStats
-	cpuTime   time.Duration
+	drops      frameDrops
+	mapStats   *mapStats
+	ringStats  *ringStats
+	cpuTime    time.Duration
+	probeTotal uint64 // total map lookups across all sys_exit
+	probeExits uint64 // total sys_exit attempts
 }
 
 // getCPUTime returns the process's cumulative user+system CPU time.

@@ -20,9 +20,11 @@ type bpfLatencyEvent struct {
 }
 
 type bpfPercpuCounters struct {
-	MapUsed  int64
-	DropRing uint64
-	DropMiss uint64
+	MapUsed    int64
+	DropRing   uint64
+	DropMiss   uint64
+	ProbeTotal uint64
+	ProbeExits uint64
 }
 
 // loadBpf returns the embedded CollectionSpec for bpf.

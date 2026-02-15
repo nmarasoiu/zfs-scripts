@@ -529,8 +529,13 @@ func (d *Display) renderFooter(buf *strings.Builder, elapsed time.Duration, nPro
 			formatBytes(int64(frame.ringStats.pending)),
 			frame.ringStats.avg1)
 	}
-	fmt.Fprintf(buf, "Processes: %d | Drops: %s (%s/s) [%s]%s%s\n",
-		nProcs, formatCount(int64(total)), formatCount(int64(dropRate)), dropDetail, mapInfo, ringInfo)
+	probeInfo := ""
+	if frame.probeExits > 0 {
+		avg := float64(frame.probeTotal)/float64(frame.probeExits) - 1
+		probeInfo = fmt.Sprintf(" | Probe-1: %.2e", avg)
+	}
+	fmt.Fprintf(buf, "Processes: %d | Drops: %s (%s/s) [%s]%s%s%s\n",
+		nProcs, formatCount(int64(total)), formatCount(int64(dropRate)), dropDetail, mapInfo, ringInfo, probeInfo)
 
 	if d.batchMode {
 		buf.WriteString("\n")

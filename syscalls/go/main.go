@@ -440,13 +440,15 @@ func run() error {
 				}
 			}
 		render:
-			mapUsed, dropRing, dropMiss := readCounters(objs.Counters, mapCap)
-			metrics.bpfDrops = dropCounts{ringFull: dropRing, miss: dropMiss}
+			ctr := readCounters(objs.Counters, mapCap)
+			metrics.bpfDrops = dropCounts{ringFull: ctr.dropRing, miss: ctr.dropMiss}
 			display.render(state, frameMetrics{
-				drops:     snapshotDrops(metrics),
-				mapStats:  snapshotMapStats(mapUsed, mapCap, &mapAcc),
-				ringStats: snapshotRingStats(rings, &ringAcc),
-				cpuTime:   getCPUTime(),
+				drops:      snapshotDrops(metrics),
+				mapStats:   snapshotMapStats(ctr.mapUsed, mapCap, &mapAcc),
+				ringStats:  snapshotRingStats(rings, &ringAcc),
+				cpuTime:    getCPUTime(),
+				probeTotal: ctr.probeTotal,
+				probeExits: ctr.probeExits,
 			})
 		}
 	}()
@@ -463,13 +465,15 @@ func run() error {
 	readerDone.Wait()
 
 	{
-		mapUsed, dropRing, dropMiss := readCounters(objs.Counters, mapCap)
-		metrics.bpfDrops = dropCounts{ringFull: dropRing, miss: dropMiss}
+		ctr := readCounters(objs.Counters, mapCap)
+		metrics.bpfDrops = dropCounts{ringFull: ctr.dropRing, miss: ctr.dropMiss}
 		display.render(state, frameMetrics{
-			drops:     snapshotDrops(metrics),
-			mapStats:  snapshotMapStats(mapUsed, mapCap, &mapAcc),
-			ringStats: snapshotRingStats(rings, &ringAcc),
-			cpuTime:   getCPUTime(),
+			drops:      snapshotDrops(metrics),
+			mapStats:   snapshotMapStats(ctr.mapUsed, mapCap, &mapAcc),
+			ringStats:  snapshotRingStats(rings, &ringAcc),
+			cpuTime:    getCPUTime(),
+			probeTotal: ctr.probeTotal,
+			probeExits: ctr.probeExits,
 		})
 	}
 	return nil
