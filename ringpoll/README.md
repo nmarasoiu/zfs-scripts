@@ -1,6 +1,6 @@
 # ringpoll
 
-A busy-polling reader for Linux BPF ring buffers in Go. Drop-in replacement for `cilium/ebpf`'s epoll-based `ringbuf.Reader` when your ring buffer has near-continuous data flow.
+A direct-mmap polling reader for Linux BPF ring buffers in Go. Drop-in replacement for `cilium/ebpf`'s epoll-based `ringbuf.Reader` when your ring buffer has near-continuous data flow.
 
 ## Why
 
@@ -12,7 +12,7 @@ But when you have **one or more ring buffers that are almost always ready** — 
 
 ### Results
 
-| Metric | cilium/ebpf (epoll) | ringpoll (busy-poll) |
+| Metric | cilium/ebpf (epoll) | ringpoll (direct mmap) |
 |---|---|---|
 | `epoll_wait` calls/sec | 42,000 | 0 |
 | `futex` calls/sec | 58,000 | 2,900 |
@@ -32,7 +32,7 @@ go get github.com/nmarasoiu/zfs-scripts/ringpoll
 
 ### Kernel side (BPF C)
 
-Suppress per-event wakeup notifications — the busy-poll reader doesn't use them:
+Suppress per-event wakeup notifications — the direct-mmap reader doesn't use them:
 
 ```c
 bpf_ringbuf_submit(data, BPF_RB_NO_WAKEUP);
@@ -115,7 +115,7 @@ Behavior:
 ### Group (multi-ring)
 
 ```go
-// NewGroup creates a Group of busy-polling readers, one per map.
+// NewGroup creates a Group of polling readers, one per map.
 func NewGroup(maps []*ebpf.Map) (*Group, error)
 
 // Poll scans rings 0..N-1 and returns the first record found.
@@ -147,7 +147,7 @@ func (g *Group) Cleanup()
 ### Reader (single ring)
 
 ```go
-// NewReader creates a busy-polling reader for a BPF RingBuf map.
+// NewReader creates a polling reader for a BPF RingBuf map.
 func NewReader(m *ebpf.Map) (*Reader, error)
 
 // Poll reads the next record. Returns true on success, false when empty or closed.

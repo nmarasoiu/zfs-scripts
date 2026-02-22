@@ -1,9 +1,10 @@
-// Package ringpoll provides a busy-polling reader for BPF ring buffers.
+// Package ringpoll provides a direct-mmap polling reader for BPF ring buffers.
 //
 // It replaces the epoll-based reader in cilium/ebpf with direct mmap access
 // to the ring buffer's producer/consumer pages, eliminating epoll_wait syscall
-// overhead entirely. This is critical for high-throughput eBPF tracing where
-// the ring buffer has near-continuous data flow.
+// overhead entirely. Between drain cycles an adaptive [Pacer] sleeps just long
+// enough for the worst-case ring to reach a target fill level, so CPU usage
+// stays near zero while maintaining low latency.
 //
 // On a system tracing 180K syscalls/sec, cilium/ebpf's default epoll reader
 // generated 42K epoll_wait calls/sec just to drain the ring buffer. With
@@ -17,12 +18,13 @@
 //
 //	rings, _ := ringpoll.NewGroup(ringMaps)
 //	defer rings.Cleanup()
+//	pacer := ringpoll.NewPacer(0.5, 50*time.Microsecond, 50*time.Millisecond)
 //	var rec ringpoll.Record
 //	for !rings.Closed() {
-//	    quiet := rings.MaxFill() < 0.05  // snapshot lag before draining
+//	    pending, cap := rings.FillBytes()
 //	    for rings.Poll(&rec) { /* process rec.RawSample */ }
 //	    rings.Commit()
-//	    if quiet { time.Sleep(3*time.Millisecond) }
+//	    pacer.Pace(pending, cap)
 //	}
 package ringpoll
 
@@ -58,7 +60,7 @@ type PollSnapshot struct {
 	MaxPending    int64 // high-water mark of ring fill (bytes)
 }
 
-// Reader reads from a BPF ring buffer by busy-polling the mmap'd
+// Reader reads from a BPF ring buffer by polling the mmap'd
 // producer/consumer positions directly, avoiding epoll entirely.
 type Reader struct {
 	consMmap  []byte  // mmap'd consumer page
@@ -82,7 +84,7 @@ type Reader struct {
 	snapshot atomic.Pointer[PollSnapshot]
 }
 
-// NewReader creates a busy-polling ring buffer reader for the given BPF map.
+// NewReader creates a polling ring buffer reader for the given BPF map.
 // The map must be of type RingBuf. The caller controls sleep timing via Poll.
 func NewReader(m *ebpf.Map) (*Reader, error) {
 	if m.Type() != ebpf.RingBuf {
@@ -245,7 +247,7 @@ type Group struct {
 	readers []*Reader
 }
 
-// NewGroup creates a Group of busy-polling readers, one per map.
+// NewGroup creates a Group of polling readers, one per map.
 // On partial failure, already-opened readers are cleaned up.
 func NewGroup(maps []*ebpf.Map) (*Group, error) {
 	readers := make([]*Reader, len(maps))

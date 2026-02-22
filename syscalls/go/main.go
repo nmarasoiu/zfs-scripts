@@ -152,7 +152,7 @@ func parsePercentiles(s string) ([]float64, error) {
 }
 
 
-// runReader busy-polls ring buffers via Group round-robin, batches events,
+// runReader polls ring buffers via Group round-robin, batches events,
 // and flushes to state. Single goroutine — no new contention points.
 func runReader(rings *ringpoll.Group, pacer *ringpoll.Pacer, maxBatch int, state *State) {
 	var rec ringpoll.Record
@@ -314,7 +314,7 @@ func run() error {
 	}
 	defer tpExit.Close()
 
-	// Open per-CPU ring buffers (busy-poll readers — no epoll)
+	// Open per-CPU ring buffers (direct mmap readers — no epoll)
 	ringMaps := []*ebpf.Map{objs.Events0, objs.Events1, objs.Events2, objs.Events3}
 	rings, err := ringpoll.NewGroup(ringMaps)
 	if err != nil {
@@ -364,7 +364,7 @@ func run() error {
 	}()
 	defer termCleanup()
 
-	// Reader goroutine: busy-polls ring buffers, batches events, flushes under single Lock
+	// Reader goroutine: polls ring buffers, batches events, flushes under single Lock
 	pacer := ringpoll.NewPacer(*targetFill, *minSleep, *maxSleep)
 	var readerDone sync.WaitGroup
 	readerDone.Add(1)
