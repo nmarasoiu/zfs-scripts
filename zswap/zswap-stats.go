@@ -47,19 +47,13 @@ func (m *minMax) update(v int64) {
 	}
 }
 
-// ── long-lived FDs ──────────────────────────────────────────────
+// ── FDs for seekable files (sysfs params + procfs) ─────────────
 
 type zswapFds struct {
-	storedPages   int
-	poolSize      int
-	writtenBack   int
-	rejectPoor    int
-	rejectReclaim int
-	sameFilled    int
-	maxPoolPct    int
-	meminfo       int
-	writeback     int
-	shrinker      int
+	maxPoolPct int // /sys/module/zswap/parameters — supports pread
+	meminfo    int // /proc/meminfo — supports pread
+	writeback  int
+	shrinker   int
 }
 
 func tryOpen(path string) int {
@@ -72,23 +66,15 @@ func tryOpen(path string) int {
 
 func openZswapFds() zswapFds {
 	return zswapFds{
-		storedPages:   tryOpen(zswapDebug + "/stored_pages"),
-		poolSize:      tryOpen(zswapDebug + "/pool_total_size"),
-		writtenBack:   tryOpen(zswapDebug + "/written_back_pages"),
-		rejectPoor:    tryOpen(zswapDebug + "/reject_compress_poor"),
-		rejectReclaim: tryOpen(zswapDebug + "/reject_reclaim_fail"),
-		sameFilled:    tryOpen(zswapDebug + "/same_filled_pages"),
-		maxPoolPct:    tryOpen(zswapParam + "/max_pool_percent"),
-		meminfo:       tryOpen("/proc/meminfo"),
-		writeback:     tryOpen(zswapParam + "/writeback"),
-		shrinker:      tryOpen(zswapParam + "/shrinker_enabled"),
+		maxPoolPct: tryOpen(zswapParam + "/max_pool_percent"),
+		meminfo:    tryOpen("/proc/meminfo"),
+		writeback:  tryOpen(zswapParam + "/writeback"),
+		shrinker:   tryOpen(zswapParam + "/shrinker_enabled"),
 	}
 }
 
 func (fds *zswapFds) close() {
-	for _, fd := range []int{fds.storedPages, fds.poolSize, fds.writtenBack,
-		fds.rejectPoor, fds.rejectReclaim, fds.sameFilled, fds.maxPoolPct,
-		fds.meminfo, fds.writeback, fds.shrinker} {
+	for _, fd := range []int{fds.maxPoolPct, fds.meminfo, fds.writeback, fds.shrinker} {
 		if fd >= 0 {
 			syscall.Close(fd)
 		}
@@ -101,6 +87,22 @@ func pread(fd int, buf []byte) int {
 }
 
 // ── reading ─────────────────────────────────────────────────────
+
+// readDebugInt64 reads a debugfs counter by open+read+close
+// (debugfs files don't support pread/lseek).
+func readDebugInt64(path string, buf []byte) int64 {
+	fd, err := syscall.Open(path, syscall.O_RDONLY, 0)
+	if err != nil {
+		return 0
+	}
+	n, _ := syscall.Read(fd, buf)
+	syscall.Close(fd)
+	if n <= 0 {
+		return 0
+	}
+	v, _ := strconv.ParseInt(strings.TrimSpace(string(buf[:n])), 10, 64)
+	return v
+}
 
 func readInt64(fd int, buf []byte) int64 {
 	n := pread(fd, buf)
@@ -139,12 +141,12 @@ func getTotalRAM(fd int, buf []byte) int64 {
 
 func readStats(fds *zswapFds, buf []byte) stats {
 	return stats{
-		storedPages:      readInt64(fds.storedPages, buf),
-		poolSize:         readInt64(fds.poolSize, buf),
-		writtenBack:      readInt64(fds.writtenBack, buf),
-		rejectPoor:       readInt64(fds.rejectPoor, buf),
-		rejectReclaim:    readInt64(fds.rejectReclaim, buf),
-		sameFilled:       readInt64(fds.sameFilled, buf),
+		storedPages:      readDebugInt64(zswapDebug+"/stored_pages", buf),
+		poolSize:         readDebugInt64(zswapDebug+"/pool_total_size", buf),
+		writtenBack:      readDebugInt64(zswapDebug+"/written_back_pages", buf),
+		rejectPoor:       readDebugInt64(zswapDebug+"/reject_compress_poor", buf),
+		rejectReclaim:    readDebugInt64(zswapDebug+"/reject_reclaim_fail", buf),
+		sameFilled:       readDebugInt64(zswapDebug+"/same_filled_pages", buf),
 		maxPoolPct:       readInt64(fds.maxPoolPct, buf),
 		totalRAM:         getTotalRAM(fds.meminfo, buf),
 		writebackEnabled: readBool(fds.writeback, buf),
