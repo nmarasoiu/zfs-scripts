@@ -6,9 +6,9 @@ A busy-polling reader for Linux BPF ring buffers in Go. Drop-in replacement for 
 
 The `cilium/ebpf` library uses `epoll` internally to wait for ring buffer data. This is the right default for the general case: many file descriptors, sporadic activity.
 
-But when you have **one ring buffer that is almost always ready** — as in high-throughput eBPF tracing — epoll becomes pure overhead. On a system tracing 180K syscalls/sec, the cilium reader generated **42,000 `epoll_wait` calls/sec** just to drain the ring buffer. The tracing tool was the #1 syscall source on the system. It was tracing itself.
+But when you have **one or more ring buffers that are almost always ready** — as in high-throughput eBPF tracing — epoll becomes pure overhead. On a system tracing 180K syscalls/sec, the cilium reader generated **42,000 `epoll_wait` calls/sec** just to drain the ring buffer. The tracing tool was the #1 syscall source on the system. It was tracing itself.
 
-`ringpoll` eliminates this by mmapping the ring buffer's producer/consumer pages directly and spinning on `prod_pos != cons_pos`. When the ring is empty, it sleeps for a configurable interval (default 50us), allowing events to accumulate and drain in bursts.
+`ringpoll` eliminates this by mmapping the ring buffer's producer/consumer pages directly and spinning on `prod_pos != cons_pos`. When rings are empty, an adaptive pacer sleeps just long enough for the worst-case ring to reach a target fill level, allowing events to accumulate and drain in bursts.
 
 ### Results
 
@@ -40,52 +40,127 @@ bpf_ringbuf_submit(data, BPF_RB_NO_WAKEUP);
 
 ### Userspace (Go)
 
+The primary interface is `Group`, which manages one or more ring buffer readers and provides a single polling loop:
+
 ```go
 import (
     "time"
+    "github.com/cilium/ebpf"
     "github.com/nmarasoiu/zfs-scripts/ringpoll"
 )
 
-// Create reader from an ebpf.Map of type RingBuf.
-// pollSleep controls the sleep interval when the ring is empty.
-rd, err := ringpoll.NewReader(objs.Events, 50*time.Microsecond)
+// Open ring buffers (one reader per BPF map).
+ringMaps := []*ebpf.Map{objs.Events0, objs.Events1, objs.Events2, objs.Events3}
+rings, err := ringpoll.NewGroup(ringMaps)
 if err != nil {
     log.Fatal(err)
 }
-defer rd.Close()
+defer rings.Cleanup()
+
+// Adaptive pacer: target 50% fill, sleep range [50µs, 50ms].
+pacer := ringpoll.NewPacer(0.5, 50*time.Microsecond, 50*time.Millisecond)
+
+var rec ringpoll.Record
+for !rings.Closed() {
+    pending, cap := rings.FillBytes()        // pre-drain snapshot
+    for rings.Poll(&rec) {
+        // rec.RawSample contains the raw bytes submitted by BPF.
+        // event := (*MyEvent)(unsafe.Pointer(&rec.RawSample[0]))
+    }
+    rings.Commit()
+    pacer.Pace(pending, cap)                 // adaptive sleep
+}
+```
+
+For a single ring buffer, you can use `Reader` directly:
+
+```go
+rd, err := ringpoll.NewReader(objs.Events)
+if err != nil {
+    log.Fatal(err)
+}
 defer rd.Cleanup()
 
 var rec ringpoll.Record
-for rd.ReadInto(&rec) {
-    // rec.RawSample contains the raw bytes submitted by BPF.
-    // Parse your struct out of it:
-    // event := (*MyEvent)(unsafe.Pointer(&rec.RawSample[0]))
+for !rd.Closed() {
+    for rd.Poll(&rec) { /* process rec.RawSample */ }
+    rd.Commit()
+    time.Sleep(50 * time.Microsecond)
 }
 ```
 
 ### Batch commit
 
-`ReadInto` does **not** advance the kernel-visible consumer position on every read. Instead, it advances an internal position and only publishes it to the kernel (via `Commit()`) when the ring is empty and the reader is about to sleep. This batches the consumer-position update, reducing cache-line bouncing between CPU cores.
+`Poll` does **not** advance the kernel-visible consumer position on every read. Instead, it advances an internal position and only publishes it to the kernel when you call `Commit()` (or `CommitAndSnap()`). This batches the consumer-position update, reducing cache-line bouncing between CPU cores.
 
-If you need to commit manually (e.g., after processing N events), call `rd.Commit()`.
+Call `Commit()` after draining all available events, or periodically after processing N events.
+
+### Adaptive pacer
+
+The `Pacer` replaces a fixed sleep with an adaptive one. It maintains an EMA of the produce rate (bytes/sec) and computes the sleep duration needed for the worst-case ring to reach a target fill level:
+
+```
+sleep = targetFill × capacity / produceRate_ema
+```
+
+Behavior:
+- **No events (pending=0)**: sleeps `minSleep` — stays responsive without decaying the rate estimate
+- **Fill >= target on wake**: skips sleep entirely (we're behind) and updates the rate estimate
+- **Fill < target**: computes adaptive sleep, clamped to `[minSleep, maxSleep]`
+
+`AvgSleep()` returns the running average sleep duration for observability.
 
 ## API
 
+### Group (multi-ring)
+
+```go
+// NewGroup creates a Group of busy-polling readers, one per map.
+func NewGroup(maps []*ebpf.Map) (*Group, error)
+
+// Poll scans rings 0..N-1 and returns the first record found.
+// Returns false when all rings are empty in a single pass.
+func (g *Group) Poll(rec *Record) bool
+
+// Commit publishes consumer positions and snapshots stats for all readers.
+func (g *Group) Commit()
+
+// FillBytes returns max pending bytes across rings and per-ring capacity.
+func (g *Group) FillBytes() (maxPending, capacity int)
+
+// MaxFill returns the maximum fill fraction (0.0–1.0) across all rings.
+func (g *Group) MaxFill() float64
+
+// Snapshot returns aggregated stats across all ring buffer readers.
+func (g *Group) Snapshot() GroupSnapshot
+
+// Closed reports whether all readers have been closed.
+func (g *Group) Closed() bool
+
+// Close signals all readers to stop.
+func (g *Group) Close()
+
+// Cleanup unmaps shared memory for all readers.
+func (g *Group) Cleanup()
+```
+
+### Reader (single ring)
+
 ```go
 // NewReader creates a busy-polling reader for a BPF RingBuf map.
-func NewReader(m *ebpf.Map, pollSleep time.Duration) (*Reader, error)
+func NewReader(m *ebpf.Map) (*Reader, error)
 
-// ReadInto reads the next record. Returns true on success, false when closed.
-func (r *Reader) ReadInto(rec *Record) bool
+// Poll reads the next record. Returns true on success, false when empty or closed.
+func (r *Reader) Poll(rec *Record) bool
 
 // Commit publishes the consumer position to the kernel, freeing ring space.
 func (r *Reader) Commit()
 
-// Close signals the reader to stop. ReadInto will return false.
-func (r *Reader) Close()
+// CommitAndSnap publishes the consumer position and a poll statistics snapshot.
+func (r *Reader) CommitAndSnap()
 
-// Cleanup unmaps shared memory. Call after the read loop exits.
-func (r *Reader) Cleanup()
+// Snapshot returns the latest poll statistics, or nil if none published yet.
+func (r *Reader) Snapshot() *PollSnapshot
 
 // Pending returns current ring buffer fill in bytes.
 func (r *Reader) Pending() int
@@ -96,30 +171,61 @@ func (r *Reader) BufSize() int
 // MaxPending returns the high-water mark of ring fill in bytes.
 func (r *Reader) MaxPending() int64
 
-// LastBatch returns the event count of the last completed drain batch.
-func (r *Reader) LastBatch() int64
+// Close signals the reader to stop. Poll will return false.
+func (r *Reader) Close()
 
-// PollStats returns ring poll statistics:
-//   avg1:  average batch size of non-empty polls
-//   avg0:  average batch size of all polls (including empty)
-//   last1: batch size of most recent non-empty poll
-//   last0: time since last empty poll
-func (r *Reader) PollStats() (avg1, avg0 float64, last1 int64, last0 time.Duration)
+// Cleanup unmaps shared memory. Call after the read loop exits.
+func (r *Reader) Cleanup()
+```
+
+### Pacer (adaptive sleep)
+
+```go
+// NewPacer creates a Pacer with target fill fraction and sleep bounds.
+func NewPacer(targetFill float64, minSleep, maxSleep time.Duration) *Pacer
+
+// Pace updates the rate estimate and sleeps adaptively.
+// Returns duration slept (0 if fill >= target).
+func (p *Pacer) Pace(pendingBytes, capacity int) time.Duration
+
+// AvgSleep returns the running average sleep duration.
+func (p *Pacer) AvgSleep() time.Duration
+```
+
+### Snapshot types
+
+```go
+// PollSnapshot holds per-reader poll statistics (published atomically).
+type PollSnapshot struct {
+    EventSum      int64 // cumulative events read
+    NonEmptyCount int64 // polls that returned at least one event
+    PollCount     int64 // total polls
+    MaxPending    int64 // high-water mark of ring fill (bytes)
+}
+
+// GroupSnapshot holds aggregated stats across multiple readers.
+type GroupSnapshot struct {
+    Pending    int   // worst-case pending bytes across rings
+    MaxPending int64 // worst-case high-water mark
+    Cap        int64 // per-ring capacity (all same size)
+    EventSum   int64 // sum across rings
+    NonEmpty   int64 // sum across rings
+    PollCount  int64 // sum across rings
+}
 ```
 
 ## When to use this
 
 Use `ringpoll` when:
 
-- Your ring buffer has **near-continuous data** (events arriving every few microseconds)
+- Your ring buffers have **near-continuous data** (events arriving every few microseconds)
 - You are tracing at **high throughput** (>10K events/sec) and care about observer overhead
 - You want the **lowest possible syscall footprint** for your eBPF userspace reader
-- You need **diagnostic stats** (batch sizes, fill high-water mark, poll statistics) for tuning
+- You need **diagnostic stats** (fill levels, high-water marks, poll statistics) for tuning
 
 Stick with `cilium/ebpf`'s default `ringbuf.Reader` when:
 
 - Events arrive sporadically — epoll will block efficiently and save CPU
-- You have multiple ring buffer maps — epoll multiplexes well
 - Observer overhead is not a concern
 
 ## How it works
@@ -128,7 +234,7 @@ Stick with `cilium/ebpf`'s default `ringbuf.Reader` when:
 2. **Spin** on `atomic.LoadUint64(prodPos) != consumerPos` — when they differ, records are available
 3. **Parse** the 8-byte ring buffer header (length + flags), handle busy-bit (producer mid-write) and discard-bit
 4. **Copy** the data out of the double-mapped ring (no wrap-around logic needed since the kernel maps the data region twice contiguously)
-5. **Sleep** for `pollSleep` when the ring is empty, committing the consumer position first so the kernel can reuse the space
+5. **Sleep** adaptively via `Pacer` when all rings are drained, committing consumer positions first so the kernel can reuse the space
 
 The double-mapping is a kernel feature: the data region is mapped twice back-to-back in virtual memory, so a record that wraps around the physical end of the ring appears contiguous in the virtual mapping. This eliminates the need for split-read logic.
 
