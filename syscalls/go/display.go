@@ -522,8 +522,12 @@ func (d *Display) renderFooter(buf *strings.Builder, elapsed time.Duration, nPro
 		ringInfo = fmt.Sprintf(" | Ring %s",
 			frame.ringStats.formatUsage(formatBytes))
 	}
-	fmt.Fprintf(buf, "Processes: %d | Drops: %s (%s/s) [%s]%s\n",
-		nProcs, formatCount(int64(total)), formatCount(int64(dropRate)), dropDetail, ringInfo)
+	sleepInfo := ""
+	if frame.avgSleep > 0 {
+		sleepInfo = fmt.Sprintf(" | Pacer avg sleep: %s", frame.avgSleep.Truncate(time.Microsecond))
+	}
+	fmt.Fprintf(buf, "Processes: %d | Drops: %s (%s/s) [%s]%s%s\n",
+		nProcs, formatCount(int64(total)), formatCount(int64(dropRate)), dropDetail, ringInfo, sleepInfo)
 
 	if d.batchMode {
 		buf.WriteString("\n")

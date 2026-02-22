@@ -37,6 +37,7 @@ type frameMetrics struct {
 	drops     dropCounts
 	ringStats *ringStats
 	cpuTime   time.Duration
+	avgSleep  time.Duration
 }
 
 // getCPUTime returns the process's cumulative user+system CPU time.

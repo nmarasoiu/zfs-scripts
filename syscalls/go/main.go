@@ -47,7 +47,9 @@ var (
 	topProcs    = flag.Int("n", 0, "top N rows to display (0=all)")
 	batch       = flag.Bool("batch", false, "batch mode (no screen clearing)")
 	colsFlag    = flag.Int("cols", 0, "override terminal width (enables panel in batch mode)")
-	pollSleep   = flag.Duration("poll-sleep", 20*time.Millisecond, "ring buffer poll sleep when all rings are empty")
+	targetFill = flag.Float64("target-fill", 0.5, "adaptive pacer: target ring fill fraction (0.0–1.0)")
+	minSleep   = flag.Duration("min-sleep", 50*time.Microsecond, "adaptive pacer: minimum sleep duration")
+	maxSleep   = flag.Duration("max-sleep", 50*time.Millisecond, "adaptive pacer: maximum sleep duration")
 	maxSketches = flag.Int("max-sketches", 0, "max process×syscall sketches to keep (2Q eviction; 0=auto: 20×n)")
 	sortFlag    = flag.String("sort", "rate", "sort column (e.g. rate, samples, avg, p99, max)")
 	showVersion = flag.Bool("version", false, "print version and exit")
@@ -152,13 +154,13 @@ func parsePercentiles(s string) ([]float64, error) {
 
 // runReader busy-polls ring buffers via Group round-robin, batches events,
 // and flushes to state. Single goroutine — no new contention points.
-func runReader(rings *ringpoll.Group, pollSleep time.Duration, maxBatch int, state *State) {
+func runReader(rings *ringpoll.Group, pacer *ringpoll.Pacer, maxBatch int, state *State) {
 	var rec ringpoll.Record
 	eventSize := int(unsafe.Sizeof(bpfLatencyEvent{}))
 	pending := make([]pendingEvent, 0, maxBatch)
 
 	for !rings.Closed() {
-		quiet := rings.MaxFill() < 0.05
+		pendingBytes, cap := rings.FillBytes() // pre-drain snapshot
 		for rings.Poll(&rec) {
 			if len(rec.RawSample) < eventSize {
 				continue
@@ -181,9 +183,7 @@ func runReader(rings *ringpoll.Group, pollSleep time.Duration, maxBatch int, sta
 			pending = pending[:0]
 		}
 		rings.Commit()
-		if quiet {
-			time.Sleep(pollSleep)
-		}
+		pacer.Pace(pendingBytes, cap)
 	}
 	if len(pending) > 0 {
 		state.RecordBatch(pending)
@@ -365,11 +365,12 @@ func run() error {
 	defer termCleanup()
 
 	// Reader goroutine: busy-polls ring buffers, batches events, flushes under single Lock
+	pacer := ringpoll.NewPacer(*targetFill, *minSleep, *maxSleep)
 	var readerDone sync.WaitGroup
 	readerDone.Add(1)
 	go func() {
 		defer readerDone.Done()
-		runReader(rings, *pollSleep, *batchSize, state)
+		runReader(rings, pacer, *batchSize, state)
 	}()
 
 	// Input goroutine for interactive mode
@@ -406,6 +407,7 @@ func run() error {
 				drops:     readCounters(objs.Counters),
 				ringStats: snapshotRingStats(rings, &ringAcc),
 				cpuTime:   getCPUTime(),
+				avgSleep:  pacer.AvgSleep(),
 			})
 		}
 	}()
@@ -425,6 +427,7 @@ func run() error {
 		drops:     readCounters(objs.Counters),
 		ringStats: snapshotRingStats(rings, &ringAcc),
 		cpuTime:   getCPUTime(),
+		avgSleep:  pacer.AvgSleep(),
 	})
 	return nil
 }
