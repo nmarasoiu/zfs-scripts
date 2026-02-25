@@ -34,6 +34,16 @@ func formatLatencyPadded(ns int64) string {
 	return fmt.Sprintf("%8s", formatLatency(ns))
 }
 
+func formatPercentPadded(pct float64) string {
+	var s string
+	if pct < 10 {
+		s = fmt.Sprintf("%.2f%%", pct)
+	} else {
+		s = fmt.Sprintf("%.1f%%", pct)
+	}
+	return fmt.Sprintf("%8s", s)
+}
+
 func formatCount(n int64) string {
 	if n >= 1_000_000_000 {
 		return fmt.Sprintf("%.1fB", float64(n)/1_000_000_000)
@@ -72,6 +82,27 @@ func formatDuration(d time.Duration) string {
 	h := int(d.Hours())
 	m := int(d.Minutes()) % 60
 	return fmt.Sprintf("%dh%dm", h, m)
+}
+
+// formatFraction formats num/denom as compact scientific notation with
+// integer mantissa only (e.g. "3e-9", "1e-12") for fixed-width display.
+// Returns "0" when num is zero, "-" when denom is zero.
+func formatFraction(num, denom uint64) string {
+	if num == 0 {
+		return "0"
+	}
+	if denom == 0 {
+		return "-"
+	}
+	f := float64(num) / float64(denom)
+	if f >= 1 {
+		return "1"
+	}
+	s := fmt.Sprintf("%.0e", f)
+	// Go's %.0e uses "e+06" / "e-09" style; strip leading zeros for compactness.
+	s = strings.Replace(s, "e+0", "e+", 1)
+	s = strings.Replace(s, "e-0", "e-", 1)
+	return s
 }
 
 func formatRate(count uint64, secs float64) string {

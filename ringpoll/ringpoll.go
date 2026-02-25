@@ -305,6 +305,23 @@ func (g *Group) FillBytes() (maxPending, capacity int) {
 	return
 }
 
+// FillDetail returns the max and average pending bytes across all rings, plus capacity.
+func (g *Group) FillDetail() (maxPending, avgPending, capacity int) {
+	sum := 0
+	for _, rd := range g.readers {
+		p := rd.Pending()
+		sum += p
+		if p > maxPending {
+			maxPending = p
+		}
+		capacity = rd.BufSize()
+	}
+	if len(g.readers) > 0 {
+		avgPending = sum / len(g.readers)
+	}
+	return
+}
+
 // Closed reports whether all readers have been closed.
 func (g *Group) Closed() bool {
 	return allClosed(g.readers)

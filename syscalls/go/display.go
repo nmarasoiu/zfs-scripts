@@ -171,19 +171,6 @@ func quantileHeader(q float64) string {
 	return fmt.Sprintf("p%g", q*100)
 }
 
-// sketchPercentiles extracts d.quantiles from a DDSketch.
-// Returns values in ns. Only called at display rate.
-func (d *Display) sketchPercentiles(sketch *ddsketch.DDSketch) []int64 {
-	if sketch == nil {
-		return nil
-	}
-	result := make([]int64, len(d.quantiles))
-	for i, q := range d.quantiles {
-		v, _ := sketch.GetValueAtQuantile(q)
-		result[i] = int64(v)
-	}
-	return result
-}
 
 // availableSortColumns returns the valid sort column names for the current view.
 func (d *Display) availableSortColumns() []string {
@@ -238,9 +225,9 @@ func (d *Display) writeHeader(buf *strings.Builder, nameWidth int, lineWidth int
 	buf.WriteString("\n")
 }
 
-// formatRow formats a single data row with the given name, sketch, and elapsed time.
+// formatValueRow formats a single data row using a custom value formatter.
 // The name is padded/truncated to nameWidth. No trailing newline.
-func (d *Display) formatRow(name string, nameWidth int, sketch *ddsketch.DDSketch, elapsedSecs float64) string {
+func (d *Display) formatValueRow(name string, nameWidth int, sketch *ddsketch.DDSketch, elapsedSecs float64, fmtVal func(float64) string) string {
 	nameFmt := fmt.Sprintf("%%-%ds", nameWidth)
 	paddedName := fmt.Sprintf(nameFmt, truncateProcLabel(name, nameWidth))
 
@@ -256,18 +243,25 @@ func (d *Display) formatRow(name string, nameWidth int, sketch *ddsketch.DDSketc
 		fmt.Fprintf(&buf, " │ %9s %9s", "0", "-")
 		return buf.String()
 	}
-	avg := int64(sketch.GetSum() / sketch.GetCount())
+	avg := sketch.GetSum() / sketch.GetCount()
 	maxVal, _ := sketch.GetMaxValue()
 
 	buf.WriteString(paddedName)
 	buf.WriteString(" │")
-	fmt.Fprintf(&buf, " %s", formatLatencyPadded(avg))
-	percentiles := d.sketchPercentiles(sketch)
-	for _, pct := range percentiles {
-		fmt.Fprintf(&buf, " %s", formatLatencyPadded(pct))
+	fmt.Fprintf(&buf, " %s", fmtVal(avg))
+	for _, q := range d.quantiles {
+		v, _ := sketch.GetValueAtQuantile(q)
+		fmt.Fprintf(&buf, " %s", fmtVal(v))
 	}
-	fmt.Fprintf(&buf, " %s │ %9s %9s", formatLatencyPadded(int64(maxVal)), formatCount(int64(count)), formatRate(count, elapsedSecs))
+	fmt.Fprintf(&buf, " %s │ %9s %9s", fmtVal(maxVal), formatCount(int64(count)), formatRate(count, elapsedSecs))
 	return buf.String()
+}
+
+// formatRow formats a single data row with latency values (ns).
+func (d *Display) formatRow(name string, nameWidth int, sketch *ddsketch.DDSketch, elapsedSecs float64) string {
+	return d.formatValueRow(name, nameWidth, sketch, elapsedSecs, func(v float64) string {
+		return formatLatencyPadded(int64(v))
+	})
 }
 
 func (d *Display) resetCursor() {
@@ -358,6 +352,11 @@ func (d *Display) render(state *State, frame frameMetrics) {
 
 		nProcs = len(v.ProcStats)
 	})
+
+	// Infra section (ring occupancy & pacer sleep percentiles)
+	if frame.infra != nil {
+		d.renderInfraSection(&mainBuf, frame.infra, elapsed)
+	}
 
 	// Build footer
 	var footerBuf strings.Builder
@@ -508,23 +507,54 @@ func (d *Display) tryAutoSelectSort() {
 	}
 }
 
+func (d *Display) renderInfraSection(buf *strings.Builder, infra *infraSketches, elapsed time.Duration) {
+	elapsedSecs := elapsed.Seconds()
+	const nameWidth = 14
+	lineWidth := d.rowWidth(nameWidth)
+
+	fmtPct := func(v float64) string { return formatPercentPadded(v) }
+	fmtLat := func(v float64) string { return formatLatencyPadded(int64(v)) }
+
+	infra.Read(func(iv infraView) {
+		if iv.RingMax.GetCount() == 0 && iv.SleepAll.GetCount() == 0 {
+			return
+		}
+
+		sectionHeader(buf, "Ring & Pacer", lineWidth)
+		d.writeHeader(buf, nameWidth, lineWidth)
+
+		buf.WriteString(d.formatValueRow("ring (avg)", nameWidth, iv.RingAll, elapsedSecs, fmtPct))
+		buf.WriteByte('\n')
+		buf.WriteString(d.formatValueRow("ring (max)", nameWidth, iv.RingMax, elapsedSecs, fmtPct))
+		buf.WriteByte('\n')
+		buf.WriteString(d.formatValueRow("sleep (pure)", nameWidth, iv.SleepPure, elapsedSecs, fmtLat))
+		buf.WriteByte('\n')
+		buf.WriteString(d.formatValueRow("sleep (all)", nameWidth, iv.SleepAll, elapsedSecs, fmtLat))
+		buf.WriteByte('\n')
+	})
+}
+
 func (d *Display) renderFooter(buf *strings.Builder, elapsed time.Duration, nProcs int, frame frameMetrics) {
 	total := frame.drops.total()
 	dropRate := float64(0)
 	if elapsed.Seconds() > 0 {
 		dropRate = float64(total) / elapsed.Seconds()
 	}
-	dropDetail := fmt.Sprintf("ring:%s miss:%s",
+	dropDetail := fmt.Sprintf("ring:%s (%s) miss:%s (%s)",
 		formatCount(int64(frame.drops.ringFull)),
-		formatCount(int64(frame.drops.miss)))
+		formatFraction(frame.drops.ringFull, frame.totalEvents),
+		formatCount(int64(frame.drops.miss)),
+		formatFraction(frame.drops.miss, frame.totalEvents))
 	ringInfo := ""
 	if frame.ringStats != nil {
 		ringInfo = fmt.Sprintf(" | Ring %s",
 			frame.ringStats.formatUsage(formatBytes))
 	}
 	sleepInfo := ""
-	if frame.avgSleep > 0 {
-		sleepInfo = fmt.Sprintf(" | Pacer avg sleep: %s", frame.avgSleep.Truncate(time.Microsecond))
+	if ss := frame.sleepStats; ss.Pure > 0 || ss.All > 0 {
+		sleepInfo = fmt.Sprintf(" | Pacer avg sleep: %s / %s",
+			ss.Pure.Truncate(time.Microsecond),
+			ss.All.Truncate(time.Microsecond))
 	}
 	fmt.Fprintf(buf, "Processes: %d | Drops: %s (%s/s) [%s]%s%s\n",
 		nProcs, formatCount(int64(total)), formatCount(int64(dropRate)), dropDetail, ringInfo, sleepInfo)

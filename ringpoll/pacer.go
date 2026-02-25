@@ -16,6 +16,10 @@ type Pacer struct {
 	// Running average of sleep durations (for observability).
 	sleepSum   time.Duration
 	sleepCount int64
+
+	// Pure (non-zero) sleep subset.
+	pureSleepSum   time.Duration
+	pureSleepCount int64
 }
 
 // NewPacer creates a Pacer with the given target fill fraction and sleep bounds.
@@ -38,6 +42,10 @@ func (p *Pacer) Pace(pendingBytes, capacity int) time.Duration {
 	track := func(d time.Duration) {
 		p.sleepSum += d
 		p.sleepCount++
+		if d > 0 {
+			p.pureSleepSum += d
+			p.pureSleepCount++
+		}
 	}
 
 	// First cycle: initialize lastWake, sleep minSleep.
@@ -92,10 +100,28 @@ func (p *Pacer) Pace(pendingBytes, capacity int) time.Duration {
 	return sleep
 }
 
-// AvgSleep returns the running average sleep duration.
+// SleepStats holds both pure (non-zero) and all-inclusive sleep averages.
+type SleepStats struct {
+	Pure time.Duration // average of only non-zero sleeps
+	All  time.Duration // average including zero-sleep (busy) cycles
+}
+
+// AvgSleep returns the running average sleep duration (all cycles, including zero).
 func (p *Pacer) AvgSleep() time.Duration {
 	if p.sleepCount == 0 {
 		return 0
 	}
 	return p.sleepSum / time.Duration(p.sleepCount)
+}
+
+// SleepAvgs returns both the pure (non-zero only) and all-inclusive sleep averages.
+func (p *Pacer) SleepAvgs() SleepStats {
+	var s SleepStats
+	if p.pureSleepCount > 0 {
+		s.Pure = p.pureSleepSum / time.Duration(p.pureSleepCount)
+	}
+	if p.sleepCount > 0 {
+		s.All = p.sleepSum / time.Duration(p.sleepCount)
+	}
+	return s
 }

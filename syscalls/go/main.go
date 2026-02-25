@@ -154,13 +154,13 @@ func parsePercentiles(s string) ([]float64, error) {
 
 // runReader polls ring buffers via Group round-robin, batches events,
 // and flushes to state. Single goroutine — no new contention points.
-func runReader(rings *ringpoll.Group, pacer *ringpoll.Pacer, maxBatch int, state *State) {
+func runReader(rings *ringpoll.Group, pacer *ringpoll.Pacer, maxBatch int, state *State, infra *infraSketches) {
 	var rec ringpoll.Record
 	eventSize := int(unsafe.Sizeof(bpfLatencyEvent{}))
 	pending := make([]pendingEvent, 0, maxBatch)
 
 	for !rings.Closed() {
-		pendingBytes, cap := rings.FillBytes() // pre-drain snapshot
+		maxPending, avgPending, capacity := rings.FillDetail() // pre-drain snapshot
 		for rings.Poll(&rec) {
 			if len(rec.RawSample) < eventSize {
 				continue
@@ -183,7 +183,8 @@ func runReader(rings *ringpoll.Group, pacer *ringpoll.Pacer, maxBatch int, state
 			pending = pending[:0]
 		}
 		rings.Commit()
-		pacer.Pace(pendingBytes, cap)
+		sleepDur := pacer.Pace(maxPending, capacity)
+		infra.Record(maxPending, avgPending, capacity, sleepDur.Nanoseconds())
 	}
 	if len(pending) > 0 {
 		state.RecordBatch(pending)
@@ -191,14 +192,20 @@ func runReader(rings *ringpoll.Group, pacer *ringpoll.Pacer, maxBatch int, state
 	}
 }
 
-func snapshotRingStats(rings *ringpoll.Group, acc *ringAvg) *ringStats {
+func snapshotRingStats(rings *ringpoll.Group, acc *ringOccupancy) *ringStats {
 	g := rings.Snapshot()
 	acc.add(g.Pending)
 	return &ringStats{
 		avg: acc.avg(),
+		p99: acc.p99(),
 		max: g.MaxPending,
 		cap: g.Cap,
 	}
+}
+
+func snapshotTotalEvents(rings *ringpoll.Group, drops dropCounts) uint64 {
+	g := rings.Snapshot()
+	return uint64(g.EventSum) + drops.ringFull + drops.miss
 }
 
 func main() {
@@ -366,11 +373,12 @@ func run() error {
 
 	// Reader goroutine: polls ring buffers, batches events, flushes under single Lock
 	pacer := ringpoll.NewPacer(*targetFill, *minSleep, *maxSleep)
+	infra := newInfraSketches(0.01)
 	var readerDone sync.WaitGroup
 	readerDone.Add(1)
 	go func() {
 		defer readerDone.Done()
-		runReader(rings, pacer, *batchSize, state)
+		runReader(rings, pacer, *batchSize, state, infra)
 	}()
 
 	// Input goroutine for interactive mode
@@ -381,7 +389,7 @@ func run() error {
 
 	// Display goroutine
 	displayTicker := time.NewTicker(*displayRefreshInterval)
-	var ringAcc ringAvg
+	ringAcc := newRingOccupancy(0.01)
 	go func() {
 		defer displayTicker.Stop()
 		for {
@@ -403,11 +411,14 @@ func run() error {
 				}
 			}
 		render:
+			drops := readCounters(objs.Counters)
 			display.render(state, frameMetrics{
-				drops:     readCounters(objs.Counters),
-				ringStats: snapshotRingStats(rings, &ringAcc),
-				cpuTime:   getCPUTime(),
-				avgSleep:  pacer.AvgSleep(),
+				drops:       drops,
+				ringStats:   snapshotRingStats(rings, ringAcc),
+				cpuTime:     getCPUTime(),
+				sleepStats:  pacer.SleepAvgs(),
+				totalEvents: snapshotTotalEvents(rings, drops),
+				infra:       infra,
 			})
 		}
 	}()
@@ -423,11 +434,14 @@ func run() error {
 	<-done
 	readerDone.Wait()
 
+	finalDrops := readCounters(objs.Counters)
 	display.render(state, frameMetrics{
-		drops:     readCounters(objs.Counters),
-		ringStats: snapshotRingStats(rings, &ringAcc),
-		cpuTime:   getCPUTime(),
-		avgSleep:  pacer.AvgSleep(),
+		drops:       finalDrops,
+		ringStats:   snapshotRingStats(rings, ringAcc),
+		cpuTime:     getCPUTime(),
+		sleepStats:  pacer.SleepAvgs(),
+		totalEvents: snapshotTotalEvents(rings, finalDrops),
+		infra:       infra,
 	})
 	return nil
 }

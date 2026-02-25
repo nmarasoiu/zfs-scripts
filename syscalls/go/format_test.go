@@ -96,6 +96,27 @@ func TestFormatDuration(t *testing.T) {
 	}
 }
 
+func TestFormatFraction(t *testing.T) {
+	tests := []struct {
+		num, denom uint64
+		want       string
+	}{
+		{0, 1000, "0"},
+		{5, 0, "-"},
+		{1, 1000000000000, "1e-12"},
+		{15, 10000000000, "1e-9"},   // 1.5e-9 rounds to 1e-9 with %.0e
+		{1, 1000, "1e-3"},
+		{1, 2, "5e-1"},
+		{5, 5, "1"},
+	}
+	for _, tt := range tests {
+		got := formatFraction(tt.num, tt.denom)
+		if got != tt.want {
+			t.Errorf("formatFraction(%d, %d) = %q, want %q", tt.num, tt.denom, got, tt.want)
+		}
+	}
+}
+
 func TestFormatRate(t *testing.T) {
 	tests := []struct {
 		count uint64
@@ -172,6 +193,29 @@ func TestDisplayWidth(t *testing.T) {
 		got := displayWidth(tt.s)
 		if got != tt.want {
 			t.Errorf("displayWidth(%q) = %d, want %d", tt.s, got, tt.want)
+		}
+	}
+}
+
+func TestFormatPercentPadded(t *testing.T) {
+	tests := []struct {
+		pct  float64
+		want string
+	}{
+		{0.0, "   0.00%"},
+		{0.03, "   0.03%"},
+		{1.23, "   1.23%"},
+		{9.99, "   9.99%"},
+		{12.3, "   12.3%"},
+		{100.0, "  100.0%"},
+	}
+	for _, tt := range tests {
+		got := formatPercentPadded(tt.pct)
+		if got != tt.want {
+			t.Errorf("formatPercentPadded(%g) = %q, want %q", tt.pct, got, tt.want)
+		}
+		if w := displayWidth(got); w != 8 {
+			t.Errorf("formatPercentPadded(%g) display width = %d, want 8", tt.pct, w)
 		}
 	}
 }

@@ -73,12 +73,14 @@ func TestSketchPercentiles_Monotonic(t *testing.T) {
 	for i := int64(1); i <= 1000; i++ {
 		sk.Add(float64(i))
 	}
-	d := &Display{quantiles: []float64{0.25, 0.50, 0.75, 0.90, 0.99, 0.999}}
-	pcts := d.sketchPercentiles(sk)
-	for i := 1; i < len(pcts); i++ {
-		if pcts[i-1] > pcts[i] {
-			t.Errorf("percentiles not monotonic at index %d: %d > %d", i, pcts[i-1], pcts[i])
+	quantiles := []float64{0.25, 0.50, 0.75, 0.90, 0.99, 0.999}
+	var prev float64
+	for i, q := range quantiles {
+		v, _ := sk.GetValueAtQuantile(q)
+		if v < prev {
+			t.Errorf("percentiles not monotonic at index %d: %.0f > %.0f", i, prev, v)
 		}
+		prev = v
 	}
 }
 
