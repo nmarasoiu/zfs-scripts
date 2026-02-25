@@ -87,22 +87,44 @@ fn format_bytes(b: u64) -> String {
     }
 }
 
+fn format_rps(val: f64) -> String {
+    if val < 1.0 {
+        format!("{:.2} req/s", val)
+    } else {
+        format!("{:.0} req/s", val)
+    }
+}
+
 fn print_sketch(name: &str, sketch: &DDSketch, error_bound: f64, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    print_sketch_inner(name, sketch, error_bound, format_ms, f)
+}
+
+fn print_sketch_rps(name: &str, sketch: &DDSketch, error_bound: f64, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    print_sketch_inner(name, sketch, error_bound, format_rps, f)
+}
+
+fn print_sketch_inner(
+    name: &str,
+    sketch: &DDSketch,
+    error_bound: f64,
+    fmt_val: fn(f64) -> String,
+    f: &mut fmt::Formatter<'_>,
+) -> fmt::Result {
     writeln!(f, "  {} (DDSketch, \u{03b1}={}):", name, error_bound)?;
     for &(q, label) in QUANTILES {
         if let Some(val) = sketch.quantile(q).ok().flatten() {
-            writeln!(f, "    {:<6} {}", label, format_ms(val))?;
+            writeln!(f, "    {:<6} {}", label, fmt_val(val))?;
         }
     }
     if let Some(min) = sketch.min() {
-        writeln!(f, "    {:<6} {}", "min", format_ms(min))?;
+        writeln!(f, "    {:<6} {}", "min", fmt_val(min))?;
     }
     if let Some(max) = sketch.max() {
-        writeln!(f, "    {:<6} {}", "max", format_ms(max))?;
+        writeln!(f, "    {:<6} {}", "max", fmt_val(max))?;
     }
     if sketch.count() > 0 {
         let mean = sketch.sum().unwrap_or(0.0) / sketch.count() as f64;
-        writeln!(f, "    {:<6} {}", "mean", format_ms(mean))?;
+        writeln!(f, "    {:<6} {}", "mean", fmt_val(mean))?;
     }
     Ok(())
 }
@@ -116,6 +138,7 @@ pub struct Report {
     pub url: String,
     pub connections: usize,
     pub streams: usize,
+    pub throughput: Option<DDSketch>,
 }
 
 impl fmt::Display for Report {
@@ -141,6 +164,12 @@ impl fmt::Display for Report {
             format_bytes(bps as u64),
         )?;
         writeln!(f)?;
+        if let Some(ref tp) = self.throughput {
+            if tp.count() > 0 {
+                print_sketch_rps("Throughput (1s buckets, trimmed)", tp, self.error_bound, f)?;
+                writeln!(f)?;
+            }
+        }
         print_sketch("TTFB Latency", &self.sketches.ttfb, self.error_bound, f)?;
         writeln!(f)?;
         print_sketch("Full Response Latency", &self.sketches.full, self.error_bound, f)?;

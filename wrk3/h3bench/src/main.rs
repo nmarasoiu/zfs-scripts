@@ -134,6 +134,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Request counter for count-based mode
     let request_limit = args.requests.map(|n| Arc::new(AtomicU64::new(n)));
 
+    // Global completed-request counter for throughput sampling
+    let completed = Arc::new(AtomicU64::new(0));
+
     let start = Instant::now();
 
     // Print header
@@ -171,6 +174,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             error_bound: args.error_bound,
             stop: stop.clone(),
             request_limit: request_limit.clone(),
+            completed: completed.clone(),
         };
 
         handles.push(tokio::spawn(worker::run_worker(cfg)));
@@ -185,6 +189,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
+    // Throughput ticker: sample completed requests every 1s
+    let ticker_handle = {
+        let stop = stop.clone();
+        let completed = completed.clone();
+        let error_bound = args.error_bound;
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(1));
+            interval.tick().await; // first tick is immediate, skip it
+            let mut prev = completed.load(Ordering::Relaxed);
+            let mut samples: Vec<f64> = Vec::new();
+            loop {
+                interval.tick().await;
+                let cur = completed.load(Ordering::Relaxed);
+                samples.push((cur - prev) as f64);
+                prev = cur;
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
+            }
+            // Trim first and last second (partial ramp-up/drain)
+            if samples.len() > 2 {
+                samples = samples[1..samples.len() - 1].to_vec();
+            } else {
+                samples.clear();
+            }
+            if samples.is_empty() {
+                return None;
+            }
+            let config = sketches_ddsketch::Config::new(error_bound, 2048, 1.0e-9);
+            let mut sketch = sketches_ddsketch::DDSketch::new(config);
+            for s in &samples {
+                sketch.add(*s);
+            }
+            Some(sketch)
+        })
+    };
+
     // Collect results
     let mut merged_sketches = LatencySketches::new(args.error_bound);
     let mut merged_counters = Counters::default();
@@ -194,6 +235,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         merged_sketches.merge(&result.sketches);
         merged_counters.merge(&result.counters);
     }
+
+    let throughput_sketch = ticker_handle.await?;
 
     let elapsed = start.elapsed();
 
@@ -205,6 +248,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         url: args.url,
         connections: args.connections,
         streams: args.streams,
+        throughput: throughput_sketch,
     };
 
     println!("{}", report);

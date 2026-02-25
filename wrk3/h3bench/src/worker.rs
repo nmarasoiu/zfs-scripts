@@ -20,6 +20,8 @@ pub struct WorkerConfig {
     pub stop: Arc<AtomicBool>,
     /// If set, global request counter for count-based mode.
     pub request_limit: Option<Arc<AtomicU64>>,
+    /// Global completed-request counter for throughput sampling.
+    pub completed: Arc<AtomicU64>,
 }
 
 pub async fn run_worker(cfg: WorkerConfig) -> WorkerResult {
@@ -75,6 +77,7 @@ pub async fn run_worker(cfg: WorkerConfig) -> WorkerResult {
         let body = cfg.body.clone();
         let stop = cfg.stop.clone();
         let limit = cfg.request_limit.clone();
+        let completed = cfg.completed.clone();
         let tx = tx.clone();
 
         tokio::spawn(async move {
@@ -105,6 +108,7 @@ pub async fn run_worker(cfg: WorkerConfig) -> WorkerResult {
                     }
                 };
 
+                completed.fetch_add(1, Ordering::Relaxed);
                 match result {
                     Ok(result) => {
                         let _ = tx.send(StreamResult::Ok {
