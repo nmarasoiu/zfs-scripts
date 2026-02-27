@@ -431,10 +431,10 @@ func main() {
 		} else if pct > 50 {
 			barColor = fgYellow
 		}
-		fmt.Fprintf(&b, "  Swap:  %7s / %-7s  %s%s%s  %4.1f%%  %s(disk-only)%s\n",
+		fmt.Fprintf(&b, "  Swap:%7s / %-7s  %s%s%s  %4.1f%%  %s(disk-only)%s\n",
 			fmtKB(disk), fmtKB(mem.swapTotal),
 			barColor, makeBar(pct/100, barWidth), rst, pct, dim, rst)
-		fmt.Fprintf(&b, "  %szswap:%s  %-8s %scached:%s %-8s %sRAM avail:%s %s\n\n",
+		fmt.Fprintf(&b, "  %szswap:%s  %-8s %s\n  cached:%s %-8s %sRAM avail:%s %s\n\n",
 			dim, rst, fmtKB(mem.zswapped),
 			dim, rst, fmtKB(mem.swapCached),
 			dim, rst, fmtKB(mem.memAvail))
