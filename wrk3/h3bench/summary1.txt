@@ -1,0 +1,33 @@
+ 4.2MB single binary with LTO. Here's a summary of what was built:
+
+  h3bench — HTTP/3 Load Generator
+
+  5 files, compiles clean, tested against Cloudflare:
+
+  ┌───────────────┬──────────────────────────────────────────────────────────────────────────────────┐
+  │     File      │                                     Purpose                                      │
+  ├───────────────┼──────────────────────────────────────────────────────────────────────────────────┤
+  │ src/main.rs   │ CLI (clap derive), orchestration, report printing                                │
+  ├───────────────┼──────────────────────────────────────────────────────────────────────────────────┤
+  │ src/tls.rs    │ rustls ClientConfig with ALPN h3, --insecure mode                                │
+  ├───────────────┼──────────────────────────────────────────────────────────────────────────────────┤
+  │ src/client.rs │ QUIC connect via quinn, h3 request/response cycle with TTFB + full latency       │
+  ├───────────────┼──────────────────────────────────────────────────────────────────────────────────┤
+  │ src/worker.rs │ Worker task: owns 1 QUIC connection, spawns M stream tasks, collects via channel │
+  ├───────────────┼──────────────────────────────────────────────────────────────────────────────────┤
+  │ src/sketch.rs │ DDSketch wrapper (TTFB + full), merge, formatted report output                   │
+  └───────────────┴──────────────────────────────────────────────────────────────────────────────────┘
+
+  Key design points:
+  - Each connection is an independent worker task with its own DDSketch pair
+  - Stream tasks race requests against the stop signal via tokio::select! for clean shutdown
+  - h3 driver runs in background task, aborted on stop
+  - Count-based (-n) and duration-based (-d) modes both work
+  - Non-h3 servers fail fast with clear error
+
+  Tested:
+  - cloudflare.com at 1c/10s: ~686 req/s, p50=13ms
+  - cloudflare.com at 4c/50s: ~7,761 req/s, p50=18ms
+  - Count mode (-n 20): exact count, fast exit
+  - Non-h3 server (example.com): clean failure
+
