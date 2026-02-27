@@ -9,6 +9,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"psiparse"
 )
 
 var (
@@ -18,7 +20,7 @@ var (
 
 type psiReading struct {
 	name       string
-	some, full pressure
+	some, full psiparse.Pressure
 }
 
 func main() {
@@ -89,7 +91,7 @@ func main() {
 	{
 		var buf [512]byte
 		for j, pf := range psiFiles {
-			some, full := readPressure(pf.fd, buf[:])
+			some, full := psiparse.Read(pf.fd, buf[:])
 			psiReadings[j] = psiReading{pf.name, some, full}
 		}
 		load = readLoad(loadFd, buf[:])
@@ -136,7 +138,7 @@ func main() {
 
 			mu.Lock()
 			for j, pf := range psiFiles {
-				some, full := readPressure(pf.fd, buf[:])
+				some, full := psiparse.Read(pf.fd, buf[:])
 				psiReadings[j] = psiReading{pf.name, some, full}
 			}
 			load = readLoad(loadFd, buf[:])

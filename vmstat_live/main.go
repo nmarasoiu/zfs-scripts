@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/DataDog/sketches-go/ddsketch"
+	"psiparse"
 )
 
 const (
@@ -195,6 +196,8 @@ func fmtRate(kbps float64) string {
 	}
 }
 
+func fmtPSI(v float64) string { return fmt.Sprintf("%.2f%%", v) }
+
 func makeBar(frac float64, w int) string {
 	if frac < 0 {
 		frac = 0
@@ -320,7 +323,17 @@ func main() {
 
 	siSketch, _ := ddsketch.NewDefaultDDSketch(alpha)
 	soSketch, _ := ddsketch.NewDefaultDDSketch(alpha)
+	psiSomeSketch, _ := ddsketch.NewDefaultDDSketch(alpha)
+	psiFullSketch, _ := ddsketch.NewDefaultDDSketch(alpha)
 	sampleCount := 0
+
+	psiFd, err := syscall.Open("/proc/pressure/memory", syscall.O_RDONLY, 0)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "open /proc/pressure/memory: %v\n", err)
+		os.Exit(1)
+	}
+	defer syscall.Close(psiFd)
+	var psiBuf [512]byte
 
 	var (
 		prevIn, prevOut uint64
@@ -358,6 +371,10 @@ func main() {
 
 		siSketch.Add(siRate)
 		soSketch.Add(soRate)
+
+		psiSome, psiFull := psiparse.Read(psiFd, psiBuf[:])
+		psiSomeSketch.Add(psiSome.Avg10)
+		psiFullSketch.Add(psiFull.Avg10)
 
 		siHist = append(siHist, siRate)
 		soHist = append(soHist, soRate)
@@ -414,13 +431,23 @@ func main() {
 		// DDSketch percentiles
 		fmt.Fprintf(&b, "  %sDDSketch%s %s(%d samples, %s):%s\n",
 			bold, rst, dim, sampleCount, fmtDuration(sampleCount), rst)
-		fmt.Fprintf(&b, "  %14s %10s\n", "p50", "p90")
+		fmt.Fprintf(&b, "            %10s %10s %10s\n", "p50", "p90", "p99")
 		siP50, _ := getQuantile(siSketch, 0.50)
 		siP90, _ := getQuantile(siSketch, 0.90)
+		siP99, _ := getQuantile(siSketch, 0.99)
 		soP50, _ := getQuantile(soSketch, 0.50)
 		soP90, _ := getQuantile(soSketch, 0.90)
-		fmt.Fprintf(&b, "  %ssi%s %9s %10s\n", bold, rst, fmtRate(siP50), fmtRate(siP90))
-		fmt.Fprintf(&b, "  %sso%s %9s %10s\n\n", bold, rst, fmtRate(soP50), fmtRate(soP90))
+		soP99, _ := getQuantile(soSketch, 0.99)
+		fmt.Fprintf(&b, "  %ssi%s       %10s %10s %10s\n", bold, rst, fmtRate(siP50), fmtRate(siP90), fmtRate(siP99))
+		fmt.Fprintf(&b, "  %sso%s       %10s %10s %10s\n", bold, rst, fmtRate(soP50), fmtRate(soP90), fmtRate(soP99))
+		psP50, _ := getQuantile(psiSomeSketch, 0.50)
+		psP90, _ := getQuantile(psiSomeSketch, 0.90)
+		psP99, _ := getQuantile(psiSomeSketch, 0.99)
+		pfP50, _ := getQuantile(psiFullSketch, 0.50)
+		pfP90, _ := getQuantile(psiFullSketch, 0.90)
+		pfP99, _ := getQuantile(psiFullSketch, 0.99)
+		fmt.Fprintf(&b, "  %spsi some%s %10s %10s %10s\n", bold, rst, fmtPSI(psP50), fmtPSI(psP90), fmtPSI(psP99))
+		fmt.Fprintf(&b, "  %spsi full%s %10s %10s %10s\n\n", bold, rst, fmtPSI(pfP50), fmtPSI(pfP90), fmtPSI(pfP99))
 
 		// sparkline history
 		fmt.Fprintf(&b, "  %sHistory%s %s(%ds, peak %s):%s\n",
