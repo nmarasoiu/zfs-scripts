@@ -111,6 +111,7 @@ type memStats struct {
 	swapTotal  uint64
 	swapFree   uint64
 	swapCached uint64
+	zswapped   uint64 // Zswapped: uncompressed size living in zswap pool
 }
 
 func (m memStats) swapUsed() uint64 {
@@ -118,6 +119,18 @@ func (m memStats) swapUsed() uint64 {
 		return 0
 	}
 	return m.swapTotal - m.swapFree
+}
+
+// diskOnly returns swap data that is on disk and NOT in RAM.
+// This is the "hard demand" — it excludes zswap (compressed in RAM)
+// and SwapCached (on disk but clean copy already in page cache).
+func (m memStats) diskOnly() uint64 {
+	used := m.swapUsed()
+	sub := m.swapCached + m.zswapped
+	if sub >= used {
+		return 0
+	}
+	return used - sub
 }
 
 func readMeminfo() memStats {
@@ -143,6 +156,8 @@ func readMeminfo() memStats {
 			m.swapFree = v
 		case "SwapCached:":
 			m.swapCached = v
+		case "Zswapped:":
+			m.zswapped = v
 		}
 	}
 	return m
@@ -252,11 +267,11 @@ func peakOf(s []float64) float64 {
 
 // --------------- pressure assessment ---------------
 
-func assessPressure(si, so float64, swapUsed, swapTotal uint64) (string, string) {
-	if swapTotal == 0 {
+func assessPressure(si, so float64, mem memStats) (string, string) {
+	if mem.swapTotal == 0 {
 		return "NO SWAP — none configured", fgCyan
 	}
-	if swapUsed == 0 && si == 0 && so == 0 {
+	if mem.swapUsed() == 0 && si == 0 && so == 0 {
 		return "IDLE — no swap in use", fgGreen
 	}
 
@@ -274,11 +289,15 @@ func assessPressure(si, so float64, swapUsed, swapTotal uint64) (string, string)
 	case si > 0 || so > 0:
 		return "LIGHT I/O — minor swap activity", fgYellow
 	default:
-		pct := float64(swapUsed) / float64(swapTotal) * 100
-		if pct < 5 {
-			return "PAST PRESSURE — negligible swap residue, system fine", fgGreen
+		disk := mem.diskOnly()
+		if disk == 0 {
+			return "PAST PRESSURE — swap slots allocated but all data in RAM", fgGreen
 		}
-		return "PAST PRESSURE — swap in use but idle, no active paging", fgGreen
+		pct := float64(disk) / float64(mem.swapTotal) * 100
+		if pct < 5 {
+			return "PAST PRESSURE — negligible disk swap residue", fgGreen
+		}
+		return "PAST PRESSURE — swap on disk but idle, no active paging", fgGreen
 	}
 }
 
@@ -378,7 +397,7 @@ func main() {
 
 		siHist = append(siHist, siRate)
 		soHist = append(soHist, soRate)
-		swpdHist = append(swpdHist, mem.swapUsed())
+		swpdHist = append(swpdHist, mem.diskOnly())
 		if len(siHist) > histLen {
 			siHist = siHist[len(siHist)-histLen:]
 			soHist = soHist[len(soHist)-histLen:]
@@ -400,11 +419,11 @@ func main() {
 		fmt.Fprintf(&b, "\n  %s%sSwap Pressure Monitor%s  %s1s interval | ^C quit%s\n\n",
 			bold, fgCyan, rst, dim, rst)
 
-		// swap usage bar
-		used := mem.swapUsed()
+		// swap usage — disk-only is the primary metric
+		disk := mem.diskOnly()
 		pct := 0.0
 		if mem.swapTotal > 0 {
-			pct = float64(used) / float64(mem.swapTotal) * 100
+			pct = float64(disk) / float64(mem.swapTotal) * 100
 		}
 		barColor := fgGreen
 		if pct > 80 {
@@ -412,14 +431,16 @@ func main() {
 		} else if pct > 50 {
 			barColor = fgYellow
 		}
-		fmt.Fprintf(&b, "  Swap:  %7s / %-7s  %s%s%s  %4.1f%%\n",
-			fmtKB(used), fmtKB(mem.swapTotal),
-			barColor, makeBar(pct/100, barWidth), rst, pct)
-		fmt.Fprintf(&b, "  RAM avail: %-8s Swap cached: %s\n\n",
-			fmtKB(mem.memAvail), fmtKB(mem.swapCached))
+		fmt.Fprintf(&b, "  Swap:  %7s / %-7s  %s%s%s  %4.1f%%  %s(disk-only)%s\n",
+			fmtKB(disk), fmtKB(mem.swapTotal),
+			barColor, makeBar(pct/100, barWidth), rst, pct, dim, rst)
+		fmt.Fprintf(&b, "  %szswap:%s  %-8s %scached:%s %-8s %sRAM avail:%s %s\n\n",
+			dim, rst, fmtKB(mem.zswapped),
+			dim, rst, fmtKB(mem.swapCached),
+			dim, rst, fmtKB(mem.memAvail))
 
 		// status verdict
-		status, color := assessPressure(siRate, soRate, used, mem.swapTotal)
+		status, color := assessPressure(siRate, soRate, mem)
 		fmt.Fprintf(&b, "  %s●  %s%s\n\n", color, status, rst)
 
 		// current rates
