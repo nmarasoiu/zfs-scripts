@@ -202,12 +202,33 @@ func fmtKB(kb uint64) string {
 
 func fmtRate(kbps float64) string {
 	switch {
-	case kbps >= float64(uint64(1)<<20):
-		return fmt.Sprintf("%.1f G/s", kbps/float64(uint64(1)<<20))
-	case kbps >= float64(uint64(1)<<10):
-		return fmt.Sprintf("%.1f M/s", kbps/float64(uint64(1)<<10))
+	case kbps == 0:
+		return "0 B/s"
+	case kbps >= 1<<20:
+		return fmt.Sprintf("%.2f GB/s", kbps/float64(uint64(1)<<20))
+	case kbps >= 1<<10:
+		v := kbps / float64(uint64(1)<<10)
+		if v >= 100 {
+			return fmt.Sprintf("%.0f MB/s", v)
+		}
+		if v >= 10 {
+			return fmt.Sprintf("%.1f MB/s", v)
+		}
+		return fmt.Sprintf("%.2f MB/s", v)
+	case kbps >= 1:
+		if kbps >= 100 {
+			return fmt.Sprintf("%.0f KB/s", kbps)
+		}
+		if kbps >= 10 {
+			return fmt.Sprintf("%.1f KB/s", kbps)
+		}
+		return fmt.Sprintf("%.2f KB/s", kbps)
 	default:
-		return fmt.Sprintf("%.0f K/s", kbps)
+		bps := kbps * 1024
+		if bps >= 0.01 {
+			return fmt.Sprintf("%.2f B/s", bps)
+		}
+		return fmt.Sprintf("%.0e B/s", bps)
 	}
 }
 
@@ -345,6 +366,7 @@ func main() {
 	psiSomeSketch, _ := ddsketch.NewDefaultDDSketch(alpha)
 	psiFullSketch, _ := ddsketch.NewDefaultDDSketch(alpha)
 	sampleCount := 0
+	var siSum, soSum, psiSomeSum, psiFullSum float64
 
 	psiFd, err := syscall.Open("/proc/pressure/memory", syscall.O_RDONLY, 0)
 	if err != nil {
@@ -390,10 +412,14 @@ func main() {
 
 		siSketch.Add(siRate)
 		soSketch.Add(soRate)
+		siSum += siRate
+		soSum += soRate
 
 		psiSome, psiFull := psiparse.Read(psiFd, psiBuf[:])
 		psiSomeSketch.Add(psiSome.Avg10)
 		psiFullSketch.Add(psiFull.Avg10)
+		psiSomeSum += psiSome.Avg10
+		psiFullSum += psiFull.Avg10
 
 		siHist = append(siHist, siRate)
 		soHist = append(soHist, soRate)
@@ -449,26 +475,27 @@ func main() {
 		fmt.Fprintf(&b, "  %sso%s (to swap):    %9s  %s%s%s\n\n",
 			bold, rst, fmtRate(soRate), fgRed, makeBar(soRate/peak, barWidth), rst)
 
-		// DDSketch percentiles
+		// DDSketch percentiles + avg
+		n := float64(sampleCount)
 		fmt.Fprintf(&b, "  %sDDSketch%s %s(%d samples, %s):%s\n",
 			bold, rst, dim, sampleCount, fmtDuration(sampleCount), rst)
-		fmt.Fprintf(&b, "            %10s %10s %10s\n", "p50", "p90", "p99")
+		fmt.Fprintf(&b, "            %10s %10s %10s %10s\n", "avg", "p50", "p90", "p99")
 		siP50, _ := getQuantile(siSketch, 0.50)
 		siP90, _ := getQuantile(siSketch, 0.90)
 		siP99, _ := getQuantile(siSketch, 0.99)
 		soP50, _ := getQuantile(soSketch, 0.50)
 		soP90, _ := getQuantile(soSketch, 0.90)
 		soP99, _ := getQuantile(soSketch, 0.99)
-		fmt.Fprintf(&b, "  %ssi%s       %10s %10s %10s\n", bold, rst, fmtRate(siP50), fmtRate(siP90), fmtRate(siP99))
-		fmt.Fprintf(&b, "  %sso%s       %10s %10s %10s\n", bold, rst, fmtRate(soP50), fmtRate(soP90), fmtRate(soP99))
+		fmt.Fprintf(&b, "  %ssi%s       %10s %10s %10s %10s\n", bold, rst, fmtRate(siSum/n), fmtRate(siP50), fmtRate(siP90), fmtRate(siP99))
+		fmt.Fprintf(&b, "  %sso%s       %10s %10s %10s %10s\n", bold, rst, fmtRate(soSum/n), fmtRate(soP50), fmtRate(soP90), fmtRate(soP99))
 		psP50, _ := getQuantile(psiSomeSketch, 0.50)
 		psP90, _ := getQuantile(psiSomeSketch, 0.90)
 		psP99, _ := getQuantile(psiSomeSketch, 0.99)
 		pfP50, _ := getQuantile(psiFullSketch, 0.50)
 		pfP90, _ := getQuantile(psiFullSketch, 0.90)
 		pfP99, _ := getQuantile(psiFullSketch, 0.99)
-		fmt.Fprintf(&b, "  %spsi some%s %10s %10s %10s\n", bold, rst, fmtPSI(psP50), fmtPSI(psP90), fmtPSI(psP99))
-		fmt.Fprintf(&b, "  %spsi full%s %10s %10s %10s\n\n", bold, rst, fmtPSI(pfP50), fmtPSI(pfP90), fmtPSI(pfP99))
+		fmt.Fprintf(&b, "  %spsi some%s %10s %10s %10s %10s\n", bold, rst, fmtPSI(psiSomeSum/n), fmtPSI(psP50), fmtPSI(psP90), fmtPSI(psP99))
+		fmt.Fprintf(&b, "  %spsi full%s %10s %10s %10s %10s\n\n", bold, rst, fmtPSI(psiFullSum/n), fmtPSI(pfP50), fmtPSI(pfP90), fmtPSI(pfP99))
 
 		// sparkline history
 		fmt.Fprintf(&b, "  %sHistory%s %s(%ds, peak %s):%s\n",
